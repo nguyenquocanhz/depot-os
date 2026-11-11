@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Depot OS — icon Zalo tự vẽ (WhiteSur/Papirus không có): ô xanh bo góc, bong bóng chat trắng, chữ Zalo -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#0068ff"/>
+  <path d="M64 28c-24 0-42 14-42 32 0 10 5.6 18.8 14.4 24.6L33 100l17.4-8.6c4.3 1 8.8 1.6 13.6 1.6 24 0 42-14 42-32S88 28 64 28z" fill="#fff"/>
+  <text x="64" y="70" text-anchor="middle" font-family="Inter, Noto Sans, sans-serif" font-size="26" font-weight="800" fill="#0068ff">Zalo</text>
+</svg>

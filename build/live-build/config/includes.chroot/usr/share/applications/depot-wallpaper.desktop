@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hình nền
+Name[en]=Wallpaper
+Comment=Album hình nền Depot và ảnh của bạn, bấm là đổi ngay
+Comment[en]=Depot wallpaper album and your own pictures
+Exec=depot-wallpaper
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-PersonalSettings;DesktopSettings;
+Keywords=hình nền;ảnh nền;album;wallpaper;background;desktop;

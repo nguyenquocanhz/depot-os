@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Directory
+Name=Hệ thống
+Name[en]=System
+Comment=Ngôn ngữ, ngày giờ, phiên bản, khởi động, trợ năng
+Icon=preferences-system

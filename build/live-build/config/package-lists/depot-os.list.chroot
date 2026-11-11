@@ -1,0 +1,196 @@
+# Depot OS — danh sách gói (Debian 13 trixie, amd64)
+
+# --- Kernel & firmware
+linux-image-amd64
+intel-microcode
+# firmware: ISO đã có toàn bộ non-free-firmware (live-build tự cài, ~850 MB). Phần dưới để DÒ driver:
+# isenkram-cli: map phần cứng -> gói Debian, tự tìm gói firmware còn thiếu (cần mạng)
+isenkram-cli
+# nvidia-detect: card NVIDIA nào hợp gói driver nào
+nvidia-detect
+# lsusb cho depot-drivers
+usbutils
+# pkexec: MỌI công cụ Depot cần root đều gọi qua nó (depot-drivers cài driver, DNS mã hoá, Chế độ pin, Ngôn ngữ và
+# ngày giờ). Trước v0.20 nó chỉ có mặt nhờ calamares-settings-debian kéo theo → bước "packages" của Calamares gỡ
+# calamares-settings-debian rồi autoremove --purge, pkexec bị gỡ luôn: máy ĐÃ CÀI bấm "Cài đề xuất" không có gì xảy ra.
+# Ghi tên ở đây = đánh dấu cài tay, autoremove không đụng tới.
+pkexec
+# mokutil: máy bật Secure Boot phải đăng ký khoá DKMS thì driver Broadcom/NVIDIA/r8168 mới nạp được (depot-drivers)
+mokutil
+# đưa USB Wi-Fi/4G khỏi chế độ "ổ đĩa chứa driver Windows" (ZeroCD) — đã có nhờ gói khác kéo theo, ghi rõ để không mất
+usb-modeswitch
+# depot-bootdiag: main/BIOS/khe RAM (dmidecode), chipset (lspci) — trước đây chỉ có nhờ gói khác kéo theo
+dmidecode
+pciutils
+
+# --- GPU Sandy Bridge (HD 3000)
+xserver-xorg-video-intel
+i965-va-driver
+vainfo
+mesa-utils
+
+# --- Desktop XFCE + plugin
+xfce4
+xfce4-power-manager
+xfce4-whiskermenu-plugin
+xfce4-docklike-plugin
+xfce4-pulseaudio-plugin
+# Terminal: ISO trước chỉ có xterm (Ctrl+Alt+T / Super+Enter gọi xfce4-terminal không có). Giao diện: dotfiles
+# xfce4-terminal.xml; lời chào fastfetch logo Bóng ma; font JetBrains Mono (có tiếng Việt)
+xfce4-terminal
+fastfetch
+fonts-jetbrains-mono
+# CPU · RAM · tốc độ mạng trên thanh menu kiểu macOS (genmon chạy depot-statusbar)
+xfce4-genmon-plugin
+# Bộ nhớ tạm (Clipboard Manager): lịch sử sao chép, Win+V (depot-clipboard lo autostart + mặc định)
+xfce4-clipman
+xfce4-screenshooter
+thunar-archive-plugin
+xarchiver
+mousepad
+xdg-user-dirs
+# tạo lối tắt Tải về, Tài liệu, Ảnh… ở thanh bên Thunar khi đăng nhập
+xdg-user-dirs-gtk
+xdg-desktop-portal-gtk
+
+# --- Display manager
+lightdm
+lightdm-gtk-greeter
+
+# --- Compositor & giao diện
+picom
+arc-theme
+papirus-icon-theme
+fonts-inter
+fonts-noto-core
+fonts-noto-ui-core
+fonts-noto-color-emoji
+
+# --- Âm thanh
+pipewire
+pipewire-pulse
+wireplumber
+pavucontrol
+# pipewire-audio kéo pipewire-alsa (app ALSA phát qua PipeWire) + libspa-0.2-bluetooth (thiếu nó tai nghe
+# Bluetooth bắt cặp được nhưng không ra tiếng)
+pipewire-audio
+# laptop đời mới (Intel ~2019+, nhiều máy AMD): loa/mic chạy qua Sound Open Firmware + cấu hình UCM, thiếu thì loa câm
+firmware-sof-signed
+alsa-ucm-conf
+# alsamixer, speaker-test; pactl cho phím âm lượng của phiên i3
+alsa-utils
+pulseaudio-utils
+# bộ âm "depot" (scripts/gen-sounds.py, phát bằng depot-sounds); app GTK phát âm hộp thoại qua canberra,
+# freedesktop là bộ dự phòng cho sự kiện depot không có
+sound-theme-freedesktop
+libcanberra-gtk3-module
+
+# --- Đồng bộ giờ (live-build không tự cài; thiếu nó đồng hồ lệch dần, HTTPS báo lỗi chứng chỉ)
+systemd-timesyncd
+# lệnh hwclock (Debian 13 tách khỏi util-linux): bước hwclock của Calamares và depot-rtc cần nó
+util-linux-extra
+
+# --- Mạng & bluetooth
+network-manager
+network-manager-gnome
+blueman
+# hộp thoại GTK3 cho depot-dns-proxy (DNS + proxy, XFCE không có chỗ chỉnh)
+yad
+# DNS mã hoá (DNS-over-TLS) trong "DNS và Proxy"; hook 0450 tắt sẵn, chỉ bật khi người dùng chọn
+systemd-resolved
+
+# --- Gõ tiếng Việt (Unikey cho Linux — đã xác minh có trong Debian 13)
+fcitx5
+fcitx5-unikey
+fcitx5-config-qt
+
+# --- Ứng dụng có sẵn trong ISO: chỉ đủ chạy thử máy (Firefox, mpv thử âm thanh/video; Chrome hook 1205, LocalSend hook 1200).
+# App khác (GNOME Software + Flathub, VLC, GParted, in ấn, Telegram, Claude, Discord, Antigravity) tải LÚC CÀI ĐẶT:
+# depot-install-apps, bước shellprocess@depotapps của Calamares.
+firefox-esr
+# Firefox tiếng Việt (ngôn ngữ khác: "Ngôn ngữ và ngày giờ" tự tải gói firefox-esr-l10n-* khi có mạng)
+firefox-esr-l10n-vi
+mpv
+
+# --- Tiện ích kiểu macOS
+xfce4-taskmanager
+conky-all
+# sensors / sensors-detect: máy bàn chạy "sudo sensors-detect --auto" để nạp chip Super I/O (quạt, điện áp)
+# cho bảng cảm biến của widget (depot-hwmon.lua); laptop thường tự có coretemp/acpitz/quạt
+lm-sensors
+# Chế độ pin (depot-power): bật tiết kiệm điện Wi-Fi ở mức Medium trở lên
+iw
+# depot-hwmon ("Cảm biến phần cứng", Python GTK3) — đã có sẵn nhờ blueman, ghi rõ để không mất khi bỏ blueman
+python3-gi
+gir1.2-gtk-3.0
+# depot-island (Dynamic Island) vẽ bằng cairo qua GTK — thiếu gói này thì sự kiện draw không có cairo.Context
+python3-gi-cairo
+geoclue-2.0
+curl
+# dep phụ cho LocalSend (.deb tải qua hook 1200)
+gir1.2-ayatanaappindicator3-0.1
+
+# --- Tích hợp hypervisor (chỉ hoạt động khi chạy trong VMware; bare metal tự nằm im)
+open-vm-tools
+open-vm-tools-desktop
+
+# --- WM i3 (phiên siêu nhẹ "Depot OS (i3)", chọn lúc đăng nhập)
+# polybar chưa có trong Debian 13 — dùng i3bar + i3status có sẵn
+i3
+i3status
+rofi
+dunst
+feh
+xbacklight
+playerctl
+
+# --- Bộ cài (Calamares — giao diện kiểu trình cài Windows)
+calamares
+calamares-settings-debian
+os-prober
+lxpolkit
+
+# --- Cài sẵn trong ISO cho depot-autoinstall (chạy được cả khi không có mạng):
+# VLC (Firefox, LocalSend đã có), OpenSSH cho truy cập từ xa + ufw. Trong phiên live ssh bị TẮT và ISO không mang
+# khoá máy chủ (hook 1300); máy cài bằng depot-autoinstall bật ssh khi SSH=yes.
+vlc
+openssh-server
+ufw
+
+# --- Boot đa chuẩn: UEFI (EFI + Secure Boot) và Legacy BIOS
+# Cả hai bộ grub-bin bắt buộc có trên live để Calamares cài đúng loại bootloader
+grub-pc-bin
+grub-efi-amd64-bin
+grub-efi-amd64-signed
+shim-signed
+dosfstools
+
+# --- Bảo mật: LUKS + TPM 2.0 auto-unlock (kiểu BitLocker; tự bỏ qua nếu máy không có TPM)
+tpm2-tools
+systemd-cryptsetup
+# vùng lưu mã hoá trên USB (depot-persist): đưa cryptsetup + dm-crypt vào initramfs để live-boot mở khoá lúc boot
+cryptsetup-initramfs
+
+# --- Boot animation (Depot process)
+plymouth
+plymouth-themes
+plymouth-label
+
+# --- Rice macOS (WhiteSur cài qua hook 1000 từ git) + dock
+git
+sassc
+plank
+# deps mà installer WhiteSur tự đòi (không có nó sẽ cố sudo → treo hook)
+libglib2.0-dev-bin
+libxml2-utils
+# runtime cho picom-animated (binary vendored trong includes)
+libev4
+
+# --- In ấn & quét: cài lúc cài đặt (depot-install-apps). Giữ avahi để dò máy in / thiết bị mạng
+avahi-daemon
+libnss-mdns
+
+# --- Tuỳ chọn lớn (bỏ # khi cần — làm ISO to lên)
+# libreoffice
+# libreoffice-l10n-vi
+# libreoffice-help-vi

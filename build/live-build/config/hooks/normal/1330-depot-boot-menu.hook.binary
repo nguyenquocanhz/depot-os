@@ -1,0 +1,59 @@
+#!/bin/sh
+# Depot OS — menu boot của ISO mang tên + màu Depot (logo "Depot by WrenEvil", Bóng ma)
+# Đổi chữ HIỂN THỊ của các mục do live-build sinh ("Live system (amd64)", "fail-safe", "Utilities"…) trong GRUB
+# (grub.cfg + loopback.cfg cho Ventoy/findiso) và isolinux (BIOS). Mã nhãn isolinux (live-amd64…) và tham số kernel
+# giữ nguyên. Chạy SAU hook 1310 (Cài tự động) và 1321 (Chẩn đoán phần cứng) vì hai hook đó tìm theo tên
+# "Live system (amd64)". Ảnh nền + theme GRUB: includes.binary/boot/grub/{splash.png,live-theme/}, isolinux/splash.png.
+# isolinux không có font tiếng Việt nên nhãn không dấu.
+set -e
+
+grub_names() {
+    f=$1
+    sed -i \
+        -e 's/^menuentry "Live system (amd64)"/menuentry "Chạy Depot OS (thử, không đụng ổ cứng)"/' \
+        -e 's/^menuentry "Live system (amd64 fail-safe mode)"/menuentry "Chạy Depot OS — chế độ an toàn (máy kén đồ hoạ)"/' \
+        -e "s/^submenu 'Utilities\.\.\.'/submenu 'Công cụ…'/" \
+        -e "s/^submenu 'Advanced install options \.\.\.'/submenu 'Tuỳ chọn cài nâng cao…'/" \
+        -e 's/menuentry "UEFI Firmware Settings"/menuentry "Vào cài đặt UEFI (BIOS) của máy"/' \
+        -e 's/menuentry "Verify integrity of the boot medium"/menuentry "Kiểm tra USB \/ đĩa boot có bị lỗi không"/' \
+        "$f"
+    echo ">> boot menu: đổi tên mục GRUB trong $f"
+}
+
+syslinux_names() {
+    d=$1
+    [ -f "$d/live.cfg" ] && sed -i \
+        -e 's/^\([ \t]*menu label \)^Live system (amd64)$/\1^Chay Depot OS (thu, khong dung o cung)/' \
+        -e 's/^\([ \t]*menu label \)Live system (amd64 fail-safe mode)$/\1Chay Depot OS - che do ^an toan (may ken do hoa)/' \
+        "$d/live.cfg"
+    # "menu title Boot menu" kết thúc bằng ký tự chuông ^G (live-build cố ý, kêu bíp) — thay phần chữ, giữ ^G
+    [ -f "$d/menu.cfg" ] && sed -i \
+        -e 's/^menu title Boot menu/menu title Depot OS by WrenEvil/' \
+        -e 's/^\([ \t]*menu label \)^Utilities$/\1Cong cu ^khac/' \
+        -e 's/^\([ \t]*menu title \)Utilities$/\1Cong cu/' \
+        -e 's/^\([ \t]*menu label \)^Back\.\.$/\1^Quay lai/' \
+        "$d/menu.cfg"
+    [ -f "$d/utilities.cfg" ] && sed -i \
+        -e 's/^\([ \t]*menu label \)^Hardware Detection Tool (HDT)$/\1^Thong tin phan cung (HDT)/' \
+        "$d/utilities.cfg"
+    # màu theo logo: mục chọn nền đỏ sẫm, chữ trắng; chữ thường xám nhạt
+    [ -f "$d/stdmenu.cfg" ] && sed -i \
+        -e 's/^menu color title.*/menu color title\t* #ffe8ecf5 */' \
+        -e 's/^menu color sel.*/menu color sel\t\t* #ffffffff #ff3a0f16 */' \
+        -e 's/^menu color hotsel.*/menu color hotsel\t1;7;37;40 #ffffffff #ff3a0f16 */' \
+        -e 's/^menu color tabmsg.*/menu color tabmsg\t* #ff8a90a2 #00000000 */' \
+        -e 's/^menu color help.*/menu color help\t\t37;40 #ff8a90a2 #00000000 none/' \
+        -e 's/^menu tabmsg .*/menu tabmsg Enter: chay muc da chon   Tab: sua lenh/' \
+        "$d/stdmenu.cfg"
+    grep -q '^menu color unsel' "$d/stdmenu.cfg" 2>/dev/null || \
+        printf 'menu color unsel\t* #ffc9cfdc #00000000 none\nmenu color timeout_msg\t* #ff8a90a2 #00000000 none\nmenu color timeout\t* #ffe8ecf5 #00000000 none\n' >>"$d/stdmenu.cfg"
+    echo ">> boot menu: đổi tên + màu isolinux trong $d"
+}
+
+for f in binary/boot/grub/grub.cfg boot/grub/grub.cfg binary/boot/grub/loopback.cfg boot/grub/loopback.cfg; do
+    [ -f "$f" ] && grub_names "$f"
+done
+for d in binary/isolinux isolinux; do
+    [ -d "$d" ] && syslinux_names "$d"
+done
+exit 0

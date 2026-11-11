@@ -1,0 +1,8 @@
+[Sound Theme]
+Name=Depot
+Comment=Bộ âm thanh của Depot OS (tự tổng hợp, scripts/gen-sounds.py)
+Inherits=freedesktop
+Directories=stereo
+
+[stereo]
+OutputProfile=stereo

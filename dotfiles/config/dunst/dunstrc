@@ -1,0 +1,30 @@
+# Depot OS — dunst: thông báo tối, góc phải trên (dành cho phiên i3)
+[global]
+    monitor = 0
+    follow = mouse
+    width = 340
+    height = 110
+    origin = top-right
+    offset = 12x44
+    notification_limit = 5
+    frame_width = 1
+    frame_color = "#3d6db5"
+    font = Inter 10
+    alignment = left
+    icon_position = off
+
+[urgency_low]
+    background = "#16203a"
+    foreground = "#e8eefb"
+    timeout = 4
+
+[urgency_normal]
+    background = "#16203a"
+    foreground = "#e8eefb"
+    timeout = 6
+
+[urgency_critical]
+    background = "#1d2f52"
+    foreground = "#ffffff"
+    frame_color = "#d9534f"
+    timeout = 0

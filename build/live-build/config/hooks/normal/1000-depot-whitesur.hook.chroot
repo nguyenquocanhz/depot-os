@@ -1,0 +1,40 @@
+#!/bin/sh
+# Depot OS — WhiteSur ICONS + CURSORS (cài trong chroot — đã verify hoạt động).
+# GTK theme KHÔNG cài ở đây nữa — đã vendor thành file tĩnh trong
+# includes.chroot/usr/share/themes/WhiteSur-Dark (installer gtk thất bại
+# âm thầm trong hook environment; scripts/vendor-whitesur.sh cài trên host).
+set -e
+
+TMP=/tmp/whitesur
+LOGD=/usr/share/depot-os
+rm -rf "$TMP"
+mkdir -p "$TMP" "$LOGD"
+
+install_icons() {
+    git clone --depth 1 https://github.com/vinceliuice/WhiteSur-icon-theme.git "$TMP/icons" || return 1
+    cd "$TMP/icons"
+    ./install.sh -d /usr/share/icons > "$LOGD/whitesur-icons.log" 2>&1 || return 1
+    [ -d /usr/share/icons/WhiteSur ] || return 1
+    git rev-parse HEAD > "$LOGD/whitesur-icons.commit"
+}
+
+install_cursors() {
+    git clone --depth 1 https://github.com/vinceliuice/WhiteSur-cursors.git "$TMP/cursors" || return 1
+    cd "$TMP/cursors"
+    ./install.sh -d /usr/share/icons > "$LOGD/whitesur-cursors.log" 2>&1 || return 1
+    [ -d /usr/share/icons/WhiteSur-cursors ] || return 1
+    git rev-parse HEAD > "$LOGD/whitesur-cursors.commit"
+}
+
+FAILED=""
+install_icons   || { FAILED="$FAILED icons";   tail -8 "$LOGD/whitesur-icons.log" 2>/dev/null; }
+install_cursors || { FAILED="$FAILED cursors"; tail -8 "$LOGD/whitesur-cursors.log" 2>/dev/null; }
+
+if [ -n "$FAILED" ]; then
+    echo "!! WhiteSur icons/cursors không cài đủ ($FAILED)" >&2
+else
+    echo ">> WhiteSur icons + cursors đã cài xong"
+fi
+
+rm -rf "$TMP"
+exit 0

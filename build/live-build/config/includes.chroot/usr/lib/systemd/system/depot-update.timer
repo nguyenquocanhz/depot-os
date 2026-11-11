@@ -1,0 +1,13 @@
+[Unit]
+Description=Depot OS: kiểm tra bản cập nhật mỗi ngày
+ConditionPathExists=!/run/live/medium
+
+[Timer]
+# 15 phút sau khi bật máy (để máy cũ khởi động xong đã), rồi mỗi ngày một lần
+OnBootSec=15min
+OnUnitActiveSec=1d
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Depot OS — hình nền mặc định cho xfdesktop 4.20.
+# xfdesktop 4.20 đọc hình nền theo TÊN màn hình (/backdrop/screen0/monitor<tên>/workspaceN/…,
+# ví dụ monitoreDP-1, monitorHDMI-1, monitorVirtual1), nên dotfiles ghi sẵn cho monitor0 không có tác dụng
+# và máy hiện hình con chuột mặc định của XFCE.
+# Lúc đăng nhập: màn hình nào CHƯA có hình nền thì đặt hình Depot. Đã có (người dùng tự chọn) thì giữ nguyên.
+command -v xfconf-query >/dev/null || exit 0
+command -v xrandr >/dev/null || exit 0
+[ -n "$DISPLAY" ] || exit 0
+WP=/usr/share/backgrounds/depot-os/wallpaper.svg
+[ -e "$WP" ] || exit 0
+xrandr --listmonitors 2>/dev/null | awk 'NR>1 {print $NF}' | while read -r mon; do
+    [ -n "$mon" ] || continue
+    for ws in 0 1 2 3; do
+        base=/backdrop/screen0/monitor$mon/workspace$ws
+        xfconf-query -c xfce4-desktop -p "$base/last-image" >/dev/null 2>&1 && continue
+        xfconf-query -c xfce4-desktop -p "$base/last-image" -n -t string -s "$WP"
+        xfconf-query -c xfce4-desktop -p "$base/image-style" -n -t int -s 5
+    done
+done
+exit 0

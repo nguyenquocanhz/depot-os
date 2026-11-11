@@ -1,0 +1,182 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+ "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+
+<!--
+  Depot OS — bố trí lại Settings Manager (xfce4-settings-manager) theo việc người dùng muốn làm,
+  thay 4 nhóm gốc của XFCE (Personal / Hardware / System / Other) vốn trộn công cụ Depot với hộp thoại XFCE:
+
+    1. Mạng và Internet        Wi-Fi, mạng dây, DNS, proxy, Bluetooth
+    2. Cá nhân hoá             hình nền, bố cục, giao diện, hiệu ứng, đồng hồ, thông báo
+    3. Cửa sổ và thanh panel   phần nâng cao của desktop: cửa sổ, panel, không gian làm việc
+    4. Thiết bị                màn hình, bàn phím, chuột, âm thanh, driver, USB
+    5. Pin và nguồn            chế độ pin, tắt màn hình, ngủ
+    6. Ứng dụng                ứng dụng mặc định, tuỳ chọn của app đi kèm
+    7. Hệ thống                ngôn ngữ, ngày giờ, phiên bản, khởi động, trợ năng
+    8. Khác                    mọi mục Settings của app cài thêm (không mục nào bị mất)
+
+  Trong mỗi nhóm, Settings Manager tự xếp mục theo bảng chữ cái; thứ tự các nhóm theo <Layout> bên dưới.
+  Tên nhóm: /usr/share/desktop-directories/depot-settings-*.directory.
+  File này đè file cùng tên của gói xfce4-settings (depot-update cập nhật với force-confold nên được giữ).
+-->
+<Menu>
+  <Name>Settings</Name>
+
+  <DefaultAppDirs/>
+  <DefaultDirectoryDirs/>
+  <DefaultMergeDirs/>
+
+  <Layout>
+    <Menuname>Network</Menuname>
+    <Menuname>Personal</Menuname>
+    <Menuname>Desktop</Menuname>
+    <Menuname>Hardware</Menuname>
+    <Menuname>Power</Menuname>
+    <Menuname>Apps</Menuname>
+    <Menuname>System</Menuname>
+    <Menuname>Other</Menuname>
+    <Merge type="all"/>
+  </Layout>
+
+  <!-- mục cấp trên cùng (cho trình khác đọc menu này); Settings Manager chỉ hiện các nhóm bên dưới -->
+  <Include>
+    <And>
+      <Category>Settings</Category>
+      <Not><Category>X-XFCE-SettingsDialog</Category></Not>
+    </And>
+  </Include>
+  <Exclude>
+    <Filename>xfce-settings-manager.desktop</Filename>
+  </Exclude>
+
+  <Menu>
+    <Name>Network</Name>
+    <Directory>depot-settings-network.directory</Directory>
+    <Include>
+      <Filename>nm-connection-editor.desktop</Filename>
+      <Filename>depot-dns-proxy.desktop</Filename>
+      <Filename>blueman-manager.desktop</Filename>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>Personal</Name>
+    <Directory>depot-settings-personal.directory</Directory>
+    <Include>
+      <Filename>depot-wallpaper.desktop</Filename>
+      <Filename>depot-layout.desktop</Filename>
+      <Filename>xfce-ui-settings.desktop</Filename>
+      <Filename>depot-effects.desktop</Filename>
+      <Filename>depot-clock.desktop</Filename>
+      <Filename>depot-notify.desktop</Filename>
+      <Filename>xfce4-clipman-settings.desktop</Filename>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>Desktop</Name>
+    <Directory>depot-settings-desktop.directory</Directory>
+    <Include>
+      <Filename>xfce-wm-settings.desktop</Filename>
+      <Filename>xfce-wmtweaks-settings.desktop</Filename>
+      <Filename>panel-preferences.desktop</Filename>
+      <Filename>xfce-backdrop-settings.desktop</Filename>
+      <Filename>xfce-workspaces-settings.desktop</Filename>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>Hardware</Name>
+    <Directory>depot-settings-hardware.directory</Directory>
+    <Include>
+      <Filename>xfce-display-settings.desktop</Filename>
+      <Filename>xfce-keyboard-settings.desktop</Filename>
+      <Filename>xfce-mouse-settings.desktop</Filename>
+      <Filename>org.pulseaudio.pavucontrol.desktop</Filename>
+      <Filename>depot-sound-test.desktop</Filename>
+      <Filename>depot-drivers.desktop</Filename>
+      <Filename>thunar-volman-settings.desktop</Filename>
+      <Filename>blueman-adapters.desktop</Filename>
+      <Filename>system-config-printer.desktop</Filename>
+      <Filename>xfce4-color-settings.desktop</Filename>
+      <And>
+        <Category>Settings</Category>
+        <Category>X-XFCE-SettingsDialog</Category>
+        <Category>X-XFCE-HardwareSettings</Category>
+        <Not>
+          <Or>
+            <Filename>depot-power.desktop</Filename>
+            <Filename>xfce4-power-manager-settings.desktop</Filename>
+          </Or>
+        </Not>
+      </And>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>Power</Name>
+    <Directory>depot-settings-power.directory</Directory>
+    <Include>
+      <Filename>depot-power.desktop</Filename>
+      <Filename>xfce4-power-manager-settings.desktop</Filename>
+      <Filename>xfce4-screensaver-preferences.desktop</Filename>
+      <Filename>light-locker-settings.desktop</Filename>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>Apps</Name>
+    <Directory>depot-settings-apps.directory</Directory>
+    <Include>
+      <Filename>xfce4-mime-settings.desktop</Filename>
+      <Filename>thunar-settings.desktop</Filename>
+      <Filename>xfce4-terminal-settings.desktop</Filename>
+      <Filename>org.xfce.mousepad-settings.desktop</Filename>
+    </Include>
+  </Menu>
+
+  <Menu>
+    <Name>System</Name>
+    <Directory>depot-settings-system.directory</Directory>
+    <Include>
+      <Filename>depot-region.desktop</Filename>
+      <Filename>depot-unikey.desktop</Filename>
+      <Filename>fcitx5-configtool.desktop</Filename>
+      <Filename>depot-edition.desktop</Filename>
+      <Filename>depot-about.desktop</Filename>
+      <Filename>xfce-session-settings.desktop</Filename>
+      <Filename>xfce4-accessibility-settings.desktop</Filename>
+      <Filename>xfce4-settings-editor.desktop</Filename>
+      <Filename>xfce4-about.desktop</Filename>
+      <And>
+        <Category>Settings</Category>
+        <Category>X-XFCE-SettingsDialog</Category>
+        <Category>X-XFCE-SystemSettings</Category>
+        <Not>
+          <Or>
+            <Filename>depot-dns-proxy.desktop</Filename>
+            <Filename>xfce4-mime-settings.desktop</Filename>
+          </Or>
+        </Not>
+      </And>
+    </Include>
+  </Menu>
+
+  <!-- App cài thêm có mục Settings riêng: vẫn hiện, không trùng với các nhóm trên.
+       xfce4-notifyd-config bị ẩn: Depot dùng depot-notify (mục "Thông báo" ở nhóm Cá nhân hoá). -->
+  <Menu>
+    <Name>Other</Name>
+    <Directory>depot-settings-other.directory</Directory>
+    <OnlyUnallocated/>
+    <Include>
+      <And>
+        <Category>Settings</Category>
+        <Category>X-XFCE-SettingsDialog</Category>
+      </And>
+    </Include>
+    <Exclude>
+      <Filename>xfce-settings-manager.desktop</Filename>
+      <Filename>xfce4-notifyd-config.desktop</Filename>
+    </Exclude>
+  </Menu>
+
+</Menu>

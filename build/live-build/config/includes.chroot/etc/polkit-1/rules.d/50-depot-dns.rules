@@ -1,0 +1,10 @@
+// Depot OS — user nhóm sudo/netdev đổi DNS chung + DNS mã hoá (depot-dns-proxy) mà không phải nhập mật khẩu.
+// Cùng mức tin cậy với org.freedesktop.NetworkManager.rules của Debian cho settings.modify.system.
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.NetworkManager.settings.modify.global-dns" ||
+         action.id == "tech.wrenevil.depot.dns") &&
+        subject.local && subject.active &&
+        (subject.isInGroup("sudo") || subject.isInGroup("netdev"))) {
+        return polkit.Result.YES;
+    }
+});

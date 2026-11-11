@@ -1,0 +1,250 @@
+#!/bin/sh
+# Depot OS — Phiên bản (Home / Pro / for Workstation) + tự nhận máy hợp bản nào
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-edition                      cửa sổ: phiên bản đang dùng, bản hợp với máy này (kèm lý do), đổi bản
+#   depot-edition detect [-v]          in bản hợp với máy này (-v: kèm lý do, cấu hình máy)
+#   depot-edition current              in bản đang dùng (chưa đặt: home)
+#   depot-edition set BẢN|auto         (root) đặt bản: ghi /etc/depot-edition, tường lửa, tinh chỉnh, cài app thêm
+#   depot-edition --target DIR auto    Calamares (bước shellprocess@depotedition): nhận máy trên hệ live, áp vào hệ vừa cài
+#   depot-edition apply-pending        (root) cài nốt app của bản khi lúc đặt bản chưa có mạng (depot-update gọi)
+#   depot-edition tune                 depot-edition-tune.service: CPU chạy hết tốc khi cắm điện (bản Workstation)
+#
+# Mỗi bản là một file /usr/share/depot-os/editions/BẢN.conf (tên, mô tả, APPS, FIREWALL, TUNE) — sửa nội dung ở đó.
+# Bản STATUS=planned (Education, Developer, HideAss, Server) chỉ hiện "sắp có", chưa chọn được.
+# Hạ bản (Pro → Home) không gỡ app đã cài, không tắt tường lửa — chỉ đổi tên bản và bỏ tinh chỉnh hiệu năng.
+# Thử nhận máy với cấu hình giả: DEPOT_HW_ROOT=/gốc-giả (đọc proc/cpuinfo, proc/meminfo, file lspci = đầu ra lspci -mm)
+
+DIR=${DEPOT_EDITIONS_DIR:-/usr/share/depot-os/editions}
+HW=${DEPOT_HW_ROOT:-}
+T=""                         # thư mục hệ đích (Calamares); rỗng = máy đang chạy
+STATE_REL=/var/lib/depot
+PENDING_REL=$STATE_REL/edition-pending
+
+load_ed() {   # load_ed BẢN → biến ID NAME TAGLINE DESC APPS FIREWALL TUNE STATUS
+    ID="" NAME="" TAGLINE="" DESC="" APPS="" FIREWALL=keep TUNE=0 STATUS="" ORDER=99
+    [ -r "$DIR/$1.conf" ] || return 1
+    # shellcheck disable=SC1090
+    . "$DIR/$1.conf"
+}
+
+editions() {  # danh sách bản theo ORDER: "ORDER ID STATUS"
+    for f in "$DIR"/*.conf; do
+        [ -r "$f" ] || continue
+        b=$(basename "$f" .conf)
+        load_ed "$b" && echo "$ORDER $ID $STATUS"
+    done | sort -n
+}
+
+# ------------------------------------------------------------------ nhận máy
+detect() {
+    cpu=$HW/proc/cpuinfo
+    model=$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' "$cpu" 2>/dev/null | head -1)
+    threads=$(grep -c '^processor' "$cpu" 2>/dev/null)
+    [ "${threads:-0}" -gt 0 ] || threads=$(nproc 2>/dev/null || echo 1)
+    if grep -m1 '^flags' "$cpu" 2>/dev/null | grep -qw avx2; then avx2=1; else avx2=0; fi
+    kb=$(awk '/^MemTotal:/ { print $2 }' "$HW/proc/meminfo" 2>/dev/null)
+    # GB làm tròn LÊN: kernel + iGPU giữ một phần, máy cắm 16 GB chỉ báo ~15,4 GB (MemTotal không bao giờ vượt RAM cắm)
+    ram=$(( (${kb:-0} + 1048575) / 1048576 ))
+    if [ -n "$HW" ]; then gpus=$(cat "$HW/lspci" 2>/dev/null); else gpus=$(lspci -mm 2>/dev/null); fi
+    gpus=$(printf '%s\n' "$gpus" | grep -E '"(VGA|3D|Display)' | sed 's/^[^ ]* "[^"]*" //')
+    srvcpu=0; case $model in *Xeon* | *EPYC* | *Threadripper* | *Opteron*) srvcpu=1 ;; esac
+    progpu=0; printf '%s' "$gpus" | grep -q -E 'Quadro|RTX A[0-9]|RTX [0-9]+ Ada|Radeon Pro|FirePro|Tesla|NVIDIA [AL][0-9]+' && progpu=1
+
+    why=""
+    if { [ "$ram" -ge 32 ] && [ "$threads" -ge 12 ]; } ||
+       { [ "$srvcpu" = 1 ] && [ "$ram" -ge 16 ]; } || { [ "$progpu" = 1 ] && [ "$ram" -ge 16 ]; }; then
+        ED=workstation
+        [ "$ram" -ge 32 ] && [ "$threads" -ge 12 ] && why="RAM $ram GB và $threads luồng CPU"
+        [ "$srvcpu" = 1 ] && why="${why:+$why; }CPU máy trạm/máy chủ"
+        [ "$progpu" = 1 ] && why="${why:+$why; }card đồ hoạ chuyên nghiệp"
+    elif [ "$avx2" = 1 ] && [ "$ram" -ge 8 ] && [ "$threads" -ge 4 ]; then
+        ED=pro
+        why="CPU đời mới (có AVX2), RAM $ram GB, $threads luồng"
+    else
+        ED=home
+        [ "$avx2" = 1 ] || why="CPU đời cũ (chưa có AVX2, trước khoảng 2013)"
+        [ "$ram" -ge 8 ] || why="${why:+$why; }RAM $ram GB (dưới 8 GB)"
+        [ "$threads" -ge 4 ] || why="${why:+$why; }$threads luồng CPU (dưới 4)"
+    fi
+}
+
+current() {
+    c=$(sed -n 's/^EDITION=//p' "$T/etc/depot-edition" 2>/dev/null)
+    echo "${c:-home}"
+}
+
+# ------------------------------------------------------------------ áp bản
+in_target() {  # chạy lệnh trong hệ đích (Calamares) hoặc máy đang chạy
+    if [ -n "$T" ]; then chroot "$T" "$@"; else "$@"; fi
+}
+
+online() { curl -fsI --max-time 15 http://deb.debian.org/debian/dists/trixie/Release >/dev/null 2>&1; }
+
+install_apps() {  # cài APPS của bản; không có mạng → ghi chờ, depot-update cài sau
+    [ -n "$APPS" ] || { rm -f "$T$PENDING_REL"; return 0; }
+    mkdir -p "$T$STATE_REL"
+    if [ -d /run/live/medium ] && [ -z "$T" ]; then
+        echo ">> phiên chạy thử: không cài app (chỉ cài trên máy đã cài)"
+        return 0
+    fi
+    if [ -n "${DEPOT_EDITION_NO_APT:-}" ] || ! online; then
+        echo "$APPS" > "$T$PENDING_REL"
+        echo ">> chưa có mạng: app của bản sẽ tự cài khi có mạng ($APPS)"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    if in_target env DEBIAN_FRONTEND=noninteractive apt-get install -y $APPS; then
+        rm -f "$T$PENDING_REL"
+    else
+        echo "$APPS" > "$T$PENDING_REL"
+        echo "!! cài app lỗi — thử lại khi depot-update chạy"
+    fi
+}
+
+apply_ed() {   # apply_ed BẢN AUTO(0|1)
+    load_ed "$1" || { echo "!! không có bản '$1'" >&2; return 2; }
+    [ "$STATUS" = ready ] || { echo "!! $NAME chưa làm xong (lộ trình)" >&2; return 2; }
+    detect
+    {
+        echo "# Depot OS — phiên bản (depot-edition). Đổi bằng menu \"Phiên bản Depot\" hoặc: sudo depot-edition set home|pro|workstation"
+        echo "EDITION=$ID"
+        echo "NAME=\"$NAME\""
+        echo "AUTO=$2"
+        echo "DETECTED=$ED"
+        echo "SINCE=$(date +%F)"
+    } > "$T/etc/depot-edition"
+    # tường lửa: chỉ bật (Pro trở lên), không bao giờ tự tắt cái người dùng đã bật
+    if [ "$FIREWALL" = on ] && in_target sh -c 'command -v ufw' >/dev/null 2>&1; then
+        if [ -n "$T" ]; then
+            # trong chroot không có netfilter của hệ mới: bật trong cấu hình, ufw.service áp khi boot
+            sed -i 's/^ENABLED=.*/ENABLED=yes/' "$T/etc/ufw/ufw.conf" 2>/dev/null
+            in_target systemctl enable ufw.service >/dev/null 2>&1
+        else
+            ufw default deny incoming >/dev/null 2>&1; ufw default allow outgoing >/dev/null 2>&1
+            ufw --force enable >/dev/null 2>&1
+        fi
+        # SSH đã bật (depot-autoinstall SSH=yes, hoặc người dùng tự bật) thì mở cổng, không khoá mất truy cập từ xa
+        if in_target systemctl is-enabled ssh.service >/dev/null 2>&1; then
+            in_target ufw allow OpenSSH >/dev/null 2>&1 || true
+        fi
+    fi
+    # tinh chỉnh hiệu năng (Workstation)
+    if [ "$TUNE" = 1 ]; then
+        cat > "$T/etc/sysctl.d/60-depot-workstation.conf" <<'EOF'
+# Depot OS for Workstation (depot-edition): tải nặng — IDE/dựng hình mở rất nhiều file, ít đẩy RAM ra swap
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+vm.max_map_count = 1048576
+fs.inotify.max_user_watches = 1048576
+fs.inotify.max_user_instances = 1024
+fs.file-max = 2097152
+EOF
+        in_target systemctl enable depot-edition-tune.service >/dev/null 2>&1
+    else
+        rm -f "$T/etc/sysctl.d/60-depot-workstation.conf"
+        in_target systemctl disable depot-edition-tune.service >/dev/null 2>&1
+    fi
+    [ -z "$T" ] && sysctl --system >/dev/null 2>&1
+    install_apps
+    echo ">> Phiên bản: $NAME$( [ "$2" = 1 ] && echo " (tự chọn theo máy: $why)")"
+}
+
+tune() {   # CPU chạy hết tốc khi cắm điện; chạy pin giữ mặc định (schedutil/powersave)
+    load_ed "$(current)"; [ "$TUNE" = 1 ] || exit 0
+    gov=powersave
+    for s in /sys/class/power_supply/*; do
+        [ "$(cat "$s/type" 2>/dev/null)" = Mains ] && [ "$(cat "$s/online" 2>/dev/null)" = 1 ] && gov=performance
+    done
+    ls /sys/class/power_supply/ 2>/dev/null | grep -q '^BAT' || gov=performance   # máy bàn
+    for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+        [ -w "$g" ] || continue
+        grep -qw "$gov" "${g%/*}/scaling_available_governors" 2>/dev/null && echo "$gov" > "$g"
+    done
+    # intel_pstate/amd_pstate: gợi ý năng lượng đi kèm
+    pref=balance_performance; [ "$gov" = performance ] && pref=performance
+    for p in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference; do
+        [ -w "$p" ] && echo "$pref" > "$p" 2>/dev/null
+    done
+    echo ">> CPU governor: $gov"
+}
+
+# ------------------------------------------------------------------ cửa sổ
+gui() {
+    detect
+    cur=$(current)
+    load_ed "$ED"; rec_name=$NAME
+    live=0; [ -d /run/live/medium ] && live=1
+    load_ed "$cur"; cur_name=$NAME
+    text="<b>Đang dùng: $cur_name</b>"
+    [ "$live" = 1 ] && text="<b>Phiên chạy thử</b> — lúc cài, Depot tự chọn bản hợp với máy (đổi lại được sau)"
+    text="$text
+
+Máy này hợp với: <b>$rec_name</b>
+<small>Lý do: $why.
+CPU: ${model:-?} · $threads luồng · RAM $ram GB</small>"
+    set --
+    for line in $(editions | awk '{ print $2 ":" $3 }'); do
+        id=${line%%:*}; st=${line#*:}
+        load_ed "$id"
+        mark=""; [ "$id" = "$cur" ] && [ "$live" = 0 ] && mark=" ✓"
+        [ "$id" = "$ED" ] && mark="$mark  ← hợp với máy này"
+        if [ "$st" = ready ]; then
+            set -- "$@" "$id" "$NAME$mark" "$TAGLINE"
+        else
+            set -- "$@" "-" "$NAME (sắp có)" "$TAGLINE"
+        fi
+    done
+    pick=$(yad --list --title="Phiên bản Depot" --window-icon=depot-logo --image=depot-logo \
+        --width=640 --height=470 --borders=14 --text="$text" \
+        --column=id:HD --column="Phiên bản" --column="Dành cho" --print-column=1 --separator="" \
+        --button="Đóng:1" --button="Theo máy này:3" --button="Đổi sang bản đã chọn:0" "$@")
+    rc=$?
+    # 1 = Đóng, 252 = nút X / Esc → không hiện gì thêm
+    [ "$live" = 1 ] && { [ $rc = 0 ] || [ $rc = 3 ]; } && { yad --info --title="Phiên bản Depot" --borders=14 --button=OK:0 \
+        --text="Đây là phiên chạy thử. Khi cài, Depot tự đặt <b>$rec_name</b> cho máy này; sau khi cài vẫn đổi được ở menu \"Phiên bản Depot\"."; return; }
+    case $rc in
+        3) pick=auto ;;
+        0)
+            [ -n "$pick" ] || return
+            if [ "$pick" = "-" ]; then
+                yad --info --title="Phiên bản Depot" --borders=14 --button=OK:0 \
+                    --text="Bản này nằm trong lộ trình, chưa chọn được. Xem ROADMAP của Depot OS."
+                return
+            fi ;;
+        *) return ;;
+    esac
+    [ "$pick" = "$cur" ] && return
+    msg=$(pkexec /usr/bin/depot-edition set "$pick" 2>&1) && \
+        yad --info --title="Phiên bản Depot" --borders=14 --button=OK:0 --text="$(printf '%s' "$msg" | tail -3)" || \
+        yad --error --title="Phiên bản Depot" --borders=14 --button=OK:0 --text="Không đổi được phiên bản.\n\n$msg"
+}
+
+# ------------------------------------------------------------------
+if [ "${1:-}" = --target ]; then T=${2:?thiếu thư mục đích}; shift 2; fi
+case "${1:-}" in
+    detect)
+        detect
+        if [ "${2:-}" = -v ]; then
+            load_ed "$ED"; echo "$ID  $NAME"; echo "lý do: $why"
+            echo "máy:   ${model:-?} · $threads luồng · AVX2=$avx2 · RAM $ram GB"
+            printf '%s\n' "$gpus" | sed '/^$/d; s/^/GPU:   /'
+        else
+            echo "$ED"
+        fi ;;
+    current) current ;;
+    set)
+        [ "$(id -u)" = 0 ] || { echo "!! cần root (sudo depot-edition set …)" >&2; exit 1; }
+        e=${2:?dùng: depot-edition set home|pro|workstation|auto}
+        if [ "$e" = auto ]; then detect; apply_ed "$ED" 1; else apply_ed "$e" 0; fi ;;
+    auto)
+        [ -n "$T" ] || { echo "dùng: depot-edition --target DIR auto (hoặc set auto)" >&2; exit 2; }
+        # Calamares: không bao giờ làm bước cài thất bại vì phiên bản
+        detect; apply_ed "$ED" 1 || true; exit 0 ;;
+    apply-pending)
+        [ -r "$PENDING_REL" ] || exit 0
+        load_ed "$(current)"; install_apps ;;
+    tune) tune ;;
+    '') gui ;;
+    *) sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

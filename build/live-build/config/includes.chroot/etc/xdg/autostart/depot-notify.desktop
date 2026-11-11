@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Thông báo Depot OS
+Comment=Thẻ thông báo bo góc và khung Thông báo bên cạnh (thay xfce4-notifyd)
+Exec=depot-notify
+TryExec=depot-notify
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-Phase=Panel

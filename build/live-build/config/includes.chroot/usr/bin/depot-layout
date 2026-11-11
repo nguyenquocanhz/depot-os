@@ -1,0 +1,123 @@
+#!/bin/sh
+# Depot OS — Bố cục desktop (XFCE)
+#   depot-layout                            mở cửa sổ chọn
+#   depot-layout macos|windows|windows11    chuyển ngay
+#   depot-layout current                    in bố cục đang dùng
+# macos     = thanh menu mỏng trên + dock Plank dưới, nút cửa sổ bên trái
+# windows   = kiểu Windows 10: taskbar dưới, Start + app ghim bên trái, menu Start dạng danh sách
+# windows11 = kiểu Windows 11: Start + app ghim ở GIỮA taskbar, menu Start dạng lưới icon
+# Hai kiểu Windows: không Plank, nút cửa sổ bên phải.
+# Cách đổi panel giống xfce4-panel-profiles: tắt panel, tắt xfconfd, chép XML, bật lại panel.
+STATE="$HOME/.config/depot/layout"
+SHARE=/usr/share/depot-os
+XFCONF="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
+# cùng danh sách app với dock Plank (depot-plank)
+APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop zalo discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
+
+current() { cat "$STATE" 2>/dev/null || echo macos; }
+
+xml_of() {
+    case $1 in
+        macos) echo "$SHARE/dotfiles/config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml" ;;
+        *) echo "$SHARE/layouts/$1/xfce4-panel.xml" ;;
+    esac
+}
+
+name_of() {
+    case $1 in
+        windows) echo "Kiểu Windows 10" ;;
+        windows11) echo "Kiểu Windows 11" ;;
+        *) echo "Kiểu macOS" ;;
+    esac
+}
+
+# docklike đọc app ghim từ file rc theo id plugin (plugin-3 trong cả hai bố cục Windows)
+write_docklike() {
+    pinned=""
+    for a in $APPS; do
+        f=/usr/share/applications/$a.desktop
+        [ -f "$f" ] && pinned="$pinned$f;"
+    done
+    mkdir -p "$HOME/.config/xfce4/panel"
+    printf '[user]\npinned=%s\n' "$pinned" > "$HOME/.config/xfce4/panel/docklike-3.rc"
+}
+
+# nút chuông thông báo = genmon chạy depot-notify-bell; genmon đọc lệnh từ file rc theo id plugin
+# (plugin-7 ở bố cục macOS, plugin-9 ở hai bố cục Windows)
+write_bell() {
+    case $1 in macos) id=7 ;; *) id=9 ;; esac
+    mkdir -p "$HOME/.config/xfce4/panel"
+    printf 'Command=depot-notify-bell\nUseLabel=0\nText=\nUpdatePeriod=5000\n' > "$HOME/.config/xfce4/panel/genmon-$id.rc"
+}
+
+swap_panel() {
+    xfce4-panel --quit 2>/dev/null
+    pkill -x xfconfd
+    sleep 0.5
+    mkdir -p "$XFCONF"
+    cp "$1" "$XFCONF/xfce4-panel.xml"
+    # xfconfd có thể đã tự bật lại giữa chừng với cấu hình cũ trong bộ nhớ: tắt lần nữa cho chắc
+    pkill -x xfconfd
+    sleep 0.3
+    # XML bố cục để đồng hồ bên phải: đưa về vị trí người dùng đã chọn trước khi bật panel
+    depot-clock apply
+    (setsid xfce4-panel >/dev/null 2>&1 &)
+}
+
+switch() {
+    xml=$(xml_of "$1")
+    [ -r "$xml" ] || { echo "!! thiếu $xml" >&2; exit 1; }
+    case $1 in
+        windows*)
+            write_docklike
+            pkill -x plank 2>/dev/null
+            buttons="|HMC"; align=left ;;
+        macos)
+            buttons="CHM|"; align=center ;;
+    esac
+    # ghi trước khi đổi panel: depot-clock apply đọc bố cục mới
+    mkdir -p "$(dirname "$STATE")"
+    echo "$1" > "$STATE"
+    write_bell "$1"
+    swap_panel "$xml"
+    sleep 1
+    # XML bố cục mới không mang cấu hình Clipman (cùng kênh xfce4-panel): đặt lại mặc định còn thiếu
+    command -v depot-clipboard >/dev/null && depot-clipboard defaults
+    xfconf-query -c xfwm4 -p /general/button_layout -n -t string -s "$buttons"
+    xfconf-query -c xfwm4 -p /general/title_alignment -n -t string -s "$align"
+    # Plank tự thoát khi bố cục là Windows (depot-plank đọc $STATE)
+    [ "$1" = macos ] && (setsid depot-plank >/dev/null 2>&1 &)
+    return 0
+}
+
+gui() {
+    cur=$(current)
+    yad --title="Bố cục desktop" --window-icon=preferences-desktop --width=500 --borders=16 \
+        --image=preferences-desktop --text="<b>Đang dùng: $(name_of "$cur")</b>
+
+<b>Kiểu macOS</b>: thanh menu mỏng ở trên, dock ở dưới, nút đóng/thu nhỏ/phóng to bên trái.
+<b>Kiểu Windows 10</b>: taskbar dưới, nút Start và app ghim bên trái, menu Start dạng danh sách.
+<b>Kiểu Windows 11</b>: nút Start và app ghim ở giữa taskbar, menu Start dạng lưới icon.
+
+Đổi bố cục không đóng app nào đang mở." \
+        --button="macOS:2" --button="Windows 10:3" --button="Windows 11:4" --button="Đóng:1"
+    case $? in
+        2) new=macos ;;
+        3) new=windows ;;
+        4) new=windows11 ;;
+        *) return ;;
+    esac
+    [ "$cur" = "$new" ] || switch "$new"
+}
+
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *XFCE*) ;;
+    *) [ "${1:-}" = current ] || { echo "Bố cục chỉ áp dụng cho phiên XFCE (i3 dùng i3bar)." >&2; exit 1; } ;;
+esac
+
+case "${1:-}" in
+    macos | windows | windows11) switch "$1" ;;
+    current) current ;;
+    '') gui ;;
+    *) echo "dùng: depot-layout [macos|windows|windows11|current]" >&2; exit 2 ;;
+esac

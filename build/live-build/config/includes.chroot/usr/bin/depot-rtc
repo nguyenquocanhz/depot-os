@@ -1,0 +1,84 @@
+#!/bin/sh
+# Depot OS — máy có Windows thì giữ đồng hồ phần cứng (RTC) theo giờ địa phương, như Windows.
+# Windows ghi RTC theo giờ địa phương, Linux mặc định theo UTC: mỗi lần đổi hệ lệch 7 tiếng (UTC+7).
+# Việt Nam không đổi giờ mùa hè, nên RTC giờ địa phương không vướng rủi ro DST mà systemd cảnh báo.
+#
+#   depot-rtc               depot-rtc.service lúc boot: dò Windows; có thì chuyển /etc/adjtime sang LOCAL
+#                           và đọc lại đồng hồ từ RTC. Chạy trước systemd-timesyncd: timesyncd thấy LOCAL
+#                           thì không cho kernel ghi RTC (11-minute mode), Windows giữ đúng giờ.
+#   depot-rtc --target DIR  Calamares, ngay sau bước hwclock: live đang LOCAL thì máy cài cũng LOCAL
+#   depot-rtc --check       chỉ in có thấy Windows không (cần root)
+set -u
+
+ADJ=/etc/adjtime
+MARK=/var/lib/depot/rtc-checked
+MNT=/run/depot-rtc
+
+set_local() {
+    printf '0.0 0 0.0\n0\nLOCAL\n' >"$1"
+}
+
+# có tệp khởi động Windows trên phân vùng $1 (kiểu $2) không; chỉ mount đọc
+probe() {
+    mount -t "$2" -o ro "$1" "$MNT" 2>/dev/null || return 1
+    found=1
+    if [ -e "$MNT/bootmgr" ] || [ -d "$MNT/Windows/System32" ] || [ -e "$MNT/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+        found=0
+    fi
+    umount "$MNT"
+    return $found
+}
+
+has_windows() {
+    # UEFI: mục "Windows Boot Manager" trong NVRAM, không phải mount gì
+    if [ -d /sys/firmware/efi ] && efibootmgr 2>/dev/null | grep -qi 'Windows Boot Manager'; then
+        return 0
+    fi
+    [ -e /boot/efi/EFI/Microsoft/Boot/bootmgfw.efi ] && return 0
+    # BIOS cũ (hay gặp ở máy Sandy Bridge) hoặc NVRAM bị xoá: mở thử phân vùng NTFS và FAT chưa mount.
+    # blkid dò thẳng đĩa (-c /dev/null): lúc boot sớm này udev có thể chưa ghi FSTYPE cho lsblk.
+    # Windows bật BitLocker: phân vùng System Reserved (BIOS) hoặc ESP (UEFI) vẫn không mã hoá.
+    mkdir -p "$MNT"
+    for fs in ntfs vfat; do
+        for dev in $(blkid -c /dev/null -o device -t TYPE=$fs 2>/dev/null); do
+            grep -q "^$dev " /proc/mounts && continue
+            probe "$dev" "$([ $fs = ntfs ] && echo ntfs3 || echo vfat)" && return 0
+        done
+    done
+    return 1
+}
+
+case "${1:-}" in
+    --check)
+        if has_windows; then echo "có Windows"; else echo "không thấy Windows"; fi
+        exit 0
+        ;;
+    --target)
+        R=${2:?thiếu thư mục gốc của máy đang cài}
+        if grep -qx LOCAL "$ADJ" 2>/dev/null; then
+            set_local "$R$ADJ"
+            # ghi đè RTC kiểu UTC mà bước hwclock của Calamares vừa ghi; dùng múi giờ của máy đang cài
+            # lỗi thì chỉ báo, không làm hỏng cả bộ cài (shellprocess thoát khác 0 là Calamares dừng cài)
+            if chroot "$R" hwclock --systohc --localtime; then
+                echo "depot-rtc: máy cài giữ RTC theo giờ địa phương (có Windows)"
+            else
+                echo "depot-rtc: !! không ghi được RTC; adjtime đã LOCAL, giờ sẽ đúng sau lần đồng bộ mạng đầu" >&2
+            fi
+        fi
+        # live đã dò rồi, máy cài khỏi dò lại lúc boot đầu
+        mkdir -p "$R${MARK%/*}"
+        : >"$R$MARK"
+        exit 0
+        ;;
+    '') ;;
+    *) echo "cách dùng: $0 [--check | --target DIR]" >&2; exit 2 ;;
+esac
+
+if ! grep -qx LOCAL "$ADJ" 2>/dev/null && has_windows; then
+    set_local "$ADJ"
+    # kernel đã đọc RTC như UTC lúc boot (sai 7 tiếng): đọc lại theo giờ địa phương
+    hwclock --hctosys --localtime
+    echo "depot-rtc: thấy Windows, RTC theo giờ địa phương"
+fi
+mkdir -p "${MARK%/*}"
+: >"$MARK"

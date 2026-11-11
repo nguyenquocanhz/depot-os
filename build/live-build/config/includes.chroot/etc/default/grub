@@ -1,0 +1,13 @@
+# Depot OS — grub mặc định cho hệ đã cài
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_TIMEOUT_STYLE=menu
+GRUB_DISTRIBUTOR="Depot OS"
+# nền menu GRUB: logo "Depot by WrenEvil" góc dưới phải (chữ menu chạy từ góc trên trái). /etc/grub.d/05_debian_theme
+# tự chép ảnh vào /boot/grub nếu /boot là phân vùng riêng; đọc ảnh lỗi thì quay về menu chữ thường.
+GRUB_BACKGROUND="/usr/share/images/depot/grub.png"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+GRUB_CMDLINE_LINUX=""
+
+# grub 2.06+ tắt os-prober mặc định — bắt buộc bật để menu hiện Windows (dual-boot)
+GRUB_DISABLE_OS_PROBER=false

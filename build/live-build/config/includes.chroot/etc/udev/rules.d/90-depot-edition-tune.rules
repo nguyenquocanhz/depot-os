@@ -1,0 +1,3 @@
+# Depot OS — rút/cắm sạc: bản Workstation đổi CPU giữa hết tốc (cắm điện) và tiết kiệm (chạy pin).
+# Service tự bỏ qua khi máy không phải bản Workstation (depot-edition tune đọc /etc/depot-edition).
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ACTION=="change", RUN+="/bin/systemctl --no-block start depot-edition-tune.service"

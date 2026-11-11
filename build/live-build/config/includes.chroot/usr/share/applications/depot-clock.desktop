@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vị trí đồng hồ
+Comment=Đặt đồng hồ trên panel ở bên trái, ở giữa hoặc bên phải
+Exec=depot-clock
+TryExec=yad
+Icon=preferences-system-time
+Terminal=false
+OnlyShowIn=XFCE;
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-PersonalSettings;DesktopSettings;
+Keywords=đồng hồ;giờ;ngày;clock;time;panel;vị trí;

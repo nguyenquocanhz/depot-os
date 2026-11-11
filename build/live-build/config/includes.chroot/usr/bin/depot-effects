@@ -1,0 +1,268 @@
+#!/bin/sh
+# Depot OS — Hiệu ứng hình ảnh (giống Performance Options > Visual Effects của Windows)
+#   depot-effects              mở cửa sổ chọn
+#   depot-effects apply        áp dụng lựa chọn đã lưu (chạy lúc đăng nhập, XFCE lẫn i3)
+#   depot-effects set CHẾ_ĐỘ   lưu rồi áp dụng: auto | best | fast
+#   depot-effects island on|off   bật/tắt riêng Dynamic Island (các ô khác giữ nguyên)
+#   depot-effects status       in máy, chế độ, từng hiệu ứng
+# Conky (widget) do apply bật/tắt trong XFCE — không còn autostart riêng, tránh chạy hai bản
+# auto: GPU thật bật hết; máy ảo có 3D bỏ animation cửa sổ; GPU giả lập bằng CPU (llvmpipe)
+#       chỉ giữ thứ gần như không tốn gì. Picom luôn chạy (xrender khi llvmpipe), vì không
+#       compositor thì dock và widget trong suốt thành hộp đen.
+CONF="$HOME/.config/depot/effects"
+SRC="$HOME/.config/picom/picom-animations.conf"
+GEN="$HOME/.cache/depot/picom.conf"
+INI="$HOME/.config/gtk-3.0/settings.ini"
+PLANK=net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/
+KEYS="ANIM SHADOW FADE GTKANIM LIVEDRAG DOCKZOOM FONTSMOOTH THUMBS WIDGETS ISLAND"
+
+label() {
+    case $1 in
+        ANIM) echo "Animation khi mở, thu nhỏ, phóng to cửa sổ" ;;
+        SHADOW) echo "Bóng đổ dưới cửa sổ" ;;
+        FADE) echo "Mờ dần khi mở, đóng cửa sổ và menu" ;;
+        GTKANIM) echo "Animation bên trong ứng dụng (nút, chuyển trang, cuộn)" ;;
+        LIVEDRAG) echo "Hiện nội dung cửa sổ khi kéo, đổi cỡ" ;;
+        DOCKZOOM) echo "Phóng to icon trên dock khi rê chuột" ;;
+        FONTSMOOTH) echo "Làm mượt cạnh chữ" ;;
+        THUMBS) echo "Hiện ảnh thu nhỏ thay cho icon trong Thunar" ;;
+        WIDGETS) echo "Widget đồng hồ, CPU, RAM trên desktop" ;;
+        ISLAND) echo "Dynamic Island: bài đang phát ở giữa trên cùng" ;;
+    esac
+}
+
+preset_name() {
+    case $1 in
+        auto) echo "Để Depot tự chọn theo máy này" ;;
+        best) echo "Đẹp nhất" ;;
+        fast) echo "Nhanh nhất" ;;
+        custom) echo "Tuỳ chỉnh" ;;
+    esac
+}
+
+renderer() { glxinfo -B 2>/dev/null | sed -n 's/^OpenGL renderer string: //p'; }
+
+# gpu = card đồ hoạ thật; vm = máy ảo có 3D; soft = vẽ bằng CPU (llvmpipe, máy ảo chưa bật 3D)
+detect() {
+    REN=$(renderer)
+    case "$REN" in
+        ''|*llvmpipe*|*softpipe*|*Software*) HW=soft ;;
+        *) if [ "$(systemd-detect-virt 2>/dev/null || echo none)" = none ]; then HW=gpu; else HW=vm; fi ;;
+    esac
+    RAM=$(awk '/^MemTotal/ { print int($2 / 1024) }' /proc/meminfo)
+}
+
+hw_text() {
+    case $HW in
+        gpu) echo "card đồ hoạ thật ($REN)" ;;
+        vm) echo "máy ảo có tăng tốc 3D ($REN)" ;;
+        soft) echo "đồ hoạ vẽ bằng CPU (${REN:-không có OpenGL}) — nên để Depot tự chọn" ;;
+    esac
+}
+
+preset_val() {
+    case $1 in
+        best) echo 1 ;;
+        # "Nhanh nhất" vẫn giữ chữ mượt: gần như không tốn gì, tắt thì chữ răng cưa
+        fast) [ "$2" = FONTSMOOTH ] && echo 1 || echo 0 ;;
+        auto)
+            if [ "$2" = WIDGETS ] && [ "$RAM" -lt 3000 ]; then echo 0; return; fi
+            case $HW:$2 in
+                gpu:*) echo 1 ;;
+                vm:ANIM) echo 0 ;;
+                vm:*) echo 1 ;;
+                # island: llvmpipe vẫn bật (chỉ vẽ khi có nhạc; co giãn tự tắt theo GTKANIM = 0)
+                soft:LIVEDRAG | soft:FONTSMOOTH | soft:THUMBS | soft:WIDGETS | soft:ISLAND) echo 1 ;;
+                soft:*) echo 0 ;;
+            esac ;;
+    esac
+}
+
+load() {
+    PRESET=auto
+    # shellcheck disable=SC1090
+    [ -r "$CONF" ] && . "$CONF"
+    case $PRESET in auto | best | fast | custom) ;; *) PRESET=auto ;; esac
+    detect
+    for k in $KEYS; do
+        if [ "$PRESET" = custom ]; then
+            eval "v=\${$k:-1}"
+        else
+            v=$(preset_val "$PRESET" "$k")
+        fi
+        case $v in 0 | 1) ;; *) v=1 ;; esac
+        eval "$k=$v"
+    done
+}
+
+save() {
+    mkdir -p "$(dirname "$CONF")"
+    {
+        echo "# Depot OS — Hiệu ứng hình ảnh (depot-effects). 1 = bật, 0 = tắt"
+        echo "PRESET=$PRESET"
+        for k in $KEYS; do eval "echo $k=\$$k"; done
+    } > "$CONF"
+}
+
+# lưu lựa chọn, đọc lại để tính giá trị thật của chế độ, lưu lần nữa cho file đúng giá trị, rồi áp dụng
+commit() { save; load; save; apply; }
+
+tf() { [ "$1" = 1 ] && echo true || echo false; }
+not() { [ "$1" = 1 ] && echo 0 || echo 1; }
+
+ini_set() {
+    [ -f "$INI" ] || return 0
+    if grep -q "^$1 *=" "$INI"; then
+        sed -i "s/^$1 *=.*/$1 = $2/" "$INI"
+    else
+        echo "$1 = $2" >> "$INI"
+    fi
+}
+
+strip_block() { sed -i "/^# \[$1\]/,/^# \[\/$1\]/d" "$2"; }
+
+run_picom() {
+    pkill -x picom-animated 2>/dev/null
+    pkill -x picom 2>/dev/null
+    sleep 0.3
+    # mất file gốc: chạy tối thiểu để dock, widget còn trong suốt (picom 12 bắt buộc nêu backend)
+    [ -r "$SRC" ] || { picom --backend xrender --daemon; return; }
+    mkdir -p "$(dirname "$GEN")"
+    cp "$SRC" "$GEN.tmp"
+    [ "$SHADOW" = 1 ] || strip_block shadow "$GEN.tmp"
+    [ "$FADE" = 1 ] || strip_block fade "$GEN.tmp"
+    [ "$ANIM" = 1 ] || strip_block anim "$GEN.tmp"
+    [ $HW = soft ] && sed -i 's/^backend = .*/backend = "xrender";/; s/^vsync = .*/vsync = false;/' "$GEN.tmp"
+    mv "$GEN.tmp" "$GEN"
+    if [ "$ANIM" = 1 ] && picom-animated --config "$GEN" --daemon 2>/dev/null; then
+        return
+    fi
+    # picom chính chủ không hiểu khối animation
+    strip_block anim "$GEN"
+    picom --config "$GEN" --daemon
+}
+
+run_conky() {
+    case "${XDG_CURRENT_DESKTOP:-}" in *XFCE*) ;; *) return ;; esac
+    if [ "$WIDGETS" = 1 ]; then
+        pgrep -x conky >/dev/null || conky -d >/dev/null 2>&1
+    else
+        pkill -x conky 2>/dev/null
+    fi
+}
+
+# Dynamic Island: cả XFCE lẫn i3. Tiến trình là "python3 /usr/bin/depot-island" nên tìm theo dòng lệnh;
+# bản thân depot-island cũng chỉ cho chạy một bản mỗi phiên (Gtk.Application).
+run_island() {
+    command -v depot-island >/dev/null || return 0
+    if [ "$ISLAND" = 1 ]; then
+        pgrep -f 'bin/depot-island( |$)' >/dev/null || (setsid depot-island >/dev/null 2>&1 &)
+    else
+        pkill -f 'bin/depot-island( |$)' 2>/dev/null
+    fi
+}
+
+apply() {
+    run_picom
+    if command -v xfconf-query >/dev/null; then
+        # box_move/box_resize = kéo cửa sổ chỉ vẽ khung
+        xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s "$(tf "$(not "$LIVEDRAG")")" 2>/dev/null
+        xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s "$(tf "$(not "$LIVEDRAG")")" 2>/dev/null
+        xfconf-query -c xsettings -p /Net/EnableAnimations -n -t bool -s "$(tf "$GTKANIM")" 2>/dev/null
+        xfconf-query -c xsettings -p /Xft/Antialias -n -t int -s "$FONTSMOOTH" 2>/dev/null
+        if [ "$THUMBS" = 1 ]; then m=THUNAR_THUMBNAIL_MODE_ONLY_LOCAL; else m=THUNAR_THUMBNAIL_MODE_NEVER; fi
+        xfconf-query -c thunar -p /misc-thumbnail-mode -n -t string -s $m 2>/dev/null
+    fi
+    # app GTK chạy ngoài phiên XFCE (i3) đọc settings.ini
+    ini_set gtk-enable-animations "$(tf "$GTKANIM")"
+    ini_set gtk-xft-antialias "$FONTSMOOTH"
+    gsettings set $PLANK zoom-enabled "$(tf "$DOCKZOOM")" 2>/dev/null
+    run_conky
+    run_island
+}
+
+status() {
+    echo "Máy:      $(hw_text)"
+    echo "RAM:      $RAM MB"
+    echo "Chế độ:   $(preset_name "$PRESET")"
+    for k in $KEYS; do
+        eval "v=\$$k"
+        [ "$v" = 1 ] && m="✓" || m="✗"
+        echo "  $m $(label "$k")"
+    done
+    pgrep -a picom || echo "picom: không chạy"
+}
+
+gui() {
+    load
+    old=$PRESET
+    cb=""
+    for p in auto best fast custom; do
+        n=$(preset_name $p)
+        [ $p = "$PRESET" ] && n="^$n"
+        cb="$cb${cb:+!}$n"
+    done
+    # yad: mọi --field trước, rồi giá trị từng field theo đúng thứ tự đó
+    set -- "--field=Chế độ:CB"
+    for k in $KEYS; do set -- "$@" "--field=$(label "$k"):CHK"; done
+    set -- "$@" "$cb"
+    for k in $KEYS; do
+        eval "v=\$$k"
+        set -- "$@" "$(tf "$v" | tr a-z A-Z)"
+    done
+    out=$(yad --form --title="Hiệu ứng hình ảnh" --window-icon=preferences-desktop-theme \
+        --width=540 --borders=16 --separator='|' \
+        --text="Máy này: $(hw_text)\n\nĐổi chế độ thì các ô theo chế độ mới. Tự bật, tắt ô nào thì thành Tuỳ chỉnh." \
+        --button="Huỷ:1" --button="Áp dụng:2" --button="OK:0" "$@")
+    rc=$?
+    [ $rc = 0 ] || [ $rc = 2 ] || exit 0
+
+    oldifs=$IFS; IFS='|'
+    # shellcheck disable=SC2086
+    set -- $out
+    IFS=$oldifs
+    chosen=$1; shift
+    new=auto
+    for p in auto best fast custom; do [ "$(preset_name $p)" = "$chosen" ] && new=$p; done
+
+    changed=0
+    for k in $KEYS; do
+        [ "$1" = TRUE ] && v=1 || v=0
+        eval "[ \"\$$k\" = $v ] || changed=1"
+        eval "NEW_$k=$v"
+        shift
+    done
+    # giống Windows: giữ chế độ cũ mà tự đổi ô nào đó thì thành Tuỳ chỉnh
+    [ "$new" = "$old" ] && [ $changed = 1 ] && new=custom
+    PRESET=$new
+    if [ "$PRESET" = custom ]; then
+        for k in $KEYS; do eval "$k=\$NEW_$k"; done
+    fi
+    commit
+    [ $rc = 2 ] && exec "$0"
+}
+
+# Chế độ pin (depot-power) đè tạm khi ở mức High/Ultra: file trong /run, không đổi lựa chọn đã lưu
+override() {
+    o=$(cat "${XDG_RUNTIME_DIR:-/tmp}/depot-effects.override" 2>/dev/null)
+    case $o in
+        high) WIDGETS=0 ;;
+        ultra) for k in $KEYS; do eval "$k=$(preset_val fast "$k")"; done ;;
+    esac
+}
+
+case "${1:-}" in
+    apply) load; override; apply ;;
+    set)
+        case "${2:-}" in auto | best | fast) ;; *) echo "dùng: depot-effects set auto|best|fast" >&2; exit 2 ;; esac
+        load; PRESET=$2; commit ;;
+    island)
+        # bật/tắt riêng Dynamic Island (menu chuột phải trên viên gọi "island off"): giữ nguyên các ô khác,
+        # chế độ thành Tuỳ chỉnh, không khởi động lại picom
+        case "${2:-}" in on) want=1 ;; off) want=0 ;; *) echo "dùng: depot-effects island on|off" >&2; exit 2 ;; esac
+        load; PRESET=custom; ISLAND=$want; save; override; run_island ;;
+    status) load; status ;;
+    '') gui ;;
+    *) echo "dùng: depot-effects [apply|set auto|best|fast|island on|off|status]" >&2; exit 2 ;;
+esac
+exit 0

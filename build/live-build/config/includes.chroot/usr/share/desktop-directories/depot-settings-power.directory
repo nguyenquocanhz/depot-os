@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Directory
+Name=Pin và nguồn
+Name[en]=Battery & power
+Comment=Chế độ pin, tắt màn hình, ngủ
+Icon=preferences-system-power

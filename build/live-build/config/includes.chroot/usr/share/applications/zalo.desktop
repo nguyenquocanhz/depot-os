@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Zalo
+Comment=Zalo Web trong cửa sổ riêng (Zalo không có bản Linux)
+Exec=depot-webapp Zalo https://chat.zalo.me
+Icon=zalo
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=Zalo

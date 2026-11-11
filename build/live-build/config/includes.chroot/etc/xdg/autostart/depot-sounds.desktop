@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Âm thanh Depot OS
+Comment=Chuông khởi động và âm báo: thông báo, cắm/rút USB, cắm/rút sạc
+Exec=depot-sounds session
+TryExec=depot-sounds
+Terminal=false
+NoDisplay=true

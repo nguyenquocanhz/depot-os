@@ -1,0 +1,8 @@
+// Depot OS — user nhóm sudo đang ngồi máy đổi ngôn ngữ, múi giờ, đồng bộ giờ (depot-region) mà không phải nhập mật khẩu.
+// Người không thuộc nhóm sudo, phiên từ xa: vẫn hỏi mật khẩu quản trị (mặc định của action).
+polkit.addRule(function(action, subject) {
+    if (action.id == "tech.wrenevil.depot.region" &&
+        subject.local && subject.active && subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});

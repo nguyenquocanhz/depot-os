@@ -1,0 +1,182 @@
+#!/bin/sh
+# Depot OS — vị trí đồng hồ trên panel (XFCE)
+#   depot-clock                       mở cửa sổ chọn
+#   depot-clock left|center|right     đổi ngay
+#   depot-clock apply                 áp lại lựa chọn đã lưu (depot-layout gọi sau khi đổi bố cục)
+#   depot-clock current               in vị trí đang chọn
+# Bố cục nào cho vị trí nào:
+#   macOS      trái (cạnh menu) | giữa (kiểu GNOME/Ubuntu) | phải (mặc định)
+#   Windows 10 trái (cạnh Start) | phải (mặc định) — giữa taskbar là chỗ app đang mở
+#   Windows 11 trái (góc dưới trái) | phải (mặc định) — giữa đã có Start + app ghim
+# Giữa: XFCE không canh giữa được một plugin khi hai bên rộng khác nhau (khay bên phải rộng hơn nút menu),
+# nên đồng hồ nằm trên một panel riêng (panel-9) ở chính giữa cạnh trên, nền trong suốt, đè lên panel menu.
+# Giống depot-layout: tắt panel (panel lưu cấu hình của nó), sửa xfconf, bật lại — panel đang chạy
+# không đọc lại danh sách plugin, và lúc thoát sẽ ghi đè thay đổi.
+STATE="$HOME/.config/depot/clock"
+CH=xfce4-panel
+OVERLAY=9
+
+current() { cat "$STATE" 2>/dev/null || echo right; }
+layout() { depot-layout current 2>/dev/null || echo macos; }
+
+name_of() {
+    case $1 in
+        left) echo "Bên trái" ;;
+        center) echo "Ở giữa" ;;
+        *) echo "Bên phải" ;;
+    esac
+}
+
+supports() {
+    case "$(layout):$1" in
+        *:left | *:right | macos:center) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+q() { xfconf-query -c $CH "$@" 2>/dev/null; }
+
+# id plugin đồng hồ (tìm theo loại, không đoán số)
+clock_id() {
+    q -l | grep -E '^/plugins/plugin-[0-9]+$' | while read -r p; do
+        [ "$(q -p "$p")" = clock ] && echo "${p##*-}" && break
+    done
+}
+
+ids_of() { q -p "/panels/panel-$1/plugin-ids" | grep -E '^[0-9]+$'; }
+panels() { q -p /panels | grep -E '^[0-9]+$'; }
+
+set_ints() {   # set_ints THUỘC-TÍNH SỐ...
+    prop=$1; shift
+    set -- $(for i in "$@"; do printf -- '-t int -s %s ' "$i"; done)
+    q -p "$prop" -n -a "$@"
+}
+
+# chèn ID vào danh sách: trước/sau plugin MỐC; mốc không còn (người dùng đã gỡ) thì đầu/cuối danh sách
+place() {   # place before|after|first|last MỐC ID DANH-SÁCH...
+    how=$1 anchor=$2 id=$3; shift 3
+    out="" done=""
+    [ "$how" = first ] && { out=$id; done=1; }
+    for i in "$@"; do
+        if [ -z "$done" ] && [ "$i" = "$anchor" ]; then
+            case $how in
+                before) out="$out $id $i" ;;
+                after) out="$out $i $id" ;;
+            esac
+            done=1
+        else
+            out="$out $i"
+        fi
+    done
+    [ -n "$done" ] || case $how in before | first) out="$id$out" ;; *) out="$out $id" ;; esac
+    echo $out
+}
+
+remove_overlay() {
+    set_ints /panels $(panels | grep -vx $OVERLAY)
+    q -p /panels/panel-$OVERLAY -r -R
+}
+
+make_overlay() {   # make_overlay ID-ĐỒNG-HỒ
+    size=$(q -p /panels/panel-1/size); size=${size:-28}
+    q -p /panels/panel-$OVERLAY -r -R
+    # p=9: chính giữa cạnh trên (p=10 là giữa cạnh dưới); length 1 + length-adjust = co vừa đồng hồ
+    q -p /panels/panel-$OVERLAY/position -n -t string -s "p=9;x=0;y=0"
+    q -p /panels/panel-$OVERLAY/position-locked -n -t bool -s true
+    q -p /panels/panel-$OVERLAY/size -n -t uint -s "$size"
+    q -p /panels/panel-$OVERLAY/length -n -t uint -s 1
+    q -p /panels/panel-$OVERLAY/length-adjust -n -t bool -s true
+    # panel menu đã giữ chỗ cạnh trên; nền trong suốt để chỉ thấy chữ trên nền panel menu
+    q -p /panels/panel-$OVERLAY/disable-struts -n -t bool -s true
+    q -p /panels/panel-$OVERLAY/background-style -n -t uint -s 1
+    q -p /panels/panel-$OVERLAY/background-rgba -n -a -t double -s 0 -t double -s 0 -t double -s 0 -t double -s 0
+    set_ints /panels/panel-$OVERLAY/plugin-ids "$1"
+    set_ints /panels $(panels | grep -vx $OVERLAY) $OVERLAY
+}
+
+arrange() {   # arrange VỊ-TRÍ — gọi khi panel đã tắt
+    c=$(clock_id)
+    [ -n "$c" ] || { echo "!! panel không có đồng hồ" >&2; return 1; }
+    lay=$(layout)
+    # gỡ đồng hồ khỏi mọi panel, nhớ panel đang chứa nó
+    for p in $(panels); do
+        ids=$(ids_of "$p")
+        echo "$ids" | grep -qx "$c" && set_ints /panels/panel-$p/plugin-ids $(echo "$ids" | grep -vx "$c")
+    done
+    remove_overlay
+    # mốc theo id plugin trong bố cục Depot (dotfiles xfce4-panel.xml, layouts/*/xfce4-panel.xml)
+    case "$lay:$1" in
+        macos:center) make_overlay "$c"; return ;;
+        macos:left | windows:left) p=1 how=after anchor=2 ;;     # sau nút menu/Start + vạch ngăn
+        windows11:left) p=1 how=first anchor=- ;;                # góc dưới trái, trước vạch co giãn
+        macos:*) p=1 how=before anchor=9 ;;                      # trước nút tài khoản
+        windows:*) p=1 how=before anchor=9 ;;                    # trước chuông thông báo
+        windows11:*) p=2 how=before anchor=9 ;;
+    esac
+    set_ints /panels/panel-$p/plugin-ids $(place $how $anchor "$c" $(ids_of $p))
+}
+
+restart_panel() {
+    (setsid xfce4-panel >/dev/null 2>&1 &)
+}
+
+set_pos() {
+    supports "$1" || { echo "Bố cục $(layout) không có vị trí '$1'." >&2; return 1; }
+    running=$(pgrep -x xfce4-panel)
+    [ -n "$running" ] && { xfce4-panel --quit 2>/dev/null; sleep 0.5; }
+    arrange "$1" || { [ -n "$running" ] && restart_panel; return 1; }
+    mkdir -p "$(dirname "$STATE")"
+    echo "$1" > "$STATE"
+    [ -n "$running" ] && restart_panel
+    return 0
+}
+
+gui() {
+    # vị trí đã chọn mà bố cục này không có (giữa → đổi sang Windows) thì đồng hồ đang ở bên phải
+    cur=$(current)
+    supports "$cur" || cur=right
+    if [ "$(layout)" = macos ]; then
+        text="Đồng hồ trên thanh menu:
+<b>Bên trái</b>: ngay cạnh nút menu.
+<b>Ở giữa</b>: giữa màn hình, giống Ubuntu.
+<b>Bên phải</b>: cạnh âm lượng và pin, giống macOS."
+        set -- --button="Bên trái:2" --button="Ở giữa:3" --button="Bên phải:4"
+    else
+        text="Đồng hồ trên taskbar:
+<b>Bên trái</b>: góc trái taskbar.
+<b>Bên phải</b>: cạnh âm lượng và pin, giống Windows.
+(Giữa taskbar là chỗ của nút Start và app.)"
+        set -- --button="Bên trái:2" --button="Bên phải:4"
+    fi
+    yad --title="Vị trí đồng hồ" --window-icon=preferences-system-time --width=440 --borders=16 \
+        --image=preferences-system-time --text="<b>Đang dùng: $(name_of "$cur")</b>
+
+$text" "$@" --button="Đóng:1"
+    case $? in
+        2) new=left ;;
+        3) new=center ;;
+        4) new=right ;;
+        *) return ;;
+    esac
+    [ "$cur" = "$new" ] || set_pos "$new"
+}
+
+case "${1:-}" in
+    current) current; exit 0 ;;
+esac
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *XFCE*) ;;
+    *) echo "Vị trí đồng hồ chỉ áp dụng cho phiên XFCE (i3 dùng i3bar, đồng hồ luôn bên phải)." >&2; exit 1 ;;
+esac
+
+case "${1:-}" in
+    left | center | right) set_pos "$1" ;;
+    apply)
+        # sau khi đổi bố cục: panel mới chép từ XML có đồng hồ bên phải; vị trí không hợp bố cục mới thì để phải
+        pos=$(current)
+        [ "$pos" = right ] && exit 0
+        supports "$pos" || exit 0
+        set_pos "$pos" ;;
+    '') gui ;;
+    *) echo "dùng: depot-clock [left|center|right|apply|current]" >&2; exit 2 ;;
+esac

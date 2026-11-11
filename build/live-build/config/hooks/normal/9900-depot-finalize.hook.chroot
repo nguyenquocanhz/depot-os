@@ -1,0 +1,13 @@
+#!/bin/sh
+# Depot OS — hook CHẠY CUỐI: làm sẵn việc "cập nhật sau khi /usr đổi" để boot live khỏi làm lại.
+# Mỗi lần boot, systemd so mtime của /usr với /etc/.updated và /var/.updated (ConditionNeedsUpdate=).
+# Thiếu hai file đó → MỌI lần boot live đều chạy ldconfig.service + systemd-update-done.service
+# (squashfs chỉ đọc, không bao giờ giữ được stamp) — LordOS đo được ~7 giây/boot trên VM.
+# Phải đứng SAU mọi hook khác (đánh số 9900): đổi /usr sau khi stamp là stamp cũ lại.
+set -e
+
+# cache ld.so phải mới thật trước khi đánh dấu "đã cập nhật"
+ldconfig
+/usr/lib/systemd/systemd-update-done
+
+echo ">> Depot finalize: ldconfig xong, stamp $(cat /etc/.updated 2>/dev/null | tr '\n' ' ')"

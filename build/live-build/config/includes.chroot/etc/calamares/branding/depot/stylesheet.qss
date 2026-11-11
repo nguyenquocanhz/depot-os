@@ -1,0 +1,8 @@
+/* Depot OS — Calamares: chữ nút "Giới thiệu"/"Debug" ở chân thanh bên tối (mặc định chữ đen, không đọc được) */
+#aboutButton, #debugButton {
+    color: #c9cfdc;
+    background: transparent;
+    border: none;
+}
+#aboutButton:hover, #debugButton:hover { color: #ffffff; }
+/* KHÔNG tô #slideshow: objectName đó là cả trang cài, chữ "Toggle log"/trạng thái sẽ chìm. Nền tối nằm trong show.qml. */

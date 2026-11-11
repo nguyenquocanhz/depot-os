@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Bố cục desktop
+Comment=Chọn kiểu macOS (thanh menu trên, dock dưới) hoặc kiểu Windows (taskbar dưới)
+Exec=depot-layout
+TryExec=yad
+Icon=preferences-desktop
+Terminal=false
+OnlyShowIn=XFCE;
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-PersonalSettings;DesktopSettings;
+Keywords=bố cục;taskbar;dock;windows;macos;panel;layout;

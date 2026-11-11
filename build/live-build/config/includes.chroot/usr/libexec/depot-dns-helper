@@ -1,0 +1,79 @@
+#!/bin/sh
+# Depot OS — DNS mã hoá (DNS-over-TLS) qua systemd-resolved. Chạy bằng root (pkexec từ depot-dns-proxy).
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-dns-helper on nextdns <ID>     NextDNS, ID 6 ký tự hex (trong my.nextdns.io → Cài đặt)
+#   depot-dns-helper on cloudflare|quad9|adguard
+#   depot-dns-helper off                 trả về như cũ: NetworkManager tự ghi resolv.conf, tắt systemd-resolved
+#
+# Mặc định Depot KHÔNG dùng systemd-resolved (hook 0450 tắt nó). Bật DNS mã hoá thì:
+#   /etc/systemd/resolved.conf.d/90-depot-private-dns.conf   máy chủ + DNSOverTLS=yes + Domains=~. (mọi tên miền)
+#   /etc/NetworkManager/conf.d/90-depot-private-dns.conf     dns=none: NM thôi đẩy DNS của nhà mạng (không rò)
+#   /etc/resolv.conf → ../run/systemd/resolve/stub-resolv.conf (127.0.0.53)
+# DNSOverTLS=yes là chế độ chặt: không mã hoá được thì không phân giải (không lặng lẽ rơi về DNS thường).
+set -u
+RC=/etc/systemd/resolved.conf.d/90-depot-private-dns.conf
+NC=/etc/NetworkManager/conf.d/90-depot-private-dns.conf
+[ "$(id -u)" = 0 ] || { echo "depot-dns-helper: cần quyền root" >&2; exit 1; }
+
+servers() {   # $1 nhà cung cấp, $2 ID NextDNS
+    case $1 in
+        nextdns)
+            printf '%s\n' "45.90.28.0#$2.dns.nextdns.io" "2a07:a8c0::#$2.dns.nextdns.io" \
+                "45.90.30.0#$2.dns.nextdns.io" "2a07:a8c1::#$2.dns.nextdns.io" ;;
+        cloudflare)
+            printf '%s\n' 1.1.1.1#cloudflare-dns.com 2606:4700:4700::1111#cloudflare-dns.com \
+                1.0.0.1#cloudflare-dns.com 2606:4700:4700::1001#cloudflare-dns.com ;;
+        quad9)
+            printf '%s\n' 9.9.9.9#dns.quad9.net 2620:fe::fe#dns.quad9.net \
+                149.112.112.112#dns.quad9.net 2620:fe::9#dns.quad9.net ;;
+        adguard)
+            printf '%s\n' 94.140.14.14#dns.adguard-dns.com 2a10:50c0::ad1:ff#dns.adguard-dns.com \
+                94.140.15.15#dns.adguard-dns.com 2a10:50c0::ad2:ff#dns.adguard-dns.com ;;
+        *) return 1 ;;
+    esac
+}
+
+nm_reload() { nmcli general reload >/dev/null 2>&1 || systemctl try-reload-or-restart NetworkManager 2>/dev/null; :; }
+
+case "${1:-}" in
+    on)
+        prov=${2:-}; id=$(printf '%s' "${3:-}" | tr 'A-F' 'a-f')
+        if [ "$prov" = nextdns ]; then
+            case $id in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+                *) echo "depot-dns-helper: ID NextDNS phải là 6 ký tự 0-9 a-f (ví dụ 85d4e4)" >&2; exit 2 ;; esac
+        fi
+        list=$(servers "$prov" "$id") || { echo "depot-dns-helper: nhà cung cấp lạ: $prov" >&2; exit 2; }
+        command -v resolvectl >/dev/null || { echo "depot-dns-helper: thiếu gói systemd-resolved" >&2; exit 1; }
+        mkdir -p "${RC%/*}" "${NC%/*}"
+        {
+            echo "# do depot-dns-helper ghi ($prov) — tắt bằng \"DNS và Proxy\" → Tự động"
+            echo "[Resolve]"
+            printf '%s\n' "$list" | sed 's/^/DNS=/'
+            echo "DNSOverTLS=yes"
+            echo "Domains=~."
+            echo "FallbackDNS="
+        } >"$RC.tmp" && mv "$RC.tmp" "$RC"
+        # systemd-resolved=false: không có dòng này NM vẫn đẩy DNS nhà mạng vào từng card mạng của resolved
+        # → truy vấn đi song song ra DNS thường (rò)
+        printf '%s\n' "# do depot-dns-helper ghi: DNS do systemd-resolved lo (mã hoá), NM không đẩy DNS nhà mạng" \
+            "[main]" "dns=none" "systemd-resolved=false" >"$NC"
+        systemctl enable systemd-resolved.service >/dev/null 2>&1
+        systemctl restart systemd-resolved.service || { echo "depot-dns-helper: không chạy được systemd-resolved" >&2; exit 1; }
+        ln -sfn ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+        nm_reload
+        # bỏ DNS nhà mạng NM đã đẩy vào từng card trước đó (lúc resolved còn chạy kiểu cũ)
+        for l in /sys/class/net/*; do resolvectl revert "${l##*/}" 2>/dev/null; done
+        resolvectl flush-caches 2>/dev/null
+        echo "DNS mã hoá: $prov"
+        ;;
+    off)
+        rm -f "$RC" "$NC"
+        nm_reload
+        systemctl disable --now systemd-resolved.service >/dev/null 2>&1
+        ln -sfn ../run/NetworkManager/resolv.conf /etc/resolv.conf
+        nm_reload
+        echo "DNS mã hoá: tắt"
+        ;;
+    *) echo "cách dùng: $0 on nextdns ID | on cloudflare|quad9|adguard | off" >&2; exit 2 ;;
+esac

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Depot OS — vùng lưu trên USB ("Lưu dữ liệu trên USB", depot-persist): thêm / xoá phân vùng lưu trên USB đang boot.
+     Mặc định hỏi mật khẩu quản trị; /etc/polkit-1/rules.d/50-depot-persist.rules cho user nhóm sudo đang ngồi máy
+     (user của phiên USB) làm không hỏi. -->
+<policyconfig>
+  <vendor>Depot OS by WrenEvil</vendor>
+  <action id="tech.wrenevil.depot.persist">
+    <description>Tạo, đổi mật khẩu, xoá vùng lưu trên USB</description>
+    <message>Thay đổi vùng lưu trên USB cần quyền quản trị</message>
+    <icon_name>drive-removable-media</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/depot-persist-helper</annotate>
+  </action>
+</policyconfig>

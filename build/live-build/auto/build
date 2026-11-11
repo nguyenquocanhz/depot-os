@@ -1,0 +1,54 @@
+#!/bin/sh
+# Depot OS — build ISO: ./auto/build (WSL root) hoặc sudo ./auto/build
+# (tự sync dotfiles vào includes + chmod hooks, rồi gọi lb build)
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"    # .../auto
+LIVE="$(dirname "$HERE")"                # .../build/live-build
+
+# Tìm gốc repo (thư mục chứa dotfiles/) bằng cách đi ngược lên.
+# Chịu được cả layout repo (depot-os/build/live-build) lẫn bản copy phẳng.
+ROOT=""
+d="$LIVE"
+while [ "$d" != "/" ]; do
+    if [ -d "$d/dotfiles" ]; then
+        ROOT="$d"
+        break
+    fi
+    d="$(dirname "$d")"
+done
+
+if [ -n "$ROOT" ]; then
+    DST="$LIVE/config/includes.chroot/usr/share/depot-os"
+    rm -rf "$DST/dotfiles"
+    mkdir -p "$DST"
+    cp -a "$ROOT/dotfiles" "$DST/dotfiles"
+    echo ">> Đã sync dotfiles: $ROOT/dotfiles -> $DST/dotfiles"
+    # file mẫu cài tự động (depot-autoinstall) — trong ISO: /usr/share/depot-os/autoinstall/
+    if [ -f "$ROOT/tools/autoinstall/depot-autoinstall.conf" ]; then
+        rm -rf "$DST/autoinstall"; mkdir -p "$DST/autoinstall"
+        cp "$ROOT/tools/autoinstall/depot-autoinstall.conf" "$DST/autoinstall/depot-autoinstall.conf.example"
+        cp "$ROOT/tools/autoinstall/README.md" "$DST/autoinstall/README.md" 2>/dev/null || true
+    fi
+else
+    echo "!! KHÔNG tìm thấy dotfiles/ — ISO sẽ thiếu rice giao diện" >&2
+fi
+
+# File đến từ Windows có thể mất exec bit — đảm bảo MỌI loại hook chạy được
+# live-build chỉ chạy hook trong hooks/normal/ và hooks/live/ (không đọc hooks/ cấp ngoài)
+chmod +x "$LIVE"/config/hooks/*/*.hook.* 2>/dev/null || true
+chmod +x "$LIVE"/config/includes.chroot/usr/bin/* 2>/dev/null || true
+chmod +x "$LIVE"/config/includes.chroot/usr/libexec/depot-* 2>/dev/null || true
+
+START=$(date +%s)
+lb build noauto "${@}" 2>&1 | tee build.log
+
+# tee nuốt exit code của lb build — kiểm chứng bằng: ISO tồn tại VÀ mới hơn lúc bắt đầu.
+# Dùng ctime (%Z): live-build đặt mtime của ISO về SOURCE_DATE_EPOCH (≈ lúc bắt đầu) nên %Y báo nhầm là ISO cũ.
+ISO="live-image-amd64.hybrid.iso"
+if [ -f "$ISO" ] && [ "$(stat -c %Z "$ISO")" -gt "$START" ]; then
+    echo ">> ISO OK: $(wc -c < "$ISO") bytes (mới)"
+else
+    echo "!! BUILD THẤT BẠI hoặc ISO CŨ (stale). Xem build.log" >&2
+    exit 1
+fi

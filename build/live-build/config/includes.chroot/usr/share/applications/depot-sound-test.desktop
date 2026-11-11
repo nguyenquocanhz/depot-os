@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Thử âm thanh
+Comment=Phát chuông ở loa trái rồi loa phải để kiểm tra loa, tai nghe
+Exec=depot-sounds test
+TryExec=depot-sounds
+Icon=audio-speakers
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-HardwareSettings;HardwareSettings;Audio;
+Keywords=âm thanh;loa;tai nghe;sound;speaker;test;

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Depot OS — gia tốc boot & login:
+# 1) Bỏ các service "chờ mạng" (desktop không cần block boot vì mạng)
+# 2) Pre-bake cache font + icon + desktop database vào squashfs
+#    (nếu không, lần login đầu quét cache rất lâu — nặng nhất với bộ icon WhiteSur)
+set -e
+
+systemctl disable NetworkManager-wait-online.service >/dev/null 2>&1 || true
+systemctl disable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+systemctl disable apt-daily.service apt-daily-upgrade.service >/dev/null 2>&1 || true
+
+# Pre-bake caches (baked vào squashfs, lần login đầu dùng ngay)
+fc-cache -f >/dev/null 2>&1 || true
+for d in /usr/share/icons/*; do
+    [ -d "$d" ] && gtk-update-icon-cache -q -f "$d" >/dev/null 2>&1 || true
+done
+update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+
+echo ">> Depot speed: caches pre-baked, wait-online disabled"

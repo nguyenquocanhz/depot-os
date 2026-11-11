@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Depot OS — phím tắt chạy lệnh (XFCE).
+  PHẢI có "override" = true và ghi ĐỦ cả bộ: thiếu cờ này thì lần đăng nhập đầu xfsettingsd xoá hết /commands/custom
+  rồi chép bộ mặc định của XFCE vào — tới v0.20.2 file chỉ có 2 dòng, không có cờ, nên phím tắt riêng của Depot
+  (Ctrl+Alt+T = xfce4-terminal) chưa bao giờ có hiệu lực. Có cờ rồi thì XFCE không tự thêm mặc định nữa, nên các phím
+  mặc định muốn giữ cũng ghi ở đây. Phím của cửa sổ (/xfwm4/custom: Alt+Tab, Alt+F4, Super+mũi tên…) không ghi ở đây:
+  XFCE tự chép bộ mặc định cho phần đó.
+-->
+<channel name="xfce4-keyboard-shortcuts" version="1.0">
+  <property name="commands" type="empty">
+    <property name="custom" type="empty">
+      <property name="override" type="bool" value="true"/>
+
+      <!-- Kiểu Windows (phím Windows = Super) -->
+      <!-- Win+R = hộp Chạy -->
+      <property name="&lt;Super&gt;r" type="string" value="xfce4-appfinder --collapsed">
+        <property name="startup-notify" type="bool" value="true"/>
+      </property>
+      <!-- Win+E = trình quản lý tệp -->
+      <property name="&lt;Super&gt;e" type="string" value="thunar"/>
+      <!-- Win+I = Cài đặt (Settings Manager) -->
+      <property name="&lt;Super&gt;i" type="string" value="xfce4-settings-manager"/>
+      <!-- Win+L = khoá màn hình -->
+      <property name="&lt;Super&gt;l" type="string" value="xflock4"/>
+      <!-- Win+N = mở / đóng khung Thông báo bên cạnh (depot-notify) -->
+      <property name="&lt;Super&gt;n" type="string" value="depot-notify toggle"/>
+      <!-- Win+V = lịch sử bộ nhớ tạm (Clipman): chọn mục nào là dán luôn -->
+      <property name="&lt;Super&gt;v" type="string" value="depot-clipboard show"/>
+      <!-- Win+P = chọn màn hình / máy chiếu -->
+      <property name="&lt;Super&gt;p" type="string" value="xfce4-display-settings --minimal"/>
+      <!-- Win+Shift+S = chụp một vùng màn hình -->
+      <property name="&lt;Shift&gt;&lt;Super&gt;s" type="string" value="xfce4-screenshooter -r"/>
+      <!-- Ctrl+Shift+F5 = bảng điều khiển Unikey (như UniKey trên Windows) -->
+      <property name="&lt;Primary&gt;&lt;Shift&gt;F5" type="string" value="depot-unikey"/>
+      <!-- Ctrl+Shift+Esc = Task Manager -->
+      <property name="&lt;Primary&gt;&lt;Shift&gt;Escape" type="string" value="xfce4-taskmanager"/>
+      <!-- Ctrl+Alt+Del = hộp đăng xuất / tắt máy -->
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Delete" type="string" value="xfce4-session-logout"/>
+
+      <!-- Depot -->
+      <!-- Ctrl+Alt+T = Terminal -->
+      <property name="&lt;Primary&gt;&lt;Alt&gt;t" type="string" value="xfce4-terminal"/>
+
+      <!-- Giữ từ mặc định XFCE -->
+      <property name="&lt;Alt&gt;F1" type="string" value="xfce4-popup-whiskermenu"/>
+      <property name="&lt;Alt&gt;F2" type="string" value="xfce4-appfinder --collapsed">
+        <property name="startup-notify" type="bool" value="true"/>
+      </property>
+      <property name="&lt;Alt&gt;F3" type="string" value="xfce4-appfinder">
+        <property name="startup-notify" type="bool" value="true"/>
+      </property>
+      <property name="Print" type="string" value="xfce4-screenshooter"/>
+      <property name="&lt;Alt&gt;Print" type="string" value="xfce4-screenshooter -w"/>
+      <property name="&lt;Shift&gt;Print" type="string" value="xfce4-screenshooter -r"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;l" type="string" value="xflock4"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;f" type="string" value="thunar"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Escape" type="string" value="xkill"/>
+      <property name="&lt;Primary&gt;Escape" type="string" value="xfdesktop --menu"/>
+      <property name="XF86Display" type="string" value="xfce4-display-settings --minimal"/>
+      <property name="XF86WWW" type="string" value="exo-open --launch WebBrowser"/>
+      <property name="HomePage" type="string" value="exo-open --launch WebBrowser"/>
+      <property name="XF86Mail" type="string" value="exo-open --launch MailReader"/>
+    </property>
+  </property>
+</channel>

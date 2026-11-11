@@ -1,0 +1,188 @@
+#!/bin/sh
+# Depot OS — phần cần quyền root của "Ngôn ngữ và ngày giờ" (depot-region). Gọi qua pkexec; polkit
+# (tech.wrenevil.depot.region + rules.d/50-depot-region.rules) cho user nhóm sudo đang ngồi máy chạy không hỏi mật khẩu.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-region-helper apply [locale=xx_YY.UTF-8] [formats=xx_YY.UTF-8|same] [timezone=Vùng/Thành_phố]
+#                             [ntp=on|off] [server=máy-chủ|default]
+#   depot-region-helper sync        đồng bộ giờ ngay, in máy chủ + độ lệch
+#
+# Ngôn ngữ:  bật dòng trong /etc/locale.gen, locale-gen (chỉ khi chưa sinh), update-locale → /etc/locale.conf,
+#            chép sang /etc/default/locale nếu đó là file thường (PAM đọc file này lúc đăng nhập).
+#            Có mạng thì cài thêm font CJK (tiếng Trung/Nhật/Hàn) và gói ngôn ngữ Firefox — không có mạng thì bỏ qua.
+# Múi giờ:   timedatectl set-timezone (+ /etc/timezone). Máy dual-boot Windows (adjtime LOCAL) timedatectl tự lo RTC.
+# Đồng bộ:   systemd-timesyncd; máy chủ ghi ở /etc/systemd/timesyncd.conf.d/60-depot-server.conf, luôn kèm
+#            máy chủ dự phòng của Debian (máy chủ chính không trả lời thì timesyncd chuyển sang máy kế).
+# Thử với gốc giả: DEPOT_REGION_ROOT=/gốc-giả (không cần root, lệnh hệ thống chỉ in ra chứ không chạy)
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+R=${DEPOT_REGION_ROOT:-}
+if [ -z "$R" ] && [ "$(id -u)" != 0 ]; then echo "depot-region-helper: cần quyền root" >&2; exit 1; fi
+
+SUP=$R/usr/share/i18n/SUPPORTED
+GEN=$R/etc/locale.gen
+LCONF=$R/etc/locale.conf
+LDEF=$R/etc/default/locale
+NTPF=$R/etc/systemd/timesyncd.conf.d/60-depot-server.conf
+BACKUP_NTP="0.debian.pool.ntp.org 1.debian.pool.ntp.org"
+
+run() { if [ -n "$R" ]; then echo "+ $*"; else "$@"; fi; }
+die() { echo "depot-region-helper: $*" >&2; exit 2; }
+
+# ------------------------------------------------------------------ ngôn ngữ
+check_locale() {   # chỉ nhận dạng xx_YY.UTF-8 có trong danh sách locale của glibc
+    expr "$1" : '[a-z][a-z][a-z]\{0,1\}_[A-Z][A-Z]\.UTF-8$' >/dev/null || die "mã ngôn ngữ \"$1\" không hợp lệ (ví dụ vi_VN.UTF-8, en_US.UTF-8)"
+    awk -v l="$1" '$2 == "UTF-8" && ($1 == l || $1 ".UTF-8" == l) { ok = 1 } END { exit !ok }' "$SUP" 2>/dev/null ||
+        die "hệ thống không có ngôn ngữ \"$1\""
+}
+
+generated() { locale -a 2>/dev/null | grep -qix "$(printf '%s' "$1" | sed 's/UTF-8$/utf8/')"; }
+
+enable_locale() {
+    mkdir -p "${GEN%/*}"; touch "$GEN"
+    if ! grep -qx "$1 UTF-8" "$GEN"; then
+        if grep -qx "# *$1 UTF-8" "$GEN"; then sed -i "s/^# *\($1 UTF-8\)\$/\1/" "$GEN"; else echo "$1 UTF-8" >>"$GEN"; fi
+        NEED_GEN=1
+    fi
+    [ -n "$R" ] || generated "$1" || NEED_GEN=1
+}
+
+language_list() {   # thứ tự tìm bản dịch: ngôn ngữ đã chọn rồi tới tiếng Anh
+    terr=${1%%.*}; lang=${terr%%_*}
+    case $terr in
+        vi_VN) echo vi:en ;;
+        en_US) echo en_US:en ;;
+        en_*) echo "$terr:en" ;;
+        *) echo "$terr:$lang:en" ;;
+    esac
+}
+
+firefox_l10n() {
+    terr=${1%%.*}; lang=${terr%%_*}
+    case $terr in
+        en_US) ;;
+        en_GB | es_ES | pt_BR | zh_CN | zh_TW | es_AR | es_MX | pt_PT | sv_SE | hi_IN | bn_BD | ga_IE | nb_NO | nn_NO | gu_IN | pa_IN)
+            echo "firefox-esr-l10n-$(printf '%s' "$terr" | tr 'A-Z_' 'a-z-')" ;;
+        en_*) echo firefox-esr-l10n-en-gb ;;
+        *) echo "firefox-esr-l10n-$lang" ;;
+    esac
+}
+
+online() { curl -fsI --max-time 8 http://deb.debian.org/debian/dists/trixie/Release >/dev/null 2>&1; }
+
+locale_extras() {   # font + gói ngôn ngữ: có thì tốt, lỗi không làm hỏng việc đổi ngôn ngữ
+    [ -z "$R" ] || return 0
+    pk=
+    case $1 in zh_* | ja_* | ko_*) dpkg -s fonts-noto-cjk >/dev/null 2>&1 || pk="$pk fonts-noto-cjk" ;; esac
+    ff=$(firefox_l10n "$1")
+    if [ -n "$ff" ] && dpkg -s firefox-esr >/dev/null 2>&1 && ! dpkg -s "$ff" >/dev/null 2>&1; then pk="$pk $ff"; fi
+    [ -n "$pk" ] || return 0
+    if ! online; then echo "LƯU Ý: chưa có mạng nên chưa cài được:$pk (đổi lại ngôn ngữ khi có mạng để cài)"; return 0; fi
+    for p in $pk; do
+        apt-cache show "$p" >/dev/null 2>&1 || { apt-get update >/dev/null 2>&1; apt-cache show "$p" >/dev/null 2>&1; } || continue
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 &&
+            echo "đã cài $p" || echo "LƯU Ý: không cài được $p"
+    done
+}
+
+set_locale() {   # $1 ngôn ngữ, $2 định dạng (rỗng/same = theo ngôn ngữ)
+    loc=$1; fmt=${2:-}
+    [ "$fmt" = same ] && fmt=
+    [ "$fmt" = "$loc" ] && fmt=
+    check_locale "$loc"
+    [ -z "$fmt" ] || check_locale "$fmt"
+    NEED_GEN=0
+    enable_locale "$loc"
+    [ -z "$fmt" ] || enable_locale "$fmt"
+    [ "$NEED_GEN" = 0 ] || run locale-gen || die "locale-gen lỗi"
+    set -- "LANG=$loc" "LANGUAGE=$(language_list "$loc")"
+    if [ -n "$fmt" ]; then
+        for v in LC_TIME LC_NUMERIC LC_MONETARY LC_PAPER LC_MEASUREMENT LC_NAME LC_ADDRESS LC_TELEPHONE; do
+            set -- "$@" "$v=$fmt"
+        done
+    fi
+    mkdir -p "${LCONF%/*}" "${LDEF%/*}"
+    # --reset: bỏ biến LC_* cũ; gốc giả thì locale chưa sinh thật nên bỏ bước tự kiểm của update-locale
+    update-locale --reset --locale-file="$LCONF" ${R:+--no-checks} "$@" || die "update-locale lỗi"
+    # Debian 13: /etc/default/locale thường là symlink tới ../locale.conf; nếu là file thường (ISO Depot) thì chép sang
+    if [ ! -L "$LDEF" ]; then
+        { echo "#  File generated by depot-region-helper (giống /etc/locale.conf)"; grep -v '^#' "$LCONF"; } >"$LDEF.tmp" &&
+            mv "$LDEF.tmp" "$LDEF"
+        chmod 644 "$LDEF"
+    fi
+    echo "ngôn ngữ: $loc${fmt:+, định dạng: $fmt}"
+    locale_extras "$loc"
+}
+
+# ------------------------------------------------------------------ múi giờ + đồng bộ giờ
+set_timezone() {
+    z=$1
+    case $z in '' | /* | *..* | *[!A-Za-z0-9_+/-]*) die "múi giờ \"$z\" không hợp lệ (ví dụ Asia/Ho_Chi_Minh)" ;; esac
+    [ -f "$R/usr/share/zoneinfo/$z" ] || die "không có múi giờ \"$z\""
+    if [ -n "$R" ] || ! timedatectl set-timezone "$z" 2>/dev/null; then
+        run ln -sfn "/usr/share/zoneinfo/$z" /etc/localtime     # timedated không chạy (chroot…): tự đặt
+    fi
+    mkdir -p "$R/etc"; echo "$z" >"$R/etc/timezone"
+    echo "múi giờ: $z"
+}
+
+set_ntp() {
+    case $1 in on) v=true ;; off) v=false ;; *) die "ntp=on|off" ;; esac
+    run timedatectl set-ntp "$v" || die "không bật/tắt được đồng bộ giờ (thiếu systemd-timesyncd?)"
+    echo "tự đồng bộ giờ: $1"
+}
+
+set_server() {
+    s=$1
+    if [ "$s" = default ]; then
+        rm -f "$NTPF"
+    else
+        case $s in '' | -* | *[!A-Za-z0-9.:-]*) die "máy chủ giờ \"$s\" không hợp lệ (ví dụ time.windows.com)" ;; esac
+        mkdir -p "${NTPF%/*}"
+        printf '%s\n' "# do depot-region-helper ghi — đổi bằng \"Ngôn ngữ và ngày giờ\"" "[Time]" "NTP=$s $BACKUP_NTP" >"$NTPF.tmp" &&
+            mv "$NTPF.tmp" "$NTPF"
+    fi
+    run systemctl try-restart systemd-timesyncd.service
+    echo "máy chủ giờ: $s"
+}
+
+sync_now() {
+    if [ -n "$R" ]; then echo "+ systemctl restart systemd-timesyncd.service"; return 0; fi
+    timedatectl set-ntp true 2>/dev/null
+    systemctl restart systemd-timesyncd.service || die "không chạy được systemd-timesyncd"
+    i=0
+    while [ $i -lt 20 ]; do
+        st=$(timedatectl timesync-status 2>/dev/null)
+        if printf '%s\n' "$st" | grep -q 'Offset:'; then
+            printf '%s\n' "$st" | sed -n 's/^ *Server: */máy chủ: /p; s/^ *Offset: */độ lệch đã chỉnh: /p'
+            echo "giờ máy: $(date '+%H:%M:%S %d/%m/%Y %Z')"
+            return 0
+        fi
+        sleep 1; i=$((i + 1))
+    done
+    echo "depot-region-helper: chưa đồng bộ được sau 20 giây — kiểm tra mạng (một số mạng chặn cổng NTP 123/UDP), hoặc đổi máy chủ giờ" >&2
+    return 1
+}
+
+case "${1:-}" in
+    apply)
+        shift
+        loc= fmt= tz= ntp= srv=
+        for a in "$@"; do
+            case $a in
+                locale=*) loc=${a#*=} ;;
+                formats=*) fmt=${a#*=} ;;
+                timezone=*) tz=${a#*=} ;;
+                ntp=*) ntp=${a#*=} ;;
+                server=*) srv=${a#*=} ;;
+                *) die "tham số lạ: $a" ;;
+            esac
+        done
+        [ -z "$tz" ] || set_timezone "$tz"
+        [ -z "$srv" ] || set_server "$srv"
+        [ -z "$ntp" ] || set_ntp "$ntp"
+        [ -z "$loc" ] || set_locale "$loc" "$fmt"
+        ;;
+    sync) sync_now ;;
+    *) echo "cách dùng: $0 apply [locale=…] [formats=…|same] [timezone=…] [ntp=on|off] [server=…|default] | sync" >&2; exit 2 ;;
+esac

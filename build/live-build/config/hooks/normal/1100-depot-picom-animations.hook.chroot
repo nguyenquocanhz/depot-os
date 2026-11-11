@@ -1,0 +1,35 @@
+#!/bin/sh
+# Depot OS — picom-animated: fork pijulius/picom có ANIMATION cửa sổ kiểu macOS.
+# Build trong SUBSHELL ( ) — exit 1 bên trong không giết hook (live-build coi
+# hook fail là fatal). Bất kỳ bước fail → giữ picom chính chủ, autostart fallback.
+set -e
+LOGD=/usr/share/depot-os
+LOG="$LOGD/picom-anim.log"
+mkdir -p "$LOGD"
+
+(
+    DEPS="meson ninja-build git libconfig-dev libdrm-dev libpixman-1-dev libx11-dev \
+libxext-dev libxdamage-dev libxfixes-dev libxinerama-dev libxrandr-dev libxrender-dev \
+libxcb1-dev pkg-config uthash-dev libepoxy-dev libxcb-util-dev libxcb-image0-dev \
+libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpcre2-dev libev-dev \
+libxkbcommon-dev libxcb-xkb-dev libxcb-cursor-dev"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $DEPS || exit 1
+
+    cd /tmp
+    rm -rf picom-anim
+    git clone --depth 1 https://github.com/pijulius/picom.git picom-anim || exit 1
+    cd picom-anim
+    meson setup build --buildtype=release || exit 1
+    ninja -C build || exit 1
+    install -m 755 build/src/picom /usr/bin/picom-animated || exit 1
+    echo "OK picom-animated sẵn sàng"
+) > "$LOG" 2>&1 || true
+
+if [ -x /usr/bin/picom-animated ]; then
+    echo ">> picom-animated (pijulius fork) sẵn sàng"
+else
+    echo "!! picom-animated build thất bại — dùng picom chính chủ. Log: $LOG" >&2
+    tail -8 "$LOG" >&2
+fi
+rm -rf /tmp/picom-anim
+exit 0

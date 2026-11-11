@@ -1,0 +1,817 @@
+#!/bin/sh
+# Depot OS — dò driver phần cứng: thiết bị nào đang chạy driver gì, cái nào thiếu, cài gì; sửa Wi-Fi / mạng dây không lên
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-drivers                 mở cửa sổ (yad): tick mục muốn cài, "Sửa mạng", "Lưu báo cáo"
+#   depot-drivers scan            in bảng ra terminal
+#   depot-drivers --notify        lúc đăng nhập: chỉ báo khi có thiết bị chưa có driver / thiếu firmware
+#   depot-drivers firmware-scan   (root, depot-drivers-scan.service) ghi firmware kernel không tìm thấy
+#   depot-drivers install GÓI...  (root, tự xin quyền) cài gói đề xuất; gói đặc biệt:
+#                                   @firmware  isenkram tìm gói firmware còn thiếu (+ firmware b43)
+#                                   @kernel    kernel mới hơn từ backports (Wi-Fi USB đời mới kernel 6.12 chưa có driver)
+#                                   @fix       như "repair"
+#   depot-drivers repair          (root) card mạng không lên: bỏ khoá rfkill, đưa USB Wi-Fi khỏi chế độ ổ đĩa (ZeroCD),
+#                                 nạp lại driver, khởi động lại NetworkManager — không cần khởi động lại máy
+#   depot-drivers report [FILE]   ghi báo cáo phần cứng mạng (mặc định ~/depot-drivers-report.txt) để gửi nhờ hỗ trợ
+#   depot-drivers auto [--boot]   (root) TỰ ĐỘNG: cài driver còn thiếu, build lại driver sau khi cập nhật kernel — udev gọi
+#                                 khi cắm thiết bị USB, depot-drivers-auto.service gọi lúc khởi động, depot-update gọi mỗi ngày
+#   depot-drivers auto-set on|off (root, tự xin quyền) bật/tắt chế độ tự động; auto-status in on/off
+#
+# Firmware non-free đã có sẵn trong ISO nên đa số máy chạy ngay; công cụ này lo phần còn lại:
+# driver đóng (NVIDIA, Broadcom wl), thiết bị không driver nào nhận, firmware Debian chưa đóng gói sẵn.
+#
+# Kho driver trong máy (/usr/share/depot-os/driver-pool, hook 1240): dkms + linux-headers ĐÚNG kernel của ISO +
+# broadcom-sta-dkms + r8168-dkms → máy chưa có mạng (vì chính card mạng thiếu driver) vẫn cài được.
+# Driver DKMS chỉ build cho kernel có header: luôn cài header của kernel ĐANG CHẠY (linux-headers-amd64 trên mạng là
+# của kernel mới nhất — cài mỗi nó thì module không có cho kernel đang chạy, khởi động lại vẫn không nhận card).
+# Cài xong thì nạp driver ngay và kiểm tra; máy bật Secure Boot: đăng ký khoá DKMS (MOK), hướng dẫn in ra màn hình.
+# Thử với máy giả: DEPOT_SYS_ROOT=/gốc-giả (đọc /sys, /lib/modules giả), DEPOT_DRIVER_POOL=/kho-giả, lspci/apt-get/dpkg giả
+# đặt trước trong PATH.
+FW_REPORT=/run/depot-drivers/firmware-missing
+IGNORE="$HOME/.config/depot/drivers-ignore"
+POOL=${DEPOT_DRIVER_POOL:-/usr/share/depot-os/driver-pool}
+SYS=${DEPOT_SYS_ROOT:-}
+TAB=$(printf '\t')
+SELF=$(command -v "$0")   # pkexec cần đường dẫn tuyệt đối
+MOK_PW=depot1234          # mật khẩu dùng MỘT lần ở màn hình xanh MOK lúc khởi động lại (Secure Boot)
+
+# Broadcom Wi-Fi chỉ chạy bằng driver đóng wl (broadcom-sta-dkms) — ID theo wiki.debian.org/wl
+BCM_STA="4311 4312 4313 4315 4727 4328 4329 432a 432b 432c 432d 0576 4353 4357 4358 4359 4365 4331 43a0 43b1"
+# USB Wi-Fi cắm vào hiện ra như ổ đĩa chứa driver Windows (ZeroCD): phải "đẩy đĩa" thì mới thành card Wi-Fi
+ZEROCD="0bda:1a2b 0e8d:2870 148f:2878 a69c:5721 a69c:5723 a69c:5724"
+# USB Wi-Fi Realtek AC/AX: kernel 6.12 của Debian 13 chưa có driver, kernel backports (rtw88/rtw89 USB) thì có
+#   RTL8811AU/8821AU · RTL8812AU · RTL8814AU · RTL8852AU/8832AU · RTL8852BU/8832BU · RTL8851BU
+NEWK="0bda:0811 0bda:a811 0bda:0821 0bda:8822 0bda:0820 0bda:0823 2357:011e 2357:011f 2357:0120 2357:0122
+0bda:8812 0bda:881a 0bda:881b 0bda:881c 2357:0101 2357:0103 2357:010d 2357:010e 2357:010f 2357:0115 0b05:17d2
+0bda:8813 2357:0106 0bda:885a 0bda:885c 0bda:8832 2357:012d 2357:0141
+0bda:b832 0bda:b83a 0bda:b852 0bda:b85a 0bda:a85b 2357:0138 2357:0140 0bda:b851"
+# hãng làm USB Wi-Fi: thiết bị của các hãng này mà không driver nào nhận thì nhiều khả năng là Wi-Fi đời mới
+WIFI_VENDORS="0bda 2357 0e8d 148f 7392 0b05 2001 0846 13b1 050d 20f4 3625 35bc 2604 0411 056e 2019 0586 0df6"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+# driver USB Wi-Fi: đã nạp mà không có card mạng nào hiện ra = lỗi (thiếu firmware, treo…)
+wifi_usb_drv() {
+    case "$1" in
+        rtl8* | rtw_* | rtw88_* | rtw89_* | r8188eu | r8712u | mt76* | mt79* | ath9k_htc | ath10k_usb | carl9170 | \
+        rt2800usb | rt2500usb | rt73usb | zd1211rw | brcmfmac | p54usb | mwifiex_usb | at76c50x-usb) return 0 ;;
+    esac
+    return 1
+}
+in_list() { case " $(echo $2) " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# card mạng (wlan0, enp3s0…) nằm dưới thiết bị này? PCI: $d/net/*, qua cầu bcma/ssb và USB: sâu thêm 1–2 cấp
+netif() { ls -d "$1"/net/* "$1"/*/net/* "$1"/*/*/net/* 2>/dev/null | head -1; }
+is_wifi_if() { [ -d "$1/wireless" ] || [ -e "$1/phy80211" ]; }
+
+# Mỗi dòng: slot \t lớp-tên \t mã-lớp \t tên thiết bị \t vendor:device \t driver đang dùng \t module có thể dùng
+pci_list() {
+    lspci -Dnnk 2>/dev/null | awk -v OFS='\t' '
+        function flush() { if (slot != "") print slot, cname, cls, name, id, (drv == "" ? "-" : drv), (mods == "" ? "-" : mods); slot = "" }
+        /^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]:/ {
+            flush(); slot = $1; line = substr($0, length($1) + 2)
+            # "VGA compatible controller [0300]: Intel ... [8086:0116] (rev 09) (prog-if 00 [VGA controller])"
+            sub(/ \(prog-if .*$/, "", line); sub(/ \(rev [0-9a-f]+\)$/, "", line)
+            i = index(line, "]: "); hdr = substr(line, 1, i); rest = substr(line, i + 3)
+            cls = substr(hdr, length(hdr) - 4, 4); cname = substr(hdr, 1, length(hdr) - 7)
+            id = substr(rest, length(rest) - 9, 9); name = substr(rest, 1, length(rest) - 12)
+            drv = ""; mods = ""; next
+        }
+        /Kernel driver in use:/ { drv = $NF }
+        /Kernel modules:/ { sub(/.*Kernel modules: /, ""); mods = $0 }
+        END { flush() }'
+}
+
+kind_of() {
+    case "$1" in
+        03*) echo "Đồ họa" ;;
+        0280) echo "Wi-Fi" ;;
+        02*) echo "Mạng dây" ;;
+        04*) echo "Âm thanh" ;;
+        01*) echo "Ổ đĩa" ;;
+        0c03) echo "USB" ;;
+        0d*) echo "Không dây" ;;
+        *) echo "Hệ thống" ;;
+    esac
+}
+
+# tên hãng gọn lại để cột trạng thái không bị đẩy khỏi cửa sổ
+short() {
+    echo "$1" | sed -e 's/Advanced Micro Devices, Inc\. \[AMD\/ATI\]/AMD/' \
+        -e 's/ Corporation//; s/ Inc\. and subsidiaries//; s/ Semiconductor Co\., Ltd\.//' \
+        -e 's/ Technology Co\., Ltd\.//; s/ Co\., Ltd\.//; s/, Inc\.//; s/ Inc\.//'
+}
+
+nvidia_pkg() {
+    have nvidia-detect || return
+    nvidia-detect 2>/dev/null | awk '/recommended to install the/ { getline; gsub(/ /, ""); print; exit }'
+}
+
+row() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-—}" "$4" "$5" "$6"; }
+
+# Dòng ra: loại \t thiết bị \t driver \t trạng thái \t gói đề xuất \t cần làm
+#   gói: tên gói Debian | @firmware | @kernel | @fix; có "?" đứng đầu = tuỳ chọn (không tick sẵn)
+#   cần làm: 1 = chưa chạy được (có nhắc lúc đăng nhập), 2 = xem cho biết (không nhắc), 0 = ổn
+scan() {
+    pci_list | while IFS="$TAB" read -r slot cname cls name id drv mods; do
+        case "$cls" in 06*) continue ;; esac
+        [ "$drv" = - ] && drv=""
+        [ "$mods" = - ] && mods=""
+        pkg=""; need=0
+        if [ -n "$drv" ]; then st="✓ Đang chạy"
+        elif [ -n "$mods" ]; then st="⚠ Có driver, chưa nạp"; need=1; pkg=@fix
+        else st="⚠ Chưa có driver"; need=1
+        fi
+        vendor=${id%%:*}; dev=${id#*:}
+        case "$cls" in
+            02*)   # card mạng: driver bám vào thiết bị chưa đủ, phải có card mạng hiện ra (thiếu firmware thì không có)
+                if [ -n "$drv" ] && [ -z "$(netif "$SYS/sys/bus/pci/devices/$slot")" ]; then
+                    st="⚠ Driver đã nạp nhưng card mạng không lên"; need=1; pkg=@fix
+                fi ;;
+        esac
+        case "$vendor:$cls" in
+            10de:03*)
+                if [ "$drv" != nvidia ]; then
+                    pkg=$(nvidia_pkg)
+                    [ -n "$pkg" ] && [ "$drv" = nouveau ] && st="✓ Đang chạy (nouveau, mã mở)"
+                fi ;;
+            14e4:0280)   # Broadcom: b43/bcma bám vào nhưng không có firmware thì vẫn không có Wi-Fi → driver wl
+                if [ $need = 1 ] && in_list "$dev" "$BCM_STA"; then pkg=broadcom-sta-dkms; fi ;;
+            10ec:0200)   # Realtek RTL8111/8168: r8169 của kernel chạy được; chập chờn thì thử driver chính hãng
+                if [ $need = 0 ] && [ "$drv" = r8169 ]; then
+                    case "$dev" in 8168 | 8161 | 8162 | 2600) pkg="?r8168-dkms" ;; esac
+                fi ;;
+        esac
+        row "$(kind_of "$cls")" "$(short "$name")" "$drv" "$st" "$pkg" "$need"
+    done
+
+    for d in "$SYS"/sys/bus/usb/devices/[0-9]*-*; do
+        case "$d" in *:*) continue ;; esac
+        [ -r "$d/idVendor" ] || continue
+        [ "$(cat "$d/bDeviceClass" 2>/dev/null)" = 09 ] && continue
+        drv=""; vendorcls=0
+        for i in "$d":*; do
+            [ -z "$drv" ] && [ -e "$i/driver" ] && drv=$(basename "$(readlink "$i/driver")")
+            case "$(cat "$i/bInterfaceClass" 2>/dev/null)" in ff | e0) vendorcls=1 ;; esac
+        done
+        vid=$(cat "$d/idVendor"); id="$vid:$(cat "$d/idProduct")"
+        name=$(lsusb -d "$id" 2>/dev/null | sed 's/^.*ID [0-9a-f:]* //' | head -1)
+        [ -n "$name" ] || name="$(cat "$d/manufacturer" 2>/dev/null) $(cat "$d/product" 2>/dev/null) [$id]"
+        kind=USB; pkg=""
+        if [ -n "$drv" ]; then st="✓ Đang chạy"; need=0; else st="⚠ Chưa có driver"; need=1; fi
+        n=$(netif "$d")
+        if [ -n "$n" ]; then
+            if is_wifi_if "$n"; then kind="Wi-Fi USB"; else kind="Mạng USB"; fi
+        elif in_list "$id" "$ZEROCD" && [ "$drv" = usb-storage ]; then
+            kind="Wi-Fi USB"; st="⚠ Đang ở chế độ ổ đĩa chứa driver Windows"; pkg=@fix; need=1
+        elif [ "$vid" = a69c ]; then
+            kind="Wi-Fi USB"; st="⚠ Chip AIC8800: chưa có driver Linux chính thức"; need=1
+        elif [ -z "$drv" ] && in_list "$id" "$NEWK"; then
+            kind="Wi-Fi USB"; st="⚠ Kernel này chưa có driver"
+            case "$(uname -r)" in *bpo*) ;; *) pkg=@kernel ;; esac
+        elif [ -z "$drv" ] && [ $vendorcls = 1 ] && in_list "$vid" "$WIFI_VENDORS"; then
+            st="⚠ Chưa có driver (có thể là Wi-Fi đời mới)"
+            case "$(uname -r)" in *bpo*) ;; *) pkg="?@kernel" ;; esac
+        elif wifi_usb_drv "$drv"; then
+            kind="Wi-Fi USB"; st="⚠ Driver đã nạp nhưng card mạng không lên"; pkg=@fix; need=1
+        fi
+        row "$kind" "$(short "$name")" "$drv" "$st" "$pkg" "$need"
+    done
+
+    # Wi-Fi bị tắt bằng rfkill: card có đó nhưng không dò được mạng nào
+    for r in "$SYS"/sys/class/rfkill/rfkill*; do
+        [ "$(cat "$r/type" 2>/dev/null)" = wlan ] || continue
+        if [ "$(cat "$r/hard" 2>/dev/null)" = 1 ]; then
+            row "Wi-Fi" "Sóng Wi-Fi ($(cat "$r/name" 2>/dev/null))" "" "⚠ Bị tắt bằng công tắc / phím Wi-Fi của máy" "" 2
+        elif [ "$(cat "$r/soft" 2>/dev/null)" = 1 ]; then
+            row "Wi-Fi" "Sóng Wi-Fi ($(cat "$r/name" 2>/dev/null))" "" "⚠ Đang bị tắt (chế độ máy bay)" "@fix" 2
+        fi
+    done
+
+    if [ -s "$FW_REPORT" ]; then
+        while read -r f; do
+            row "Firmware" "$f" "" "⚠ Thiếu file firmware" "@firmware" 1
+        done < "$FW_REPORT"
+    fi
+}
+
+firmware_scan() {
+    mkdir -p "$(dirname "$FW_REPORT")"
+    journalctl -k -b -o cat 2>/dev/null \
+        | sed -n 's/.*Direct firmware load for \([^ ]*\) failed.*/\1/p; s/.*firmware: failed to load \([^ ]*\) .*/\1/p' \
+        | sort -u | while read -r f; do
+            # iwlwifi, i915... thử nhiều phiên bản rồi dùng bản có sẵn: còn file cùng gốc thì không tính là thiếu
+            stem=$(echo "$f" | sed 's/-[0-9]*\.ucode$//; s/\.[a-z]*$//')
+            ls /lib/firmware/"$stem"* >/dev/null 2>&1 && continue
+            echo "$f"
+        done > "$FW_REPORT"
+}
+
+# ------------------------------------------------------------------ quyền root
+as_root() {
+    if [ "$(id -u)" = 0 ]; then "$@"
+    elif have pkexec; then pkexec "$@"
+    elif [ -t 0 ] && have sudo; then sudo "$@"
+    else
+        echo "!! Thiếu pkexec nên không xin được quyền quản trị từ cửa sổ này."
+        echo "   Mở Terminal và chạy:  sudo $(basename "$1") $(shift; echo "$*")"
+        echo "   (cài lại pkexec khi có mạng: sudo apt install pkexec)"
+        return 1
+    fi
+}
+
+online() { curl -fsI --max-time 8 http://deb.debian.org/debian/dists/trixie/Release >/dev/null 2>&1; }
+
+no_net_hint() {
+    [ "${HINTED:-0}" = 1 ] && return 0   # nhiều mục cùng thiếu mạng: chỉ dẫn một lần
+    HINTED=1
+    echo "   Chưa có mạng. Cách có mạng tạm để tải driver:"
+    echo "   • cắm dây LAN, hoặc"
+    echo "   • cắm điện thoại vào máy bằng cáp USB rồi bật “Chia sẻ kết nối qua USB” (USB tethering) trên điện thoại."
+}
+
+sb_on() { have mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; }
+
+# Secure Boot chỉ nạp module đã ký bằng khoá máy tin. DKMS tự ký bằng /var/lib/dkms/mok.key; khoá công khai phải được
+# đăng ký (MOK) một lần ở màn hình xanh lúc khởi động lại.
+mok_enroll() {
+    sb_on || return 1
+    [ -r /var/lib/dkms/mok.pub ] || return 1
+    mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -qi 'already enrolled' && return 1
+    printf '%s\n%s\n' "$MOK_PW" "$MOK_PW" | mokutil --import /var/lib/dkms/mok.pub >/dev/null 2>&1 || return 1
+    cat <<E
+
+!! MÁY BẬT SECURE BOOT — còn MỘT bước lúc khởi động lại, thiếu bước này driver vừa cài không chạy:
+   1. Khởi động lại máy. Màn hình xanh "Perform MOK management" hiện ra (chỉ hiện ~10 giây, bấm phím bất kỳ).
+   2. Chọn  Enroll MOK  →  Continue  →  Yes.
+   3. Nhập mật khẩu:  $MOK_PW
+   4. Chọn  Reboot.
+   Lỡ bỏ qua màn hình đó thì mở lại "Driver phần cứng" và cài lại mục này.
+E
+    return 0
+}
+
+# header của kernel ĐANG CHẠY — DKMS build module cho kernel nào có header
+ensure_headers() {
+    k=$(uname -r)
+    [ -e "$SYS/lib/modules/$k/build/Makefile" ] && return 0
+    if [ "$(cat "$POOL/kernel" 2>/dev/null)" = "$k" ] && ls "$POOL"/base/*.deb >/dev/null 2>&1; then
+        echo ">> Cài công cụ build driver từ kho có sẵn trong máy (kernel $k)…"
+        # -E bỏ qua gói đã cài đúng bản, -G không hạ cấp gói máy đã có bản mới hơn
+        dpkg -i -E -G "$POOL"/base/*.deb >/dev/null 2>&1 || dpkg --configure -a >/dev/null 2>&1
+    fi
+    [ -e "$SYS/lib/modules/$k/build/Makefile" ] && return 0
+    if [ "$NET" = 1 ]; then
+        echo ">> Tải header cho kernel đang chạy ($k)…"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-headers-$k" && return 0
+        echo "!! Kho Debian không còn header cho kernel $k (đã có kernel mới hơn)."
+        echo "   Cập nhật máy rồi khởi động lại (để chạy kernel mới), sau đó cài lại driver này."
+    else
+        echo "!! Không có header cho kernel $k trong kho của máy (kho làm cho kernel $(cat "$POOL/kernel" 2>/dev/null || echo '?'))."
+        no_net_hint
+    fi
+    return 1
+}
+
+module_of() { case "$1" in broadcom-sta-dkms) echo wl ;; r8168-dkms) echo r8168 ;; esac; }
+
+# nạp driver vừa cài ngay, không chờ khởi động lại; trả 0 nếu module đang nằm trong kernel
+load_module() {
+    case "$1" in
+        wl) modprobe -r b43 b43legacy bcma brcmsmac brcmfmac ssb wl 2>/dev/null ;;
+        r8168) modprobe -r r8169 2>/dev/null ;;
+    esac
+    modprobe "$1" 2>&1 | sed 's/^/   /'
+    [ -d "$SYS/sys/module/$1" ]
+}
+
+install_dkms() {   # $1 = gói -dkms
+    p=$1; m=$(module_of "$p"); k=$(uname -r)
+    echo ">> Cài driver $p…"
+    ensure_headers || return 1
+    if [ "$NET" = 1 ]; then
+        # linux-headers-amd64: lần cập nhật kernel sau header đi kèm → DKMS tự build lại, không mất Wi-Fi sau cập nhật
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" linux-headers-amd64 ||
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" || return 1
+    else
+        f=$(ls "$POOL/drivers/${p}_"*.deb 2>/dev/null | head -1)
+        if [ -z "$f" ]; then echo "!! $p không có trong kho của máy."; no_net_hint; return 1; fi
+        echo "   (không có mạng: lấy từ kho có sẵn trong máy)"
+        dpkg -i -E -G "$POOL"/base/*.deb "$f" >/dev/null 2>&1
+        dpkg --configure -a 2>&1 | tail -5
+        dpkg -s "$p" 2>/dev/null | grep -q '^Status: install ok installed' || { echo "!! Cài $p từ kho của máy lỗi."; return 1; }
+    fi
+    [ -n "$m" ] || return 0
+    if ! modinfo -k "$k" "$m" >/dev/null 2>&1; then
+        echo "!! Driver $m chưa build được cho kernel $k:"
+        dkms status 2>/dev/null | sed 's/^/   /'
+        tail -15 /var/lib/dkms/*/*/build/make.log 2>/dev/null | sed 's/^/   | /'
+        return 1
+    fi
+    if load_module "$m"; then
+        echo ">> Driver $m đã chạy."
+        return 0
+    fi
+    enrolled=0
+    mok_enroll && enrolled=1
+    if [ "$m" = r8168 ]; then
+        # r8168-dkms chặn r8169: chưa nạp được r8168 mà để nguyên thì máy mất mạng dây (Secure Boot: tới khi làm xong
+        # bước MOK; lỡ bỏ qua màn hình MOK là mất hẳn). Gỡ ra, dùng lại r8169; khoá đã xếp hàng thì lần sau cài là chạy.
+        echo "!! Driver r8168 build xong nhưng chưa nạp được (xem dòng lỗi phía trên)."
+        echo ">> Gỡ $p, dùng lại driver r8169 của kernel để không mất mạng dây."
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y "$p" >/dev/null 2>&1 || dpkg --purge "$p" >/dev/null 2>&1
+        modprobe r8169 2>/dev/null
+        if [ $enrolled = 1 ]; then
+            REBOOT=1
+            echo "   Khởi động lại, làm xong bước MOK ở trên, rồi mở “Driver phần cứng” cài lại r8168."
+        fi
+        return 1
+    fi
+    if [ $enrolled = 1 ]; then REBOOT=1; return 0; fi
+    echo "!! Driver $m build xong nhưng không nạp được (xem dòng lỗi phía trên)."
+    return 1
+}
+
+install_kernel() {
+    if [ "$NET" != 1 ]; then echo "!! Kernel mới phải tải từ mạng (~110 MB)."; no_net_hint; return 1; fi
+    code=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-trixie}")
+    if ! grep -rqs "$code-backports" /etc/apt/sources.list /etc/apt/sources.list.d/; then
+        cat > /etc/apt/sources.list.d/debian-backports.sources <<EOF
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: $code-backports
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+        apt-get update || return 1
+    fi
+    fwp=""
+    for f in firmware-realtek firmware-mediatek firmware-iwlwifi firmware-atheros firmware-misc-nonfree; do
+        dpkg -s $f >/dev/null 2>&1 && fwp="$fwp $f"
+    done
+    echo ">> Cài kernel mới từ $code-backports (kernel cũ vẫn giữ, chọn lại được ở menu boot → Advanced options)…"
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -t "$code-backports" linux-image-amd64 linux-headers-amd64 $fwp || return 1
+    REBOOT=1
+}
+
+install_firmware() {
+    if [ "$NET" != 1 ]; then echo "!! Firmware còn thiếu phải tải từ mạng."; no_net_hint; return 1; fi
+    echo ">> Tìm gói firmware còn thiếu (isenkram)…"
+    isenkram-autoinstall-firmware || true
+    # Wi-Fi Broadcom đời cũ (b43): ISO không mang firmware (nguồn tải lúc build hay hỏng) — tải lại bây giờ
+    if grep -qs '^b43' "$FW_REPORT" && dpkg -s firmware-b43-installer >/dev/null 2>&1; then
+        echo ">> Tải firmware Broadcom b43…"
+        dpkg-reconfigure -f noninteractive firmware-b43-installer || true
+        modprobe -r b43 2>/dev/null; modprobe b43 2>/dev/null
+    fi
+    REBOOT=1
+}
+
+install_pkgs() {
+    if [ "$(id -u)" != 0 ]; then as_root "$SELF" install "$@"; exit $?; fi
+    rm -f "$AUTO_STATE"/fail-* "$AUTO_STATE"/fw-* 2>/dev/null   # người dùng cài tay: lượt tự động sau được thử lại
+    fw=0; kernel=0; fix=0; pkgs=""; dk=""; headers=0; fails=""; REBOOT=0
+    for p in "$@"; do
+        p=${p#\?}
+        case "$p" in
+            @firmware) fw=1 ;;
+            @kernel) kernel=1 ;;
+            @fix) fix=1 ;;
+            '' | *[!a-z0-9.+-]*) echo "!! tên gói không hợp lệ: $p" >&2; exit 2 ;;
+            *-dkms) dk="$dk $p" ;;
+            *) pkgs="$pkgs $p"; case "$p" in nvidia-*) headers=1 ;; esac ;;
+        esac
+    done
+    NET=0
+    if online; then
+        NET=1
+        echo ">> Cập nhật danh sách gói…"
+        apt-get update || echo "!! Không tải được danh sách gói, vẫn thử với danh sách đang có."
+    fi
+    for p in $dk; do install_dkms "$p" || fails="$fails $p"; done
+    if [ -n "$pkgs" ]; then
+        if [ "$NET" != 1 ]; then
+            echo "!! Phải có mạng để tải:$pkgs"; no_net_hint; fails="$fails$pkgs"
+        else
+            # driver NVIDIA build bằng DKMS: cần header kernel đang chạy + header đi theo kernel về sau
+            [ $headers = 1 ] && { ensure_headers; pkgs="linux-headers-amd64$pkgs"; }
+            echo ">> Cài:$pkgs"
+            # shellcheck disable=SC2086
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y $pkgs; then REBOOT=1; mok_enroll || true; else fails="$fails$pkgs"; fi
+        fi
+    fi
+    [ $kernel = 1 ] && { install_kernel || fails="$fails kernel-backports"; }
+    [ $fw = 1 ] && { install_firmware || fails="$fails firmware"; }
+    [ $fix = 1 ] && repair
+    echo
+    if [ -n "$fails" ]; then echo "!! Chưa xong:$fails"; else echo ">> Xong."; fi
+    [ "$REBOOT" = 1 ] && echo ">> Khởi động lại máy để phần vừa cài có hiệu lực."
+    [ -z "$fails" ]
+}
+
+# ------------------------------------------------------------------ sửa mạng không lên
+netdevs() {   # đường dẫn /sys của mọi thiết bị mạng PCI + USB
+    for d in /sys/bus/pci/devices/*; do
+        case "$(cat "$d/class" 2>/dev/null)" in 0x02*) echo "$d" ;; esac
+    done
+    for d in /sys/bus/usb/devices/[0-9]*-*; do
+        case "$d" in *:*) continue ;; esac
+        for i in "$d":*; do
+            case "$(cat "$i/bInterfaceClass" 2>/dev/null)" in ff | e0 | 02) echo "$d"; break ;; esac
+        done
+    done
+}
+
+show_links() {
+    for n in /sys/class/net/*; do
+        i=${n##*/}; [ "$i" = lo ] && continue
+        [ -e "$n/device" ] || continue
+        if is_wifi_if "$n"; then t="Wi-Fi   "; else t="mạng dây"; fi
+        d=$(basename "$(readlink "$n/device/driver" 2>/dev/null)" 2>/dev/null)
+        echo "   $t  $i  driver ${d:-?}  $(cat "$n/operstate" 2>/dev/null)"
+    done
+}
+
+fix_zerocd() {   # USB Wi-Fi hiện ra như ổ đĩa chứa driver Windows: "đẩy đĩa" để nó thành card Wi-Fi
+    for d in /sys/bus/usb/devices/[0-9]*-*; do
+        case "$d" in *:*) continue ;; esac
+        [ -r "$d/idVendor" ] || continue
+        vid=$(cat "$d/idVendor"); pid=$(cat "$d/idProduct")
+        in_list "$vid:$pid" "$ZEROCD" || continue
+        [ -n "$(netif "$d")" ] && continue
+        echo "   đẩy đĩa $vid:$pid để thành card Wi-Fi"
+        if have usb_modeswitch; then usb_modeswitch -K -Q -v "$vid" -p "$pid" 2>/dev/null
+        else for b in "$d"/*/host*/target*/*/block/*; do [ -e "$b" ] && eject "/dev/${b##*/}" 2>/dev/null; done
+        fi
+        sleep 3
+    done
+}
+
+fix_modules() {   # card mạng chưa hiện ra: nạp lại driver đang bám, hoặc nạp theo mã thiết bị nếu chưa driver nào bám
+    for d in $(netdevs); do
+        [ -n "$(netif "$d")" ] && continue
+        mods=""
+        for drvl in "$d"/driver "$d":*/driver; do
+            [ -e "$drvl/module" ] && mods="$mods $(basename "$(readlink "$drvl/module")")"
+        done
+        case " $mods " in
+            *" bcma "* | *" ssb "* | *" b43 "*)   # Broadcom: có wl thì dùng wl, không thì nạp lại b43
+                if modinfo wl >/dev/null 2>&1; then load_module wl >/dev/null; mods=""
+                else mods="b43 $mods"; fi ;;
+        esac
+        for m in $mods; do
+            echo "   nạp lại $m"
+            modprobe -r "$m" 2>/dev/null; modprobe "$m" 2>&1 | sed 's/^/   /'
+        done
+        # chưa driver nào bám: nạp theo mã thiết bị (modalias)
+        for a in "$d"/modalias "$d":*/modalias; do
+            [ -r "$a" ] && modprobe -q "$(cat "$a")" 2>/dev/null
+        done
+    done
+    # chế độ tự động KHÔNG phát lại sự kiện udev: sự kiện "add" USB lại hẹn một lượt "auto" mới → vòng lặp
+    [ "${1:-}" = notrigger ] && return 0
+    udevadm trigger --action=add --subsystem-match=pci --subsystem-match=usb 2>/dev/null
+    udevadm settle -t 10 2>/dev/null
+}
+
+repair() {
+    if [ "$(id -u)" != 0 ]; then as_root "$SELF" repair; exit $?; fi
+    echo ">> 1/5 Bỏ khoá sóng Wi-Fi (rfkill)…"
+    if have rfkill; then rfkill unblock wlan 2>/dev/null
+    else for r in /sys/class/rfkill/rfkill*; do [ "$(cat "$r/type" 2>/dev/null)" = wlan ] && echo 0 > "$r/soft" 2>/dev/null; done
+    fi
+    for r in /sys/class/rfkill/rfkill*; do
+        [ "$(cat "$r/type" 2>/dev/null)" = wlan ] && [ "$(cat "$r/hard" 2>/dev/null)" = 1 ] &&
+            echo "   !! Wi-Fi đang bị tắt bằng công tắc / phím Wi-Fi (Fn + phím có hình sóng) của máy — phải tự bật."
+    done
+
+    echo ">> 2/5 USB Wi-Fi đang ở chế độ ổ đĩa (ZeroCD)…"
+    fix_zerocd
+
+    echo ">> 3/5 Nạp lại driver card mạng chưa lên…"
+    fix_modules
+
+    echo ">> 4/5 Khởi động lại NetworkManager…"
+    systemctl restart NetworkManager 2>/dev/null
+    sleep 4
+    if have nmcli; then
+        nmcli networking on 2>/dev/null
+        nmcli radio wifi on 2>/dev/null
+        nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | awk -F: '($2 == "wifi" || $2 == "ethernet") && $3 == "unmanaged" { print $1 }' |
+            while read -r i; do echo "   cho NetworkManager quản lý $i"; nmcli device set "$i" managed yes 2>/dev/null; done
+    fi
+
+    echo ">> 5/5 Kết quả:"
+    firmware_scan
+    links=$(show_links)
+    if [ -n "$links" ]; then echo "$links"; else echo "   (chưa có card mạng nào)"; fi
+    if ! echo "$links" | grep -q 'Wi-Fi'; then
+        echo "   Chưa thấy card Wi-Fi. Tin từ kernel:"
+        dmesg 2>/dev/null | grep -i -E 'firmware|wlan|wifi|iwlwifi|rtw|rtl8|b43|brcm|ath[0-9]|mt76|mt79|rfkill|usb_modeswitch' | tail -8 | sed 's/^/   | /'
+        [ -s "$FW_REPORT" ] && echo "   Thiếu firmware: $(tr '\n' ' ' < "$FW_REPORT")→ tick dòng Firmware rồi bấm “Cài mục đã chọn”."
+    fi
+    return 0
+}
+
+report() {
+    out=${1:-$HOME/depot-drivers-report.txt}
+    {
+        echo "== Depot OS — báo cáo driver mạng  $(date '+%F %T')"
+        echo "phiên bản: $(cat /etc/depot-release 2>/dev/null)  kernel: $(uname -r)  phiên live: $([ -d /run/live/medium ] && echo có || echo không)"
+        echo "Secure Boot: $(mokutil --sb-state 2>/dev/null | head -1)"
+        echo; echo "== depot-drivers scan"; "$SELF" scan
+        echo; echo "== lspci (mạng)"; lspci -nnk 2>/dev/null | grep -A3 -i -E 'network|ethernet|wireless'
+        echo; echo "== lsusb"; lsusb 2>/dev/null
+        echo; echo "== rfkill"; rfkill 2>/dev/null
+        echo; echo "== card mạng"; show_links; ip -br addr 2>/dev/null
+        echo; echo "== NetworkManager"; nmcli -f DEVICE,TYPE,STATE,CONNECTION device 2>/dev/null
+        echo; echo "== dkms"; dkms status 2>/dev/null
+        echo; echo "== firmware thiếu"; cat "$FW_REPORT" 2>/dev/null
+        echo; echo "== kernel (mạng, firmware)"
+        { journalctl -k -b -o cat 2>/dev/null || dmesg 2>/dev/null; } |
+            grep -i -E 'firmware|wlan|wifi|iwlwifi|rtw|rtl8|r8169|r8168|e1000|b43|brcm|bcma|ath[0-9]|mt76|mt79|rfkill|eth[0-9]|enp|link is|usb_modeswitch' | tail -80
+    } > "$out" 2>&1
+    echo "$out"
+}
+
+# ------------------------------------------------------------------ tự động: cắm thiết bị là cài, cập nhật kernel là build lại
+# Ai gọi "depot-drivers auto" (đều bằng root):
+#   • udev (91-depot-drivers-auto.rules): cắm thiết bị USB → 10 giây sau chạy một lượt
+#   • depot-drivers-auto.service: mỗi lần khởi động, sau khi vào desktop (card gắn sẵn trong máy, driver sau cập nhật)
+#   • depot-update download: mỗi ngày khi có mạng (thứ gì cần tải thì lúc này mới tải được)
+# Tự làm:  cài driver DKMS không-tuỳ-chọn (Broadcom wl) từ kho trong máy hoặc từ mạng; đưa USB Wi-Fi khỏi chế độ ổ đĩa,
+#          nạp lại driver card mạng chưa lên (KHÔNG khởi động lại NetworkManager — không làm rớt mạng đang dùng);
+#          có mạng thì tìm gói firmware còn thiếu; build lại driver DKMS cho kernel đang chạy (sau khi cập nhật kernel).
+# Chỉ báo, không tự làm: kernel backports, driver NVIDIA (thay đổi lớn, người dùng quyết); mục tuỳ chọn;
+#          máy bật Secure Boot mà khoá DKMS chưa đăng ký (cần người ngồi máy làm bước MOK lúc khởi động lại).
+# Mỗi thứ chỉ thử tự động MỘT lần (dấu ở $AUTO_STATE, theo kernel): lỗi thì báo, không thử lại mỗi lần cắm.
+AUTO_CONF=${DEPOT_DRIVERS_CONF:-/etc/depot/drivers-auto.conf}
+AUTO_STATE=${DEPOT_DRIVERS_STATE:-/var/lib/depot/drivers-auto}
+AUTO_RUN=$(dirname "$FW_REPORT")
+AUTO_MSG=$AUTO_RUN/auto-message
+AUTO_LOG=${DEPOT_DRIVERS_LOG:-/var/log/depot/drivers-auto.log}
+NL='
+'
+
+auto_on() { ! grep -qsx 'AUTO=off' "$AUTO_CONF"; }
+
+auto_set() {
+    case "${1:-}" in on | off) ;; *) echo "dùng: depot-drivers auto-set on|off" >&2; exit 2 ;; esac
+    if [ "$(id -u)" != 0 ]; then as_root "$SELF" auto-set "$1"; exit $?; fi
+    mkdir -p "$(dirname "$AUTO_CONF")"
+    printf '%s\n' "# Depot OS — tự cài / tự cập nhật driver (depot-drivers auto). Đổi bằng nút trong \"Driver phần cứng\"." \
+        "AUTO=$1" > "$AUTO_CONF"
+    echo "Tự động cài và cập nhật driver: $1"
+}
+
+# Secure Boot bật mà khoá ký của DKMS chưa được máy tin: module build ra cũng không nạp được
+sb_blocked() {
+    sb_on || return 1
+    [ -r /var/lib/dkms/mok.pub ] && mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -qi 'already enrolled' && return 1
+    return 0
+}
+
+# báo cho người đang ngồi máy (phiên đồ hoạ đang hoạt động); trả 0 nếu báo được cho ít nhất một người
+notify_users() {
+    shown=1
+    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+        [ "$(loginctl show-session "$s" -p Active --value 2>/dev/null)" = yes ] || continue
+        [ "$(loginctl show-session "$s" -p Class --value 2>/dev/null)" = user ] || continue
+        case "$(loginctl show-session "$s" -p Type --value 2>/dev/null)" in x11 | wayland) ;; *) continue ;; esac
+        uid=$(loginctl show-session "$s" -p User --value 2>/dev/null)
+        u=$(id -nu "$uid" 2>/dev/null) || continue
+        runuser -u "$u" -- env "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+            notify-send -a "Depot OS" -i preferences-system -t 20000 "$1" "$2" 2>/dev/null && shown=0
+    done
+    return $shown
+}
+
+did_add() { did="$did${did:+$NL}• $1"; }
+todo_add() { todo="$todo${todo:+$NL}• $1"; }
+need_net() { [ "$netchecked" = 1 ] || { netchecked=1; online && NET=1; }; [ "$NET" = 1 ]; }
+names_of() {   # tên các thiết bị đang cần gói $1
+    printf '%s\n' "$data" | awk -F'\t' -v p="$1" '$6 == 1 && $5 == p { print $2 }' | paste -sd'|' - | sed 's/|/, /g' | cut -c1-100
+}
+
+auto_body() {
+    k=$(uname -r); NET=0; netchecked=0; did=""; todo=""; REBOOT=0
+    echo "== $(date '+%F %T') depot-drivers auto ${1:-} (kernel $k)"
+
+    # --- 1. driver DKMS đã cài nhưng chưa có cho kernel đang chạy (vừa cập nhật kernel)
+    if have dkms; then
+        miss=$(dkms status 2>/dev/null | awk -F'[,:] *' -v k="$k" '
+            NF { mod[$1] = 1 } $2 == k && /installed/ { ok[$1] = 1 }
+            END { for (m in mod) if (!(m in ok)) print m }' | sort | tr '\n' ' ' | sed 's/ $//')
+        if [ -n "$miss" ]; then
+            mark="$AUTO_STATE/fail-rebuild-$k"
+            echo ">> Driver chưa có cho kernel đang chạy: $miss"
+            if sb_blocked; then
+                todo_add "Driver $miss: máy bật Secure Boot nên cần bạn xác nhận — mở “Driver phần cứng” → Cài mục đã chọn"
+            elif [ -e "$mark" ]; then
+                todo_add "Driver $miss chưa build được cho kernel $k — mở “Driver phần cứng”"
+            else
+                ensure_headers >/dev/null 2>&1 || { need_net && ensure_headers; }
+                if [ -e "$SYS/lib/modules/$k/build/Makefile" ] && dkms autoinstall -k "$k" >/dev/null 2>&1; then
+                    for p in broadcom-sta-dkms r8168-dkms; do
+                        m=$(module_of "$p")
+                        dpkg -s "$p" 2>/dev/null | grep -q '^Status: install ok installed' || continue
+                        modinfo -k "$k" "$m" >/dev/null 2>&1 && load_module "$m" >/dev/null
+                    done
+                    did_add "Đã build lại driver cho kernel mới: $miss"
+                else
+                    : > "$mark"
+                    todo_add "Driver $miss chưa build được cho kernel $k — mở “Driver phần cứng”"
+                fi
+            fi
+        fi
+    fi
+
+    # --- 2. thiết bị đang cần driver
+    data=$(scan)
+    pk=$(printf '%s\n' "$data" | awk -F'\t' '$6 == 1 && $5 != "" && substr($5, 1, 1) != "?" { print $5 }' | sort -u)
+    for p in $pk; do
+        n=$(names_of "$p")
+        case "$p" in
+            *-dkms)
+                mark="$AUTO_STATE/fail-$p-$k"
+                if sb_blocked; then
+                    todo_add "$n: máy bật Secure Boot nên cần bạn xác nhận — mở “Driver phần cứng” → Cài mục đã chọn"
+                elif [ -e "$mark" ]; then
+                    todo_add "$n: lần trước tự cài driver không được — mở “Driver phần cứng” để cài tay"
+                elif install_dkms "$p" || { need_net && { apt-get update >/dev/null 2>&1; install_dkms "$p"; }; }; then
+                    did_add "$n: đã cài driver $(module_of "$p")"
+                else
+                    : > "$mark"
+                    todo_add "$n: chưa cài được driver — mở “Driver phần cứng”"
+                fi ;;
+            @fix)
+                sig=$(printf '%s\n' "$data" | awk -F'\t' '$6 == 1 && $5 == "@fix" { print $2 }' | md5sum | cut -c1-12)
+                if grep -qsx "$sig" "$AUTO_RUN/auto-fixed"; then   # đã thử trong lần bật máy này rồi
+                    todo_add "$n: card mạng chưa lên — mở “Driver phần cứng” → Sửa mạng"
+                else
+                    echo "$sig" >> "$AUTO_RUN/auto-fixed"
+                    fix_zerocd
+                    fix_modules notrigger
+                    sleep 3
+                    left=$(scan | awk -F'\t' '$6 == 1 && $5 == "@fix"' | wc -l)
+                    if [ "$left" = 0 ]; then did_add "$n: đã đưa card mạng lên"
+                    else todo_add "$n: card mạng chưa lên — mở “Driver phần cứng” → Sửa mạng"; fi
+                fi ;;
+            @firmware)
+                sig="fw-$(md5sum < "$FW_REPORT" 2>/dev/null | cut -c1-12)"
+                if ! need_net; then
+                    todo_add "Thiếu firmware ($n): có mạng là máy tự tải"
+                elif [ -e "$AUTO_STATE/$sig" ]; then
+                    todo_add "Thiếu firmware ($n): chưa tìm được gói — mở “Driver phần cứng”"
+                else
+                    : > "$AUTO_STATE/$sig"
+                    install_firmware >/dev/null 2>&1
+                    left=0
+                    while read -r f; do [ -e "/lib/firmware/$f" ] || left=1; done < "$FW_REPORT"
+                    if [ $left = 0 ]; then did_add "Đã tải firmware ($n) — khởi động lại máy để dùng"
+                    else todo_add "Thiếu firmware ($n): chưa tìm được gói — mở “Driver phần cứng”"; fi
+                fi ;;
+            @kernel) todo_add "$n: cần kernel mới hơn — mở “Driver phần cứng”, tick dòng đó rồi bấm Cài mục đã chọn" ;;
+            *) todo_add "$n: có driver đề xuất ($p) — mở “Driver phần cứng” để cài" ;;
+        esac
+    done
+
+    if [ -z "$did" ] && [ -z "$todo" ]; then echo "không có gì cần làm"; return 0; fi
+    body="${did:+Đã tự làm:$NL$did}${did:+${todo:+$NL}}${todo:+Cần bạn:$NL$todo}"
+    echo "$body"
+    # cùng một nội dung "cần bạn" thì chỉ báo một lần mỗi lần bật máy; có việc vừa tự làm xong thì luôn báo
+    sig=$(printf '%s' "$body" | md5sum | cut -c1-16)
+    if [ -n "$did" ] || [ "$(cat "$AUTO_RUN/auto-notified" 2>/dev/null)" != "$sig" ]; then
+        echo "$sig" > "$AUTO_RUN/auto-notified"
+        printf '%s\n' "$body" > "$AUTO_MSG"
+        # chưa ai đăng nhập (đang ở màn hình đăng nhập): để lại cho "depot-drivers --notify" báo lúc đăng nhập
+        notify_users "Driver phần cứng" "$body" && rm -f "$AUTO_MSG"
+    fi
+    return 0
+}
+
+auto_run() {
+    [ "$(id -u)" = 0 ] || { echo "depot-drivers auto: cần quyền root" >&2; exit 1; }
+    auto_on || { echo "tự động cài driver đang tắt ($AUTO_CONF)"; exit 0; }
+    # trong chroot (Calamares đang cài, lúc build ISO): /sys là của máy ngoài — không làm gì
+    if [ -z "$SYS" ] && systemd-detect-virt -q --chroot 2>/dev/null; then exit 0; fi
+    if [ "${1:-}" != --boot ]; then
+        # máy còn đang khởi động (udev phát "add" cho mọi USB lúc boot): để depot-drivers-auto.service lo sau khi vào desktop
+        case "$(systemctl is-system-running 2>/dev/null)" in initializing | starting) exit 0 ;; esac
+    fi
+    mkdir -p "$AUTO_STATE" "$AUTO_RUN" "$(dirname "$AUTO_LOG")"
+    exec 9>"$AUTO_RUN/auto.lock"
+    flock -n 9 || exit 0                 # một lượt đang chạy: nó sẽ thấy thiết bị vừa cắm khi dò
+    auto_body "$@" 2>&1 | tee -a "$AUTO_LOG"
+}
+
+needs() { scan | awk -F'\t' '$6 == 1 { print $1 ": " $2 }'; }
+
+notify() {
+    sleep 20
+    # lượt tự cài lúc khởi động có thể còn đang chạy (build driver mất 1–2 phút): chờ nó xong rồi mới báo
+    [ -e "$AUTO_RUN/auto.lock" ] && flock -w 300 "$AUTO_RUN/auto.lock" true 2>/dev/null
+    if [ -s "$AUTO_MSG" ]; then
+        s=$(md5sum < "$AUTO_MSG" | cut -c1-16)
+        if [ "$(cat "$HOME/.cache/depot-drivers-auto-seen" 2>/dev/null)" != "$s" ]; then
+            mkdir -p "$HOME/.cache"; echo "$s" > "$HOME/.cache/depot-drivers-auto-seen"
+            notify-send -a "Depot OS" -i preferences-system -t 20000 "Driver phần cứng" "$(cat "$AUTO_MSG")"
+        fi
+        exit 0
+    fi
+    list=$(needs)
+    [ -n "$list" ] || exit 0
+    sig=$(echo "$list" | md5sum | cut -d' ' -f1)
+    [ "$(cat "$IGNORE" 2>/dev/null)" = "$sig" ] && exit 0
+    n=$(echo "$list" | wc -l)
+    a=$(notify-send -a "Depot OS" -i preferences-system -A open="Xem driver" -A ignore="Đừng nhắc lại" \
+        "Có $n thiết bị cần xem driver" "$(echo "$list" | head -3)")
+    case "$a" in
+        open) exec "$SELF" ;;
+        ignore) mkdir -p "$(dirname "$IGNORE")"; echo "$sig" > "$IGNORE" ;;
+    esac
+}
+
+# chạy lệnh root, đổ chữ ra cửa sổ theo dõi
+run_log() {   # $1 tiêu đề, còn lại: đối số cho chính script này
+    t=$1; shift
+    as_root "$SELF" "$@" 2>&1 | yad --text-info --tail --title="$t" --window-icon=preferences-system \
+        --width=820 --height=480 --borders=12 --button="Đóng:0"
+}
+
+gui() {
+    data=$(scan)
+    n=$(printf '%s\n' "$data" | awk -F'\t' '$6 == 1' | wc -l)
+    # kho driver trong máy chỉ dùng được khi làm cho đúng kernel đang chạy
+    pool=0; offline="Cài driver cần mạng"
+    if [ "$(cat "$POOL/kernel" 2>/dev/null)" = "$(uname -r)" ] && ls "$POOL"/drivers/*.deb >/dev/null 2>&1; then
+        pool=1; offline="Driver Wi-Fi Broadcom và driver Realtek r8168 có sẵn trong máy, không cần mạng. Mục khác cần mạng"
+    fi
+    if [ "$n" -gt 0 ]; then
+        text="Có <b>$n</b> thiết bị cần xử lý. Tick mục muốn cài rồi bấm <b>Cài mục đã chọn</b>. Card mạng có driver mà không lên: bấm <b>Sửa mạng</b>.\n$offline: cắm dây LAN, hoặc cắm điện thoại bằng cáp USB rồi bật “Chia sẻ kết nối qua USB”."
+    else
+        text="Mọi thiết bị đều đã có driver. Wi-Fi hoặc mạng dây vẫn không lên thì bấm <b>Sửa mạng</b>; cần người khác xem giúp thì bấm <b>Lưu báo cáo</b>."
+    fi
+    if auto_on; then
+        autobtn="Tự động: Bật"
+        text="$text\nTự động đang <b>bật</b>: cắm thiết bị là máy tự cài driver, cập nhật kernel xong máy tự build lại driver."
+    else
+        autobtn="Tự động: Tắt"
+        text="$text\nTự động đang <b>tắt</b>: máy chỉ báo khi thiết bị thiếu driver, không tự cài."
+    fi
+    # Thiết bị để gần cuối: tên dài cỡ nào cũng không đẩy mất cột trạng thái và đề xuất
+    sel=$(printf '%s\n' "$data" | awk -F'\t' -v OFS='\n' -v pool="$pool" '
+        function label(p) {
+            if (p == "") return "—"
+            opt = ""; if (substr(p, 1, 1) == "?") { opt = "tuỳ chọn: "; p = substr(p, 2) }
+            if (p == "@firmware") return opt "tự tìm gói firmware"
+            if (p == "@kernel") return opt "kernel mới hơn (backports)"
+            if (p == "@fix") return opt "Sửa mạng"
+            if (p == "broadcom-sta-dkms") return opt "driver Broadcom wl" (pool == 1 ? " (có sẵn trong máy)" : "")
+            if (p == "r8168-dkms") return opt "driver Realtek chính hãng r8168"
+            return opt p
+        }
+        $1 != "" { print (($6 == 1 && $5 != "" && substr($5, 1, 1) != "?") ? "TRUE" : "FALSE"), $1, $4, $3, label($5), $2, $5 }' \
+        | yad --list --checklist --title="Driver phần cứng" --window-icon=preferences-system \
+            --width=1040 --height=540 --borders=16 --text="$text" \
+            --column="Cài:CHK" --column="Loại" --column="Trạng thái" --column="Driver" --column="Đề xuất" --column="Thiết bị" \
+            --column="gói:HD" --print-column=7 --separator="" \
+            --button="Làm mới:3" --button="$autobtn:8" --button="Lưu báo cáo:6" --button="Sửa mạng:4" --button="Cài mục đã chọn:2" --button="Đóng:1")
+    case $? in
+        2)  pkgs=$(printf '%s\n' "$sel" | grep . | sort -u | tr '\n' ' ')
+            if [ -z "$pkgs" ]; then
+                yad --title="Driver phần cứng" --window-icon=preferences-system --image=dialog-information --borders=14 --center --fixed \
+                    --text="Chưa tick mục nào có gói để cài.\nTick ô ở cột “Cài” của dòng có đề xuất rồi bấm lại." --button="Đóng:0" >/dev/null 2>&1
+            else
+                # shellcheck disable=SC2086
+                run_log "Đang cài driver" install $pkgs
+            fi
+            exec "$SELF" ;;
+        4) run_log "Sửa mạng" repair; exec "$SELF" ;;
+        6)  f=$(report)
+            yad --title="Driver phần cứng" --window-icon=preferences-system --image=document-save --borders=14 --center --fixed \
+                --text="Đã lưu báo cáo:\n<b>$f</b>\n\nGửi file này cho người hỗ trợ (chép ra USB nếu máy chưa có mạng)." --button="Đóng:0" >/dev/null 2>&1
+            exec "$SELF" ;;
+        8)  if auto_on; then new=off; else new=on; fi
+            err=$(as_root "$SELF" auto-set "$new" 2>&1 >/dev/null) ||
+                yad --title="Driver phần cứng" --window-icon=preferences-system --image=dialog-error --borders=14 --center --fixed \
+                    --text="Không đổi được chế độ tự động. ${err:-Chưa được cấp quyền quản trị?}" --button="Đóng:0" >/dev/null 2>&1
+            exec "$SELF" ;;
+        3) exec "$SELF" ;;
+    esac
+}
+
+case "${1:-}" in
+    # column đếm theo ký tự (printf của awk đếm byte, chữ có dấu bị lệch cột)
+    scan) scan | awk -F'\t' -v OFS='\t' '{ print $1, $4, $3, ($5 == "" ? "—" : $5), $2 }' \
+              | column -t -s "$TAB" -N "LOẠI,TRẠNG THÁI,DRIVER,ĐỀ XUẤT,THIẾT BỊ" ;;
+    --notify) notify ;;
+    firmware-scan) firmware_scan ;;
+    install) shift; install_pkgs "$@" ;;
+    repair) repair ;;
+    report) report "${2:-}" ;;
+    auto) shift; auto_run "$@" ;;
+    auto-set) auto_set "${2:-}" ;;
+    auto-status) if auto_on; then echo on; else echo off; fi ;;
+    '') gui ;;
+    *) echo "dùng: depot-drivers [scan|--notify|firmware-scan|install GÓI...|repair|report [FILE]|auto [--boot]|auto-set on|off|auto-status]" >&2; exit 2 ;;
+esac

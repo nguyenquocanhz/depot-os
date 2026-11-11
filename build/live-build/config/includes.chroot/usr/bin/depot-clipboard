@@ -1,0 +1,61 @@
+#!/bin/sh
+# Depot OS — Bộ nhớ tạm (Clipboard Manager): lịch sử những gì đã sao chép, bấm Win+V để chọn lại và dán
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Dùng Clipman của XFCE (gói xfce4-clipman: nhẹ, giữ nội dung cả khi app nguồn đã đóng), Depot chỉ lo phần tích hợp:
+#   - tự chạy lúc đăng nhập (file autostart của gói để Hidden=true nên mặc định KHÔNG chạy);
+#   - mặc định kiểu Windows: Win+V mở lịch sử ngay chỗ con trỏ, mục mới nhất ở trên, chọn mục nào là dán luôn
+#     (Clipman tự gửi Ctrl+V); giữ 30 đoạn chữ + 3 ảnh;
+#   - riêng tư: KHÔNG ghi lịch sử xuống ổ đĩa khi thoát (mật khẩu vừa sao chép không nằm lại sau khi tắt máy),
+#     không tự gom vùng chữ đang bôi (chỉ lấy khi bấm Sao chép).
+# Giới hạn đã biết (boot thử ISO v0.23.1 trên VMware): trong Terminal, chọn một mục KHÔNG tự dán — Clipman gửi
+#   Ctrl+V (kiểu 2: Shift+Insert cũng không được), mà Terminal dán bằng Ctrl+Shift+V. Mục đã chọn vẫn nằm trong bộ nhớ
+#   tạm: bấm Ctrl+Shift+V (hoặc chuột phải > Dán) là ra. Ô nhập của app thường thì tự dán.
+# Mặc định chỉ đặt cho khoá CHƯA có: người dùng đổi trong "Bộ nhớ tạm" (xfce4-clipman-settings) thì giữ nguyên.
+#
+#   depot-clipboard start      đặt mặc định còn thiếu rồi chạy Clipman (autostart XFCE, i3 exec)
+#   depot-clipboard show       mở lịch sử (Win+V; i3: $mod+Shift+v) — Clipman chưa chạy thì chạy trước
+#   depot-clipboard defaults   chỉ đặt mặc định còn thiếu (depot-layout gọi sau khi đổi bố cục panel)
+#   depot-clipboard settings   mở cửa sổ cài đặt của Clipman
+CH=xfce4-panel
+BASE=/plugins/clipman
+
+# đặt một khoá nếu chưa có: $1 đường dẫn, $2 kiểu, $3 giá trị
+def() {
+    xfconf-query -c $CH -p "$BASE/$1" >/dev/null 2>&1 && return 0
+    xfconf-query -c $CH -p "$BASE/$1" -n -t "$2" -s "$3" 2>/dev/null
+}
+
+defaults() {
+    command -v xfconf-query >/dev/null || return 0
+    def settings/max-texts-in-history uint 30
+    def settings/max-images-in-history uint 3
+    def settings/save-on-quit bool false
+    def settings/add-primary-clipboard bool false
+    def settings/history-ignore-primary-clipboard bool true
+    def settings/enable-actions bool false
+    def tweaks/paste-on-activate uint 1          # 1 = dán bằng Ctrl+V khi chọn một mục
+    def tweaks/popup-at-pointer bool true
+    def tweaks/reverse-menu-order bool true      # mới nhất ở trên
+    def tweaks/max-menu-items uint 15
+}
+
+running() { pgrep -x xfce4-clipman >/dev/null 2>&1; }
+
+case "${1:-show}" in
+    start)
+        command -v xfce4-clipman >/dev/null || exit 0
+        defaults
+        running || exec xfce4-clipman ;;
+    defaults) defaults ;;
+    show)
+        command -v xfce4-popup-clipman >/dev/null || { echo "thiếu gói xfce4-clipman" >&2; exit 1; }
+        if ! running; then
+            defaults
+            (setsid xfce4-clipman >/dev/null 2>&1 &)
+            sleep 0.8
+        fi
+        exec xfce4-popup-clipman ;;
+    settings) exec xfce4-clipman-settings ;;
+    *) echo "dùng: depot-clipboard [start|show|defaults|settings]" >&2; exit 2 ;;
+esac

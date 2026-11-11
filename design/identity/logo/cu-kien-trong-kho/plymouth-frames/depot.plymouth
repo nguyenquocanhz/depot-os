@@ -1,0 +1,11 @@
+[Plymouth Theme]
+Name=Depot
+Description=Depot OS boot animation — khung hình cắt từ video (scripts/video-to-plymouth.sh), thanh tiến trình mảnh
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/depot
+ScriptFile=/usr/share/plymouth/themes/depot/depot.script
+
+[script-env-graphical]
+Font=Inter 14

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Depot OS — depot-notify-bell: nút chuông trên panel (plugin genmon của xfce4-panel gọi vài giây một lần,
+# và depot-notify bảo vẽ lại ngay khi số thông báo đổi)
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Chỉ dùng lệnh dựng sẵn của sh — không fork tiến trình nào. Đọc $XDG_RUNTIME_DIR/depot-notify.state
+# do depot-notify ghi (UNREAD, TOTAL, DND). Bấm chuông: mở / đóng khung Thông báo bên cạnh.
+STATE=${XDG_RUNTIME_DIR:-/tmp}/depot-notify.state
+UNREAD=0 TOTAL=0 DND=0
+if [ -r "$STATE" ]; then
+    while IFS='=' read -r k v; do
+        case $v in '' | *[!0-9]*) continue ;; esac
+        case $k in UNREAD) UNREAD=$v ;; TOTAL) TOTAL=$v ;; DND) DND=$v ;; esac
+    done < "$STATE"
+fi
+
+if [ "$DND" = 1 ]; then
+    icon=notification-disabled-symbolic
+    tip="Không làm phiền đang bật"
+else
+    icon=notification-symbolic
+    tip="Thông báo"
+fi
+if [ "$TOTAL" -gt 0 ]; then
+    tip="$tip — $TOTAL thông báo"
+    [ "$UNREAD" -gt 0 ] && tip="$tip, $UNREAD mới"
+else
+    tip="$tip — chưa có gì"
+fi
+
+echo "<icon>$icon</icon><iconclick>depot-notify toggle</iconclick>"
+# số thông báo mới (chữ đỏ như chấm báo của Depot); không có gì mới thì chỉ còn chuông
+if [ "$UNREAD" -gt 0 ]; then
+    echo "<txt><span weight='bold' fgcolor='#ff5c66'>$UNREAD</span></txt><txtclick>depot-notify toggle</txtclick>"
+else
+    echo "<txt></txt>"
+fi
+echo "<tool>$tip (Super+N)</tool>"

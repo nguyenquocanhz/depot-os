@@ -1,0 +1,55 @@
+# Depot OS — theme menu GRUB của ISO (UEFI, và BIOS khi boot qua Ventoy/GRUB): logo "Depot by WrenEvil" (Bóng ma)
+# Thay theme mặc định của live-build (theme.cfg nạp file này khi có ../splash.png).
+# Ảnh: ../splash.png + select_*.png sinh bằng design/identity/wrenevil/wrenevil_logo.py
+# Font: unicode.pf2 có sẵn trong ISO (Unifont) — đủ chữ tiếng Việt.
+desktop-image: "../splash.png"
+desktop-color: "#07080c"
+title-text: ""
+message-font: "Unifont Regular 16"
+message-color: "#c9cfdc"
+terminal-font: "Unifont Regular 16"
+
++ boot_menu {
+        left = 14%
+        width = 72%
+        top = 50%
+        height = 50%-78
+        item_font = "Unifont Regular 16"
+        item_color = "#8a90a2"
+        selected_item_font = "Unifont Regular 16"
+        selected_item_color = "#ffffff"
+        selected_item_pixmap_style = "select_*.png"
+        item_height = 24
+        item_padding = 8
+        item_spacing = 6
+        icon_width = 0
+        icon_height = 0
+        item_icon_space = 0
+        scrollbar = false
+}
+
+# đếm ngược tự chạy mục đang chọn
++ progress_bar {
+        id = "__timeout__"
+        left = 14%
+        width = 72%
+        top = 100%-62
+        height = 20
+        font = "Unifont Regular 16"
+        text_color = "#8a90a2"
+        fg_color = "#3a0f16"
+        bg_color = "#111318"
+        border_color = "#111318"
+        text = "Tự chạy mục đang chọn sau %d giây"
+}
+
++ label {
+        top = 100%-32
+        left = 0
+        width = 100%
+        height = 20
+        align = "center"
+        color = "#5d6272"
+        font = "Unifont Regular 16"
+        text = "Enter: chạy   ↑ ↓: chọn   e: sửa lệnh   c: dòng lệnh GRUB"
+}

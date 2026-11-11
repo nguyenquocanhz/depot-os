@@ -1,0 +1,16 @@
+[Unit]
+Description=Depot OS: tự cài driver còn thiếu, build lại driver sau khi cập nhật kernel
+Documentation=file:///usr/bin/depot-drivers
+# sau khi vào desktop (không làm chậm khởi động) và sau khi đã ghi danh sách firmware thiếu
+After=graphical.target depot-drivers-scan.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-drivers auto --boot
+# build driver (DKMS) mất 1–2 phút trên máy yếu: chạy nền, nhường CPU / ổ đĩa cho người dùng
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=900
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Depot OS — Google Chrome có sẵn trong ISO (cùng Firefox, LocalSend): kho apt chính thức của Google.
+# Khoá ký của Google được thêm khoá con mới mỗi năm → không ghim sha256 cả file mà kiểm DẤU VÂN TAY khoá chính.
+# Chỉ dùng nguồn tạm để cài: postinst của Chrome tự thêm nguồn google-chrome.list + khoá của nó (để apt cập nhật),
+# giữ nguồn của mình nữa thì apt báo "cấu hình trùng".
+# Chạy trong SUBSHELL, lỗi chỉ ghi log, không làm hỏng bản build. scripts/check-v16.sh bắt Chrome thiếu.
+LOGD=/usr/share/depot-os
+LOG="$LOGD/app-chrome.log"
+mkdir -p "$LOGD"
+command -v curl >/dev/null 2>&1 || { echo "!! thiếu curl, bỏ qua Chrome" >&2; exit 0; }
+FPR=EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796
+K=/usr/share/keyrings/depot-google-tmp.asc
+L=/etc/apt/sources.list.d/depot-google-tmp.list
+(
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    command -v gpg >/dev/null 2>&1 || apt-get install -y gpg
+    curl -fsSL --retry 3 -o "$K" https://dl.google.com/linux/linux_signing_key.pub
+    gpg --show-keys --with-colons "$K" | awk -F: '$1 == "fpr" { print $10; exit }' | grep -qx "$FPR"
+    echo "deb [arch=amd64 signed-by=$K] https://dl.google.com/linux/chrome/deb/ stable main" > "$L"
+    apt-get update
+    apt-get install -y google-chrome-stable
+) > "$LOG" 2>&1 || true
+rm -f "$K" "$L"
+apt-get update >/dev/null 2>&1 || true
+# mục "Gỡ cài đặt" (chuột phải) cho app trong ISO
+[ -x /usr/bin/depot-uninstall ] && /usr/bin/depot-uninstall --refresh
+
+if dpkg -s google-chrome-stable >/dev/null 2>&1; then
+    echo ">> App cài sẵn: Google Chrome $(dpkg-query -W -f='${Version}' google-chrome-stable)"
+else
+    echo "!! App cài sẵn: Google Chrome KHÔNG cài được — Log: $LOG" >&2
+    tail -6 "$LOG" >&2
+fi
+apt-get clean
+exit 0

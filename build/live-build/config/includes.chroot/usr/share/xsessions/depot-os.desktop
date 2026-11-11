@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Depot OS
+Comment=Phiên làm việc Depot OS (XFCE)
+Exec=xfce4-session
+TryExec=xfce4-session
+Icon=preferences-desktop
+Type=Application
+DesktopNames=XFCE;

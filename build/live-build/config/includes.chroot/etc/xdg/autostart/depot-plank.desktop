@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Plank Dock (Depot OS)
+Comment=Dock dưới kiểu macOS
+Exec=depot-plank
+TryExec=depot-plank
+Terminal=false
+NoDisplay=true

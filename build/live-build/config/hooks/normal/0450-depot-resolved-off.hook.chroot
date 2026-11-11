@@ -1,0 +1,15 @@
+#!/bin/sh
+# Depot OS — systemd-resolved có trong ISO cho "DNS mã hoá" (depot-dns-proxy → depot-dns-helper) nhưng TẮT sẵn.
+# Gói tự bật dịch vụ và trỏ /etc/resolv.conf sang stub 127.0.0.53 khi cài; mặc định Depot vẫn để
+# NetworkManager lo resolv.conf như trước. Số 0450: chạy trước mọi hook cần mạng (1000+ tải theme, app…),
+# vì symlink sang /run/systemd/resolve trong chroot là symlink chết → mất DNS lúc build.
+set -e
+echo ">> systemd-resolved: tắt sẵn, trả resolv.conf"
+if [ -e /usr/lib/systemd/system/systemd-resolved.service ]; then
+    systemctl disable systemd-resolved.service >/dev/null 2>&1 || true
+fi
+if [ -L /etc/resolv.conf ] && [ -f /etc/.resolv.conf.systemd-resolved.bak ]; then
+    rm -f /etc/resolv.conf
+    mv /etc/.resolv.conf.systemd-resolved.bak /etc/resolv.conf
+fi
+rm -f /etc/.resolv.conf.systemd-resolved.bak

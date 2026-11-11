@@ -1,0 +1,32 @@
+#!/bin/sh
+# Depot OS — mở một trang web thành cửa sổ app riêng, bằng Firefox ESR có sẵn
+#   depot-webapp TÊN URL      vd: depot-webapp Zalo https://chat.zalo.me
+# Dùng cho app không có bản Linux (Zalo). Mỗi app một hồ sơ Firefox riêng ở ~/.local/share/depot-webapp/TÊN:
+# đăng nhập giữ riêng, không lẫn với Firefox thường; userChrome.css ẩn thanh tab + thanh địa chỉ.
+# --class TÊN đặt WM_CLASS: dock/taskbar coi là app riêng, khớp StartupWMClass trong file .desktop.
+[ $# -eq 2 ] || { echo "Dùng: depot-webapp TÊN URL" >&2; exit 2; }
+NAME=$1
+URL=$2
+P="$HOME/.local/share/depot-webapp/$NAME"
+
+if [ ! -f "$P/user.js" ]; then
+    mkdir -p "$P/chrome"
+    cat > "$P/user.js" <<'EOF'
+user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+// không có thanh tab: link mở tab mới thì mở thành cửa sổ mới
+user_pref("browser.link.open_newwindow", 2);
+user_pref("browser.link.open_newwindow.restriction", 0);
+EOF
+    cat > "$P/chrome/userChrome.css" <<'EOF'
+#TabsToolbar, #nav-bar, #PersonalToolbar { visibility: collapse !important; }
+EOF
+fi
+
+exec firefox-esr --no-remote --profile "$P" --class "$NAME" --name "$NAME" "$URL"

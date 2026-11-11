@@ -1,0 +1,20 @@
+# Depot OS — cài tự động lúc boot phiên live nếu tìm thấy depot-autoinstall.conf (xem /usr/bin/depot-autoinstall).
+# Chạy TRƯỚC màn đăng nhập: đang cài thì màn boot (Plymouth) hiện tiến độ, không vào desktop.
+# Không có file / file không bật AUTO_START và không boot bằng mục "Cài tự động": thoát ngay (~1 giây).
+# Máy đã cài: ConditionPathExists không thoả nên không bao giờ chạy.
+[Unit]
+Description=Depot OS — cài tự động theo depot-autoinstall.conf
+ConditionPathExists=/run/live/medium
+ConditionKernelCommandLine=!depot.noautoinstall
+After=live-config.service systemd-udev-trigger.service local-fs.target NetworkManager.service
+Wants=NetworkManager.service
+Before=display-manager.service getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-autoinstall --service
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

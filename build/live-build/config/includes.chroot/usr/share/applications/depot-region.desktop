@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ngôn ngữ và ngày giờ
+Name[en]=Language and date & time
+Comment=Đổi ngôn ngữ hiển thị, múi giờ và tự đồng bộ giờ qua Internet
+Comment[en]=Change the display language, time zone and automatic time sync
+Exec=depot-region
+TryExec=yad
+Icon=preferences-desktop-locale
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;
+Keywords=ngôn ngữ;tiếng việt;english;language;locale;múi giờ;ngày giờ;đồng hồ;timezone;time;date;ntp;đồng bộ giờ;

@@ -1,0 +1,4 @@
+Command=depot-notify-bell
+UseLabel=0
+Text=
+UpdatePeriod=5000

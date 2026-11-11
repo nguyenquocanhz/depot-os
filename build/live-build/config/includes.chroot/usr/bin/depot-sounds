@@ -1,0 +1,103 @@
+#!/bin/sh
+# Depot OS — âm thanh hệ thống (bộ âm "depot" trong /usr/share/sounds/depot, sinh bằng scripts/gen-sounds.py)
+#   depot-sounds session      (autostart XFCE + i3) chuông khởi động, rồi nghe sự kiện: thông báo mới, đổi âm lượng,
+#                             cắm/rút USB, cắm/rút sạc — XFCE không tự phát các âm này
+#   depot-sounds play SỰ-KIỆN phát một âm (desktop-login, message-new-instant, device-added, audio-volume-change…)
+#   depot-sounds test         thử loa: trái rồi phải (menu "Thử âm thanh")
+# Tắt/bật: Cài đặt > Giao diện > Cài đặt > "Âm thanh sự kiện" (XFCE, xsettings /Net/EnableEventSounds);
+# phiên i3: tạo ~/.config/depot/sounds-off để tắt.
+DIR=/usr/share/sounds/depot/stereo
+
+enabled() {
+    [ -e "$HOME/.config/depot/sounds-off" ] && return 1
+    if command -v xfconf-query >/dev/null 2>&1 && [ "${XDG_CURRENT_DESKTOP:-}" = XFCE ]; then
+        [ "$(xfconf-query -c xsettings -p /Net/EnableEventSounds 2>/dev/null)" != false ]
+        return
+    fi
+    return 0
+}
+
+play() {
+    enabled || return 0
+    f=$DIR/$1.oga
+    [ -f "$f" ] || f=/usr/share/sounds/freedesktop/stereo/$1.oga
+    [ -f "$f" ] || return 0
+    [ -n "${DEPOT_SOUNDS_DEBUG:-}" ] && echo "▶ $1" >&2
+    # pw-play: PipeWire có sẵn; không phát được (chưa có loa…) thì thôi, không báo lỗi
+    pw-play --media-role=Notification "$f" >/dev/null 2>&1 || paplay "$f" >/dev/null 2>&1 || true
+}
+
+# giới hạn 1 âm / giây cho mỗi loại: cắm 1 USB sinh nhiều sự kiện, app gửi thông báo dồn dập
+last_file() { echo "${XDG_RUNTIME_DIR:-/tmp}/depot-sounds.$1"; }
+throttled() {
+    now=$(date +%s); f=$(last_file "$1")
+    [ "$(cat "$f" 2>/dev/null)" = "$now" ] && return 0
+    echo "$now" > "$f"; return 1
+}
+play_once() { throttled "$1" || play "$1"; }
+
+session() {
+    # một phiên chỉ một bộ nghe (XFCE autostart + i3 exec cùng gọi được)
+    lock=${XDG_RUNTIME_DIR:-/tmp}/depot-sounds.lock
+    exec 9>"$lock"
+    flock -n 9 || exit 0
+    sleep 2   # chờ PipeWire của phiên sẵn sàng
+    play desktop-login
+    # thông báo mới (mọi app gửi qua org.freedesktop.Notifications)
+    dbus-monitor --session "type='method_call',interface='org.freedesktop.Notifications',member='Notify'" 2>/dev/null |
+    while read -r line; do
+        case "$line" in *member=Notify*) play_once message-new-instant ;; esac
+    done &
+    # cắm/rút thiết bị USB (chỉ thiết bị, bỏ qua từng interface "1-1:1.0"), cắm/rút sạc
+    udevadm monitor --udev --subsystem-match=usb/usb_device --subsystem-match=power_supply 2>/dev/null |
+    while read -r _ _ action path kind; do
+        case "$kind" in
+            "(usb)")
+                case "$action" in
+                    add) play_once device-added ;;
+                    remove) play_once device-removed ;;
+                esac ;;
+            "(power_supply)")
+                [ "$action" = change ] || continue
+                ac=$(cat /sys/class/power_supply/A*/online 2>/dev/null | head -1)
+                [ -n "$ac" ] && [ "$ac" != "$(cat "$(last_file ac)" 2>/dev/null)" ] || continue
+                prev=$(cat "$(last_file ac)" 2>/dev/null)
+                echo "$ac" > "$(last_file ac)"
+                [ -z "$prev" ] && continue
+                [ "$ac" = 1 ] && play_once power-plug || play_once power-unplug ;;
+        esac
+    done &
+    cat /sys/class/power_supply/A*/online 2>/dev/null | head -1 > "$(last_file ac)"
+    # đổi âm lượng / tắt tiếng (phím, plugin panel, pavucontrol): plugin âm lượng XFCE của Debian không tự kêu.
+    # Sink cũng báo 'change' khi bắt đầu phát nhạc → chỉ kêu khi mức âm lượng hoặc trạng thái tắt tiếng thật sự đổi
+    if command -v pactl >/dev/null 2>&1; then
+        pactl subscribe 2>/dev/null |
+        while read -r line; do
+            case "$line" in
+                *"'change' on sink #"*)
+                    now=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { print $5; exit }')$(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null)
+                    [ -n "$vol" ] && [ "$now" != "$vol" ] && play audio-volume-change
+                    vol=$now ;;
+            esac
+        done &
+    fi
+    wait
+}
+
+speaker_test() {
+    # thử loa không phụ thuộc cài đặt "tắt âm sự kiện"; hai âm dựng sẵn chỉ một kênh (gen-sounds.py)
+    notify-send -a "Depot OS" -i audio-speakers "Thử âm thanh" \
+        "Nghe chuông ở loa TRÁI rồi loa PHẢI. Không nghe thấy: mở Âm lượng (pavucontrol) xem thiết bị phát ra." 2>/dev/null
+    for side in left right; do
+        f=$DIR/audio-channel-front-$side.oga
+        pw-play "$f" >/dev/null 2>&1 || paplay "$f" >/dev/null 2>&1
+        sleep 0.3
+    done
+}
+
+case "${1:-}" in
+    session) session ;;
+    play) [ -n "${2:-}" ] && play "$2" ;;
+    test) speaker_test ;;
+    *) echo "dùng: depot-sounds session | play SỰ-KIỆN | test" >&2; exit 2 ;;
+esac

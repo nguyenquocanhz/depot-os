@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hiệu ứng hình ảnh
+Comment=Chọn đẹp nhất, nhanh nhất hoặc bật tắt từng hiệu ứng: animation, bóng đổ, mờ dần, widget
+Exec=depot-effects
+TryExec=yad
+Icon=preferences-desktop-theme
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-PersonalSettings;DesktopSettings;
+Keywords=hiệu ứng;animation;bóng đổ;hiệu năng;lag;performance;visual effects;

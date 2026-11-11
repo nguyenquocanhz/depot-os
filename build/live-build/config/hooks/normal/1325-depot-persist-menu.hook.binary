@@ -1,0 +1,69 @@
+#!/bin/sh
+# Depot OS — vùng lưu trên USB (depot-persist): phần menu boot.
+#   - Mục chạy mặc định thêm "persistence persistence-encryption=none,lukslabel": USB có vùng lưu thì mở (vùng mã hoá:
+#     hỏi mật khẩu trên màn boot), không có thì boot như cũ. "lukslabel" = chỉ hỏi cho LUKS mang nhãn "persistence".
+#   - Thêm mục "không mở vùng lưu" (nopersistence): chạy như USB trắng — cần khi muốn xoá vùng lưu, quên mật khẩu,
+#     hoặc cho người khác mượn máy.
+# Chỉ sửa mục Live chính, KHÔNG sửa "Cài tự động" (hỏi mật khẩu sẽ chặn việc cài không người ngồi), "Chẩn đoán phần
+# cứng", chế độ an toàn. Chạy SAU 1310/1321 (hai hook đó chép dòng của mục Live — chép trước khi có tham số
+# persistence) và TRƯỚC 1330 (đổi tên "Live system (amd64)").
+# GRUB (UEFI) + isolinux (BIOS). Không sửa loopback.cfg: boot từ file .iso (Ventoy…) không dùng vùng lưu kiểu này.
+# isolinux không có font tiếng Việt nên nhãn không dấu.
+set -e
+
+PARAMS='persistence persistence-encryption=none,lukslabel'
+TITLE_GRUB='Chạy Depot OS — không mở vùng lưu trên USB'
+TITLE_SYSLINUX='Chay Depot OS - ^khong mo vung luu tren USB'
+
+patch_grub() {
+    f=$1
+    grep -q 'persistence-encryption' "$f" && return 0
+    grep -q '^menuentry "Live system (amd64)"' "$f" || { echo "!! $f không có mục Live system (amd64)"; return 1; }
+    awk -v t="$TITLE_GRUB" -v p="$PARAMS" '
+        !done && /^menuentry "Live system \(amd64\)"/ { inb = 1 }
+        inb && /^[ \t]*linux/  { orig = $0; $0 = $0 " " p }
+        inb && /^[ \t]*initrd/ { ini = $0 }
+        { print }
+        inb && /^}/ {
+            inb = 0; done = 1
+            print ""
+            print "menuentry \"" t "\" {"
+            print orig " nopersistence"
+            print ini
+            print "}"
+        }' "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> persist menu: đã sửa $f"
+}
+
+patch_syslinux() {
+    f=$1
+    grep -q 'persistence-encryption' "$f" && return 0
+    grep -q '^label live-amd64$' "$f" || { echo "!! $f không có label live-amd64"; return 1; }
+    awk -v t="$TITLE_SYSLINUX" -v p="$PARAMS" '
+        /^label live-amd64$/ { inb = 1 }
+        inb && /^[ \t]*linux /  { lin = $0 }
+        inb && /^[ \t]*initrd / { ini = $0 }
+        inb && /^[ \t]*append / {
+            print $0 " " p
+            print ""
+            print "label live-amd64-nopersist"
+            print "\tmenu label " t
+            print lin
+            print ini
+            print $0 " nopersistence"
+            inb = 0
+            next
+        }
+        { print }' "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> persist menu: đã sửa $f"
+}
+
+for f in binary/boot/grub/grub.cfg boot/grub/grub.cfg; do
+    [ -f "$f" ] && grep -q '^menuentry "Live system (amd64)"' "$f" && patch_grub "$f"
+done
+for f in binary/isolinux/live.cfg isolinux/live.cfg; do
+    [ -f "$f" ] && patch_syslinux "$f"
+done
+exit 0

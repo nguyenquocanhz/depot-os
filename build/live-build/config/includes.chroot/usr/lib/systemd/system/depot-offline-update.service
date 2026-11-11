@@ -1,0 +1,19 @@
+[Unit]
+Description=Depot OS: cài bản cập nhật đã tải (màn chờ cập nhật)
+Documentation=man:systemd.offline-updates(7)
+# chạy trong system-update.target: máy khởi động vào đây thay vì desktop khi /system-update tồn tại
+DefaultDependencies=no
+Requires=sysinit.target dbus.socket
+After=sysinit.target dbus.socket systemd-journald.socket system-update-pre.target local-fs.target
+Before=shutdown.target system-update.target
+ConditionPathExists=/system-update
+ConditionPathExists=/var/lib/depot/update-ready
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-update apply
+# lỗi gì cũng khởi động lại (cờ /system-update đã xoá ở đầu lệnh) chứ không kẹt ở màn chờ
+FailureAction=reboot
+
+[Install]
+WantedBy=system-update.target

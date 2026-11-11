@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Depot OS — lệnh chuột phải của Thunar (thay bộ mặc định: giữ "Mở Terminal", thêm "Gửi bằng LocalSend") -->
+<actions>
+<action>
+	<icon>utilities-terminal</icon>
+	<name>Mở Terminal ở đây</name>
+	<submenu></submenu>
+	<unique-id>depot-terminal-1</unique-id>
+	<command>exo-open --working-directory %f --launch TerminalEmulator</command>
+	<description>Mở cửa sổ Terminal tại thư mục này</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+</action>
+<action>
+	<icon>localsend</icon>
+	<name>Gửi bằng LocalSend</name>
+	<submenu></submenu>
+	<unique-id>depot-localsend-1</unique-id>
+	<command>localsend_app %F</command>
+	<description>Gửi các tệp đã chọn sang máy khác trong cùng mạng</description>
+	<range></range>
+	<patterns>*</patterns>
+	<startup-notify/>
+	<directories/>
+	<audio-files/>
+	<image-files/>
+	<other-files/>
+	<text-files/>
+	<video-files/>
+</action>
+</actions>

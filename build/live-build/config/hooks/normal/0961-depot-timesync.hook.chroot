@@ -1,0 +1,10 @@
+#!/bin/sh
+# Depot OS — quyền file cho phần đồng bộ giờ.
+# File trong includes đến từ ổ Windows nên mang quyền 777: NetworkManager BỎ QUA script dispatcher mà người khác ghi
+# được, systemd-timesyncd thì cảnh báo file cấu hình "marked executable" (thấy trong nhật ký khi boot thử v0.20).
+set -e
+D=/etc/NetworkManager/dispatcher.d/90-depot-timesync
+chown root:root "$D"
+chmod 755 "$D"
+chmod 644 /etc/systemd/timesyncd.conf.d/*.conf
+echo ">> Depot timesync: $(stat -c '%a %U' "$D") dispatcher, conf $(stat -c '%a' /etc/systemd/timesyncd.conf.d/50-depot.conf)"

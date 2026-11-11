@@ -1,0 +1,235 @@
+#!/bin/sh
+# Depot OS — đổi DNS và proxy (XFCE không có chỗ nào chỉnh hai thứ này).
+# Không đối số: mở hộp thoại yad (GTK3 nên theo theme WhiteSur). Có đối số: chạy thẳng, hợp cho i3.
+#
+#   depot-dns-proxy                              hộp thoại
+#   depot-dns-proxy dns auto | <ip> [ip…]        DNS cho MỌI mạng (Wi-Fi, mạng dây, mạng mới)
+#   depot-dns-proxy dns private nextdns <ID> | cloudflare | quad9 | adguard
+#                                                DNS mã hoá (DNS-over-TLS), cho mọi mạng
+#   depot-dns-proxy proxy off | auto <url-pac> | manual <máy> <cổng> [bỏ-qua,…]
+#   depot-dns-proxy status
+#
+# DNS:   GlobalDnsConfiguration của NetworkManager, NM tự lưu ở /var/lib/NetworkManager/NetworkManager-intern.conf.
+#        polkit 50-depot-dns.rules cho user nhóm sudo/netdev đổi mà không hỏi mật khẩu.
+# DNS mã hoá: /usr/libexec/depot-dns-helper (root, qua pkexec) bật systemd-resolved + DNSOverTLS=yes;
+#        chọn lại DNS thường thì helper tắt resolved, trả resolv.conf cho NetworkManager.
+# Proxy: gsettings org.gnome.system.proxy (Firefox đọc ngay) + ~/.config/depot/proxy.env
+#        (/etc/X11/Xsession.d/90depot-proxy nạp lúc đăng nhập cho Terminal, curl, git…).
+set -u
+
+P=org.gnome.system.proxy
+ENVF="$HOME/.config/depot/proxy.env"
+IGNORE_DEFAULT="localhost,127.0.0.0/8,::1,192.168.0.0/16,10.0.0.0/8"
+PRIV=/etc/systemd/resolved.conf.d/90-depot-private-dns.conf
+HELPER=/usr/libexec/depot-dns-helper
+
+presets() {
+    cat <<'E'
+Tự động (theo mạng)|
+Cloudflare 1.1.1.1|1.1.1.1 1.0.0.1
+Google 8.8.8.8|8.8.8.8 8.8.4.4
+Quad9 9.9.9.9|9.9.9.9 149.112.112.112
+AdGuard (chặn quảng cáo)|94.140.14.14 94.140.15.15
+🔒 NextDNS — mã hoá (nhập ID bên dưới)|private:nextdns
+🔒 Cloudflare — mã hoá|private:cloudflare
+🔒 Quad9 — mã hoá|private:quad9
+🔒 AdGuard — mã hoá, chặn quảng cáo|private:adguard
+Tự nhập|
+E
+}
+
+# DNS mã hoá đang bật: in "nhà-cung-cấp ID" (ID chỉ có với nextdns); không bật: rỗng
+priv_now() {
+    [ -r "$PRIV" ] || return 0
+    prov=$(sed -n '1s/.*(\([a-z]*\)).*/\1/p' "$PRIV")
+    id=$(sed -n 's/^DNS=.*#\([0-9a-f]*\)\.dns\.nextdns\.io$/\1/p' "$PRIV" | head -1)
+    echo "$prov${id:+ $id}"
+}
+
+dns_label() {
+    p=$(priv_now)
+    if [ -n "$p" ]; then echo "mã hoá ($p)"; else dns_now | grep . || echo 'theo mạng'; fi
+}
+
+set_private() {   # $1 = off | nhà cung cấp, $2 = ID NextDNS
+    if [ "$1" = off ]; then
+        [ -r "$PRIV" ] || return 0
+        pkexec "$HELPER" off >/dev/null 2>&1 || fail "Không tắt được DNS mã hoá (chưa cho quyền quản trị?)."
+        return 0
+    fi
+    if [ "$1" = nextdns ]; then
+        case $(printf '%s' "${2:-}" | tr 'A-F' 'a-f') in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) fail "ID NextDNS là 6 ký tự 0-9, a-f (xem ở my.nextdns.io → Cài đặt, ví dụ 85d4e4)." ;;
+        esac
+    fi
+    err=$(pkexec "$HELPER" on "$1" ${2:+"$2"} 2>&1 >/dev/null) || fail "Không bật được DNS mã hoá. ${err:-Chưa cho quyền quản trị?}"
+}
+
+nm() {
+    gdbus call --system --dest org.freedesktop.NetworkManager --object-path /org/freedesktop/NetworkManager \
+        --method org.freedesktop.DBus.Properties."$1" org.freedesktop.NetworkManager GlobalDnsConfiguration ${2:+"$2"}
+}
+
+GUI=false
+fail() {
+    if $GUI; then
+        yad --title="DNS và Proxy" --window-icon=preferences-system-network --image=dialog-error \
+            --text="$1" --button="Đóng:0" --center --fixed >/dev/null 2>&1
+    else
+        echo "depot-dns-proxy: $1" >&2
+    fi
+    exit 1
+}
+
+# DNS chung đang đặt, dạng "1.1.1.1 1.0.0.1"; rỗng = theo mạng
+dns_now() {
+    nm Get 2>/dev/null | sed -n "s/.*'servers': <\[\([^]]*\)\]>.*/\1/p" | tr -d "'," | tr -s ' '
+}
+
+set_dns() {
+    if [ "$1" = private ]; then
+        [ -n "${2:-}" ] || fail "Chưa chọn nhà cung cấp DNS mã hoá (nextdns | cloudflare | quad9 | adguard)."
+        set_private "$2" "${3:-}"
+        # DNS chung của NM để trống: lúc tắt mã hoá thì về "theo mạng"
+        nm Set "<@a{sv} {}>" >/dev/null 2>&1
+        return 0
+    fi
+    set_private off
+    if [ "$1" = auto ]; then
+        val="<@a{sv} {}>"
+    else
+        list=
+        for ip in "$@"; do
+            case "$ip" in ''|*[!0-9a-fA-F:.]*) fail "\"$ip\" không phải địa chỉ IP." ;; esac
+            list="$list${list:+, }'$ip'"
+        done
+        [ -n "$list" ] || fail "Chưa nhập máy chủ DNS."
+        val="<{'domains': <{'*': <{'servers': <[$list]>}>}>}>"
+    fi
+    nm Set "$val" >/dev/null 2>&1 || fail "Không đổi được DNS: NetworkManager chưa chạy hoặc tài khoản không có quyền."
+}
+
+clean_host() {
+    h=${1#*://}; h=${h%%/*}
+    # bỏ ":cổng" dán kèm tên máy (cổng lấy ở ô riêng); IPv6 có nhiều dấu ":" thì giữ nguyên
+    case "$h" in *:*:*) ;; *:*) h=${h%:*} ;; esac
+    case "$h" in ''|*[!A-Za-z0-9.:-]*) fail "Máy chủ proxy \"$1\" không hợp lệ." ;; esac
+    echo "$h"
+}
+
+set_proxy() {
+    mode=$1; shift
+    mkdir -p "${ENVF%/*}"
+    case "$mode" in
+        off)
+            gsettings set $P mode none
+            rm -f "$ENVF"
+            ;;
+        auto)
+            [ -n "${1:-}" ] || fail "Chưa nhập địa chỉ file PAC."
+            gsettings set $P autoconfig-url "$1"
+            gsettings set $P mode auto
+            # biến môi trường không hiểu PAC: Terminal đi thẳng
+            rm -f "$ENVF"
+            ;;
+        manual)
+            host=$(clean_host "${1:-}") || exit 1
+            port=${2:-}
+            case "$port" in ''|*[!0-9]*) fail "Cổng proxy phải là số." ;; esac
+            ign=$(printf '%s' "${3:-$IGNORE_DEFAULT}" | tr -d " '\"")
+            arr=$(printf '%s' "$ign" | awk -F, '{for (i = 1; i <= NF; i++) if ($i != "") printf "%s'\''%s'\''", (n++ ? ", " : ""), $i}')
+            for s in http https ftp; do
+                gsettings set $P.$s host "$host"
+                gsettings set $P.$s port "$port"
+            done
+            gsettings set $P ignore-hosts "[$arr]"
+            gsettings set $P mode manual
+            u="http://$host:$port/"
+            cat >"$ENVF" <<E
+# do depot-dns-proxy ghi — sửa bằng hộp thoại "DNS và Proxy"
+export http_proxy="$u" https_proxy="$u" ftp_proxy="$u" no_proxy="$ign"
+export HTTP_PROXY="$u" HTTPS_PROXY="$u" FTP_PROXY="$u" NO_PROXY="$ign"
+E
+            ;;
+        *) fail "chế độ proxy lạ: $mode (off | auto | manual)" ;;
+    esac
+}
+
+proxy_now() {
+    case $(gsettings get $P mode 2>/dev/null) in
+        "'auto'") echo "tự động $(gsettings get $P autoconfig-url | tr -d "'")" ;;
+        "'manual'") echo "$(gsettings get $P.http host | tr -d "'"):$(gsettings get $P.http port)" ;;
+        *) echo "tắt" ;;
+    esac
+}
+
+case "${1:-}" in
+    dns) shift; set_dns "${@:-auto}"; echo "DNS: $(dns_label)"; exit 0 ;;
+    proxy) shift; set_proxy "${@:-off}"; echo "Proxy: $(proxy_now)"; exit 0 ;;
+    status) echo "DNS: $(dns_label)"; echo "Proxy: $(proxy_now)"; exit 0 ;;
+    '') ;;
+    *) echo "cách dùng: $0 [dns auto|IP…|private nextdns ID|cloudflare|quad9|adguard | proxy off|auto URL|manual MÁY CỔNG [BỎ-QUA] | status]" >&2; exit 2 ;;
+esac
+
+# --- hộp thoại
+GUI=true
+command -v yad >/dev/null || { echo "thiếu yad" >&2; exit 1; }
+
+cur=$(dns_now)
+custom= nid=
+pv=$(priv_now)
+if [ -n "$pv" ]; then
+    nid=${pv#* }; [ "$nid" = "$pv" ] && nid=
+    cur="private:${pv%% *}"
+fi
+pick=$(presets | awk -F'|' -v c="$cur" '$2 == c && c != "" {print $1}')
+[ -z "$cur" ] && pick="Tự động (theo mạng)"
+[ -z "$pick" ] && { pick="Tự nhập"; custom=$cur; }
+dnsitems=$(presets | cut -d'|' -f1 | awk -v p="$pick" '{printf "%s%s%s", (NR > 1 ? "!" : ""), ($0 == p ? "^" : ""), $0}')
+
+pmode=$(gsettings get $P mode 2>/dev/null | tr -d "'")
+pac=$(gsettings get $P autoconfig-url 2>/dev/null | tr -d "'")
+host=$(gsettings get $P.http host 2>/dev/null | tr -d "'")
+port=$(gsettings get $P.http port 2>/dev/null); [ "${port:-0}" -gt 0 ] 2>/dev/null || port=8080
+ign=$(gsettings get $P ignore-hosts 2>/dev/null | tr -d "[]' "); [ -n "$ign" ] || ign=$IGNORE_DEFAULT
+case "$pmode" in auto) pp="Tắt!^Tự động (file PAC)!Thủ công" ;; manual) pp="Tắt!Tự động (file PAC)!^Thủ công" ;; *) pp="^Tắt!Tự động (file PAC)!Thủ công" ;; esac
+
+out=$(yad --form --title="DNS và Proxy" --window-icon=preferences-system-network --center --width=560 --borders=16 \
+    --separator='|' --item-separator='!' \
+    --field="<b>DNS</b>:LBL" "" \
+    --field="Máy chủ DNS:CB" "$dnsitems" \
+    --field="DNS tự nhập" "$custom" \
+    --field="ID NextDNS (6 ký tự)" "$nid" \
+    --field="Áp dụng cho mọi mạng Wi-Fi và mạng dây. 🔒 = mã hoá (DNS-over-TLS), nhà mạng không xem được bạn vào trang nào. Wi-Fi quán cà phê cần trang đăng nhập thì tạm chọn Tự động.:LBL" "" \
+    --field=" :LBL" "" \
+    --field="<b>Proxy</b>:LBL" "" \
+    --field="Chế độ:CB" "$pp" \
+    --field="Địa chỉ file PAC" "$pac" \
+    --field="Máy chủ" "$host" \
+    --field="Cổng:NUM" "$port!1..65535!1" \
+    --field="Không dùng proxy cho" "$ign" \
+    --button="Huỷ:1" --button="Áp dụng:0") || exit 0
+
+IFS='|' read -r _ dns custom nid _ _ _ pmode pac host port ign <<E
+$out
+E
+
+servers=$(presets | awk -F'|' -v l="$dns" '$1 == l {print $2}')
+case "$servers" in
+    private:*) set_dns private "${servers#private:}" "$(printf '%s' "$nid" | tr -d ' ')" ;;
+    *)
+        case "$dns" in
+            Tự\ động*) set_dns auto ;;
+            Tự\ nhập) set_dns $(printf '%s' "$custom" | tr ',;' '  ') ;;
+            *) set_dns $servers ;;
+        esac ;;
+esac
+case "$pmode" in
+    Tắt) set_proxy off ;;
+    Tự\ động*) set_proxy auto "$pac" ;;
+    *) set_proxy manual "$host" "${port%%[.,]*}" "$ign" ;;
+esac
+
+notify-send -i preferences-system-network "DNS và Proxy" \
+    "DNS: $(dns_label). Proxy: $(proxy_now). Firefox nhận ngay; Terminal và app khác nhận proxy sau khi đăng nhập lại." 2>/dev/null || true

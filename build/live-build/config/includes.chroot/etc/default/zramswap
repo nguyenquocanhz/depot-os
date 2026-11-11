@@ -1,0 +1,4 @@
+# Depot OS — zram: swap nén trong RAM, không cần swap đĩa
+ALGO=zstd
+PERCENT=50
+PRIORITY=100

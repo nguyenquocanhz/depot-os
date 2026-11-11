@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Depot OS — Thunar kiểu File Explorer: danh sách chi tiết, thanh đường dẫn dạng nút, ẩn menubar (F10 hiện lại) -->
+<channel name="thunar" version="1.0">
+  <property name="last-view" type="string" value="ThunarDetailsView"/>
+  <property name="last-menubar-visible" type="bool" value="false"/>
+  <property name="last-location-bar" type="string" value="ThunarLocationButtons"/>
+  <property name="last-side-pane" type="string" value="ThunarShortcutsPane"/>
+  <property name="last-statusbar-visible" type="bool" value="true"/>
+  <!-- icon thanh bên to hơn: icon WhiteSur ở 16px nhạt và khó nhìn -->
+  <property name="shortcuts-icon-size" type="string" value="THUNAR_ICON_SIZE_24"/>
+  <property name="last-details-view-visible-columns" type="string" value="THUNAR_COLUMN_DATE_MODIFIED,THUNAR_COLUMN_NAME,THUNAR_COLUMN_SIZE,THUNAR_COLUMN_TYPE"/>
+  <!-- icon danh sách 24px: ở 16px thư mục WhiteSur chỉ là nét xám, trông như trống -->
+  <property name="last-details-view-zoom-level" type="string" value="THUNAR_ZOOM_LEVEL_50_PERCENT"/>
+  <property name="misc-folders-first" type="bool" value="true"/>
+</channel>

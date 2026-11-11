@@ -1,0 +1,163 @@
+# Depot OS — i3 (phiên siêu nhẹ, chọn "Depot OS (i3)" lúc đăng nhập)
+# mod = phím Windows (Super) — quen thuộc với người từ Windows sang
+
+set $mod Mod4
+set $term xfce4-terminal
+set $menu rofi -show drun
+
+font pango:Inter 10
+
+# --- Gaps & viền (i3 >= 4.22 có gaps sẵn)
+gaps inner 8
+gaps outer 4
+smart_gaps on
+smart_borders on
+default_border pixel 2
+default_floating_border pixel 2
+hide_edge_borders smart
+
+# --- Màu đồng bộ palette Depot OS
+set $bg     #0f1420
+set $dim    #16203a
+set $fg     #e8eefb
+set $accent #3d6db5
+set $urgent #d9534f
+# class                 border    bg        text      indicator child_border
+client.focused          $accent   $accent   $fg       $accent   $accent
+client.focused_inactive $dim      $dim      $fg       $dim      $dim
+client.unfocused        $bg       $bg       $dim      $bg       $bg
+client.urgent           $urgent   $urgent   $fg       $urgent   $urgent
+
+# --- Autostart (i3 KHÔNG đọc /etc/xdg/autostart — phải exec tay)
+exec --no-startup-id depot-effects apply
+# thông báo + khung Thông báo bên cạnh ($mod+n); depot-notify tự bảo dunst nghỉ nếu dunst đang chạy
+exec --no-startup-id depot-notify
+# bộ nhớ tạm: lịch sử sao chép, $mod+Shift+v để chọn lại ($mod+v đã là "split v")
+exec --no-startup-id depot-clipboard start
+exec --no-startup-id depot-wallpaper --restore
+exec --no-startup-id nm-applet
+exec --no-startup-id blueman-applet
+exec --no-startup-id fcitx5
+# polkit agent: không có thì pkexec (cài driver, lưu DNS) không hỏi được mật khẩu
+exec --no-startup-id /usr/libexec/polkit-mate-authentication-agent-1
+exec --no-startup-id depot-drivers --notify
+exec --no-startup-id depot-update notify
+exec --no-startup-id depot-sounds session
+# Chế độ pin: tự đổi mức theo % pin + ngủ sâu app không dùng (depot-power)
+exec --no-startup-id depot-powerd
+
+# --- Mở app
+bindsym $mod+Return exec $term
+bindsym $mod+d exec $menu
+bindsym $mod+n exec --no-startup-id depot-notify toggle
+bindsym $mod+Shift+v exec --no-startup-id depot-clipboard show
+bindsym $mod+Shift+q kill
+# Khoá màn hình
+bindsym $mod+Shift+x exec --no-startup-id i3lock -c 0f1420
+
+# --- Focus (hjkl hoặc mũi tên)
+bindsym $mod+j focus left
+bindsym $mod+k focus down
+bindsym $mod+l focus up
+bindsym $mod+semicolon focus right
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+
+# --- Di chuyển cửa sổ
+bindsym $mod+Shift+j move left
+bindsym $mod+Shift+k move down
+bindsym $mod+Shift+l move up
+bindsym $mod+Shift+semicolon move right
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+
+# --- Bố cục
+bindsym $mod+h split h
+bindsym $mod+v split v
+bindsym $mod+f fullscreen toggle
+bindsym $mod+s layout stacking
+bindsym $mod+w layout tabbed
+bindsym $mod+e layout toggle split
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+bindsym $mod+a focus parent
+
+# --- Workspace 1–6
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+bindsym $mod+1 workspace $ws1
+bindsym $mod+2 workspace $ws2
+bindsym $mod+3 workspace $ws3
+bindsym $mod+4 workspace $ws4
+bindsym $mod+5 workspace $ws5
+bindsym $mod+6 workspace $ws6
+bindsym $mod+Shift+1 move container to workspace $ws1
+bindsym $mod+Shift+2 move container to workspace $ws2
+bindsym $mod+Shift+3 move container to workspace $ws3
+bindsym $mod+Shift+4 move container to workspace $ws4
+bindsym $mod+Shift+5 move container to workspace $ws5
+bindsym $mod+Shift+6 move container to workspace $ws6
+
+# --- Cửa sổ nổi tự nhiên (hộp thoại, tiện ích)
+for_window [window_role="pop-up"] floating enable
+for_window [window_type="dialog"] floating enable
+for_window [class="Pavucontrol"] floating enable
+for_window [class="Blueman-manager"] floating enable
+for_window [class="Yad"] floating enable
+for_window [class="Nm-connection-editor"] floating enable
+
+# --- Resize (mode r)
+bindsym $mod+r mode "resize"
+mode "resize" {
+    bindsym j resize shrink width 10 px or 10 ppt
+    bindsym k resize grow height 10 px or 10 ppt
+    bindsym l resize shrink height 10 px or 10 ppt
+    bindsym semicolon resize grow width 10 px or 10 ppt
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+}
+
+# --- Reload / restart / thoát
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Thoát i3?' -B 'Thoát' 'i3-msg exit'"
+
+# --- Phím âm lượng / độ sáng / media
+bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ +5%
+bindsym XF86AudioLowerVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ -5%
+bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
+bindsym XF86AudioPlay exec --no-startup-id playerctl play-pause
+bindsym XF86AudioNext exec --no-startup-id playerctl next
+bindsym XF86AudioPrev exec --no-startup-id playerctl previous
+bindsym XF86MonBrightnessUp exec --no-startup-id xbacklight -inc 5
+bindsym XF86MonBrightnessDown exec --no-startup-id xbacklight -dec 5
+
+# --- Chụp màn hình (dùng xfce4-screenshooter có sẵn)
+bindsym Print exec --no-startup-id xfce4-screenshooter -f
+bindsym $mod+Print exec --no-startup-id xfce4-screenshooter -r
+
+# --- i3bar + i3status (polybar chưa có trong Debian 13 stable)
+bar {
+    position top
+    mode dock
+    status_command i3status
+    font pango:Inter 10
+    separator_symbol " | "
+    colors {
+        background #d90f1420
+        statusline #e8eefb
+        separator  #8fa7cf
+        focused_workspace  #3d6db5 #3d6db5 #ffffff
+        active_workspace   #16203a #16203a #e8eefb
+        inactive_workspace #0f1420 #0f1420 #8fa7cf
+        urgent_workspace   #d9534f #d9534f #ffffff
+    }
+}

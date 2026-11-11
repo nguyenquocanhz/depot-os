@@ -1,0 +1,23 @@
+# Depot OS — Boot Diag: chỉ chạy khi boot bằng mục "Chẩn đoán phần cứng" (tham số kernel depot.bootdiag,
+# do hook 1321-depot-bootdiag-menu.hook.binary thêm). Chiếm màn chữ tty1 TRƯỚC màn đăng nhập: in báo cáo
+# main / CPU nâng cấp được, lưu ra USB, rồi chờ phím (vào desktop / khởi động lại / tắt máy).
+# Máy đã cài cũng dùng được: thêm depot.bootdiag vào dòng linux trong GRUB (phím e) cho một lần boot.
+[Unit]
+Description=Depot OS — Boot Diag (chẩn đoán main, CPU nâng cấp được)
+ConditionKernelCommandLine=depot.bootdiag
+After=systemd-udev-trigger.service local-fs.target live-config.service plymouth-start.service
+Before=display-manager.service getty@tty1.service depot-autoinstall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-bootdiag --boot
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

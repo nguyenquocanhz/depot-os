@@ -1,0 +1,9 @@
+#!/bin/sh
+# Depot OS — cài dotfiles mặc định cho mọi user mới (kể cả user live).
+# Dotfiles nằm sẵn trong ISO tại /usr/share/depot-os/dotfiles
+# (được auto/build sync từ thư mục dotfiles/ của repo).
+set -e
+if [ -d /usr/share/depot-os/dotfiles/config ]; then
+    mkdir -p /etc/skel/.config
+    cp -a /usr/share/depot-os/dotfiles/config/. /etc/skel/.config/
+fi

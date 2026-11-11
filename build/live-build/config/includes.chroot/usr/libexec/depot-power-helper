@@ -1,0 +1,138 @@
+#!/bin/sh
+# Depot OS — phần cần quyền root của "Chế độ pin" (depot-power). Gọi qua pkexec; polkit
+# (tech.wrenevil.depot.power.policy) cho người dùng đang ngồi máy chạy không cần mật khẩu.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-power-helper off|low|medium|high|ultra
+#
+# Lần đầu đổi một giá trị thì cất giá trị gốc vào /run/depot-power/ — "off" trả lại đúng giá trị gốc.
+# Giá trị nào máy không có (không có pin, không có intel_pstate, BIOS cấm ASPM…) thì bỏ qua, không báo lỗi.
+# Thử với sysfs giả: DEPOT_SYS_ROOT=/gốc-giả
+set -u
+SYS=${DEPOT_SYS_ROOT:-}
+ORIG=${DEPOT_POWER_RUN:-/run/depot-power}
+LEVEL=${1:-}
+case $LEVEL in off | low | medium | high | ultra) ;; *) echo "dùng: depot-power-helper off|low|medium|high|ultra" >&2; exit 2 ;; esac
+mkdir -p "$ORIG"
+
+key() { printf '%s' "$1" | tr '/' '%'; }
+
+setk() {  # setk ĐƯỜNG_DẪN GIÁ_TRỊ — cất gốc một lần rồi ghi
+    p=$SYS$1
+    [ -w "$p" ] || return 0
+    k=$ORIG/$(key "$1")
+    [ -e "$k" ] || sed 's/.*\[\([^]]*\)\].*/\1/' "$p" > "$k" 2>/dev/null   # file dạng "a [b] c" → lấy b
+    printf '%s\n' "$2" > "$p" 2>/dev/null || true
+}
+
+restore_all() {  # restore_all [keep-backlight] — đổi mức thì giữ độ sáng hiện tại (không tự sáng lên)
+    for k in "$ORIG"/%*; do
+        [ -e "$k" ] || continue
+        [ "${1:-}" = keep-backlight ] && case $k in *%backlight%*) continue ;; esac
+        p=$SYS$(basename "$k" | tr '%' '/')
+        [ -w "$p" ] && cat "$k" > "$p" 2>/dev/null
+        rm -f "$k"
+    done
+    # Wi-Fi: không cất được qua sysfs — trả về mặc định của driver
+    if [ -e "$ORIG/wifi" ]; then
+        for w in $SYS/sys/class/net/*/wireless; do
+            [ -d "$w" ] || continue
+            n=$(basename "$(dirname "$w")")
+            command -v iw >/dev/null && iw dev "$n" set power_save "$(cat "$ORIG/wifi")" 2>/dev/null
+        done
+        rm -f "$ORIG/wifi"
+    fi
+    echo off > "$ORIG/level"
+}
+
+cpu() {  # cpu EPP TURBO(1/0) MAXPCT PROFILE
+    for f in $SYS/sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference; do
+        [ -e "$f" ] || continue
+        a=$(cat "${f%/*}/energy_performance_available_preferences" 2>/dev/null)
+        case " $a " in *" $1 "*) setk "${f#"$SYS"}" "$1" ;; esac
+    done
+    if [ -e "$SYS/sys/devices/system/cpu/intel_pstate/no_turbo" ]; then
+        setk /sys/devices/system/cpu/intel_pstate/no_turbo "$([ "$2" = 1 ] && echo 0 || echo 1)"
+        setk /sys/devices/system/cpu/intel_pstate/max_perf_pct "$3"
+    else
+        [ -e "$SYS/sys/devices/system/cpu/cpufreq/boost" ] && setk /sys/devices/system/cpu/cpufreq/boost "$2"
+        # acpi-cpufreq / amd-pstate: chặn xung tối đa theo %
+        for m in $SYS/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq; do
+            [ -e "$m" ] || continue
+            lo=$(cat "${m%/*}/cpuinfo_min_freq" 2>/dev/null || echo 0)
+            v=$(( $(cat "$m") * $3 / 100 )); [ "$v" -lt "$lo" ] && v=$lo
+            setk "$(dirname "${m#"$SYS"}")/scaling_max_freq" "$v"
+        done
+    fi
+    pp=$SYS/sys/firmware/acpi/platform_profile
+    if [ -e "$pp" ]; then
+        case " $(cat "${pp}_choices" 2>/dev/null) " in *" $4 "*) setk /sys/firmware/acpi/platform_profile "$4" ;; esac
+    fi
+}
+
+devices() {  # devices ASPM SATA USB(1/0) AUDIO(1/0)
+    [ -n "$1" ] && setk /sys/module/pcie_aspm/parameters/policy "$1"
+    for h in $SYS/sys/class/scsi_host/host*/link_power_management_policy; do
+        [ -e "$h" ] && [ -n "$2" ] && setk "${h#"$SYS"}" "$2"
+    done
+    if [ "$3" = 1 ]; then
+        # USB tự ngủ, TRỪ chuột/bàn phím/tay cầm (HID, class 03) — không thì chuột khựng khi vừa chạm —
+        # và TRỪ card mạng USB (Wi-Fi, LAN, điện thoại chia sẻ mạng): nhiều driver Wi-Fi USB (rtl8xxxu, rtw88, mt76)
+        # rớt mạng hoặc biến mất hẳn khi bị cho ngủ, phải rút ra cắm lại
+        for d in $SYS/sys/bus/usb/devices/*; do
+            [ -e "$d/power/control" ] || continue
+            grep -qx 03 "$d"/*/bInterfaceClass 2>/dev/null && continue
+            [ -n "$(ls -d "$d"/*/net "$d"/*/*/net 2>/dev/null)" ] && continue
+            setk "${d#"$SYS"}/power/control" auto
+        done
+    fi
+    if [ "$4" = 1 ]; then
+        setk /sys/module/snd_hda_intel/parameters/power_save 1
+        setk /sys/module/snd_hda_intel/parameters/power_save_controller Y
+    fi
+    # bớt đánh thức CPU vô ích
+    setk /proc/sys/kernel/nmi_watchdog 0
+    setk /proc/sys/vm/dirty_writeback_centisecs 1500
+}
+
+wifi() {
+    command -v iw >/dev/null || return 0
+    for w in $SYS/sys/class/net/*/wireless; do
+        [ -d "$w" ] || continue
+        n=$(basename "$(dirname "$w")")
+        [ -e "$ORIG/wifi" ] || { iw dev "$n" get power_save 2>/dev/null | grep -q ' on' && echo on || echo off; } > "$ORIG/wifi"
+        iw dev "$n" set power_save on 2>/dev/null
+    done
+}
+
+bluetooth_off() {
+    for r in $SYS/sys/class/rfkill/rfkill*; do
+        [ "$(cat "$r/type" 2>/dev/null)" = bluetooth ] && setk "${r#"$SYS"}/soft" 1
+    done
+}
+
+backlight() {  # backlight PCT — chỉ hạ nếu đang sáng hơn mức trần, không bao giờ làm sáng lên
+    for b in $SYS/sys/class/backlight/*; do
+        [ -e "$b/brightness" ] || continue
+        max=$(cat "$b/max_brightness"); cur=$(cat "$b/brightness")
+        cap=$(( max * $1 / 100 ))
+        [ "$cur" -gt "$cap" ] && setk "${b#"$SYS"}/brightness" "$cap"
+    done
+}
+
+deep_suspend() {  # ngủ máy kiểu S3 (deep) tốn pin ít hơn s2idle khi máy hỗ trợ
+    grep -qw deep "$SYS/sys/power/mem_sleep" 2>/dev/null && setk /sys/power/mem_sleep deep
+}
+
+if [ "$LEVEL" = off ]; then restore_all; echo ">> chế độ pin: tắt (trả lại cài đặt gốc)"; exit 0; fi
+# đổi giữa hai mức: về gốc trước (Bluetooth, deep sleep… của mức cũ không kẹt lại), giữ độ sáng
+restore_all keep-backlight
+case $LEVEL in
+    low)    cpu balance_performance 1 100 balanced;  devices ""          med_power_with_dipm 0 1 ;;
+    medium) cpu balance_power 1 100 balanced;        devices powersave   med_power_with_dipm 1 1; wifi; backlight 80 ;;
+    high)   cpu power 0 80 low-power;                devices powersave   med_power_with_dipm 1 1; wifi; backlight 60; deep_suspend ;;
+    ultra)  cpu power 0 60 low-power;                devices powersupersave min_power 1 1;        wifi; backlight 40; deep_suspend
+            bluetooth_off ;;
+esac
+echo "$LEVEL" > "$ORIG/level"
+echo ">> chế độ pin: $LEVEL"

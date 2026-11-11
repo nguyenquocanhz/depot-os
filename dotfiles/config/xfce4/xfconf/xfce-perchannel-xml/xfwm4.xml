@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="WhiteSur-Dark"/>
+    <property name="title_font" type="string" value="Inter Bold 10"/>
+    <!-- nút kiểu macOS bên trái: đóng, thu nhỏ, phóng to. Theme WhiteSur không tự đặt, mặc định xfwm4 là O|SHMC (có cả nút cuộn ^) -->
+    <property name="button_layout" type="string" value="CHM|"/>
+    <property name="title_alignment" type="string" value="center"/>
+    <!-- picom lo compositor; tắt compositor nội bộ của xfwm4 -->
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="workspace_count" type="int" value="2"/>
+    <!-- KHÔNG nhảy desktop ảo khi chuột (hay cửa sổ đang kéo) chạm mép màn hình. Tới v0.20.2 wrap_workspaces
+         để true: xem phim hất chuột ra rìa là sang desktop 2 — cửa sổ Chrome "biến mất", tiếng vẫn phát.
+         Đổi desktop: Ctrl+Alt+←/→ hoặc bộ chuyển trên panel. -->
+    <property name="wrap_workspaces" type="bool" value="false"/>
+    <property name="wrap_windows" type="bool" value="false"/>
+    <property name="double_click_action" type="string" value="maximize"/>
+    <property name="click_to_focus" type="bool" value="true"/>
+  </property>
+</channel>

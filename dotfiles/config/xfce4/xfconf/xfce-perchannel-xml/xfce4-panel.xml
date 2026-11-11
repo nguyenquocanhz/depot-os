@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <!-- panels = DANH SÁCH id panel (array of int). Ghi uint 1 thì panel bỏ qua cấu hình, tạo panel-0 rỗng (hộp đen có 2 vạch chấm) -->
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <!-- macOS menubar: panel trên mỏng, dock chạy bằng Plank ở dưới -->
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="28"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="autohide-behavior" type="uint" value="0"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="11"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+        <value type="int" value="7"/>
+        <value type="int" value="8"/>
+        <value type="int" value="9"/>
+        <value type="int" value="10"/>
+      </property>
+    </property>
+  </property>
+  <!-- separator style 0 = trong suốt, không vẽ vạch -->
+  <property name="plugins" type="empty">
+    <!-- nút menu = logo Depot by WrenEvil (bản một màu), như logo Apple trên thanh menu macOS -->
+    <property name="plugin-1" type="string" value="whiskermenu">
+      <property name="button-icon" type="string" value="/usr/share/pixmaps/depot-logo-menu.svg"/>
+      <property name="show-button-title" type="bool" value="false"/>
+    </property>
+    <property name="plugin-2" type="string" value="separator">
+      <property name="expand" type="bool" value="false"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <!-- CPU · RAM · tốc độ mạng kiểu thanh menu macOS: genmon chạy depot-statusbar 2 giây/lần (cấu hình: ~/.config/xfce4/panel/genmon-11.rc) -->
+    <property name="plugin-11" type="string" value="genmon"/>
+    <property name="plugin-4" type="string" value="systray"/>
+    <property name="plugin-5" type="string" value="pulseaudio"/>
+    <property name="plugin-6" type="string" value="power-manager-plugin"/>
+    <!-- chuông thông báo: genmon chạy depot-notify-bell (~/.config/xfce4/panel/genmon-7.rc), bấm mở khung Thông báo bên cạnh -->
+    <property name="plugin-7" type="string" value="genmon"/>
+    <!-- đồng hồ một dòng kiểu macOS: "T6 31/10  22:55" (digital-layout 3 = chỉ một dòng giờ) -->
+    <property name="plugin-8" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-layout" type="uint" value="3"/>
+      <property name="digital-time-format" type="string" value="%a %d/%m  %H:%M"/>
+    </property>
+    <property name="plugin-9" type="string" value="separator">
+      <property name="expand" type="bool" value="false"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-10" type="string" value="actions"/>
+  </property>
+</channel>

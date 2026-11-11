@@ -1,0 +1,22 @@
+#!/bin/sh
+# Depot OS — live-build config (Debian 13 trixie, amd64)
+# Chạy: lb config  (tự gọi file này)
+# Phiên live: user "depot" @ máy "depot-os" (như ubuntu@ubuntu); thiếu username= thì live-config đặt "user".
+# Mật khẩu live vẫn là "live" (mặc định live-config). Máy cài bằng Calamares dùng tên người dùng tự chọn.
+# squashfs nén zstd thay xz (mặc định): giải nén nhanh hơn nhiều trên CPU cũ (mọi lần đọc file lúc boot live
+# và lúc cài đều qua bước này). Đo trên /opt 588 MB, giải nén 1 luồng: xz 6,6 s, zstd 0,9 s (nhanh ~7 lần);
+# đổi lại lớn hơn ~10 %. Mức 15: gần bằng mức 19 về dung lượng (193 so với 191 MB) mà nén nhanh gấp ~2,7 lần lúc build.
+set -e
+
+lb config noauto \
+    --distribution trixie \
+    --architecture amd64 \
+    --archive-areas "main contrib non-free non-free-firmware" \
+    --binary-images iso-hybrid \
+    --chroot-squashfs-compression-type zstd \
+    --chroot-squashfs-compression-level 15 \
+    --bootappend-live "boot=live components quiet splash locales=vi_VN.UTF-8 timezone=Asia/Ho_Chi_Minh username=depot user-fullname=Depot hostname=depot-os" \
+    --iso-volume "DepotOS-amd64" \
+    --iso-application "Depot OS Live" \
+    --iso-publisher "Depot OS Project; https://depot-os.local" \
+    "${@}"

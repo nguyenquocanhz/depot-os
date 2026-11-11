@@ -1,0 +1,609 @@
+#!/bin/bash
+# Depot OS — Boot Diag: chẩn đoán bo mạch chủ (main) đang chạy, cho biết nâng cấp được lên CPU đời nào.
+# Bảng tra hiện có: socket LGA1155 (chipset Intel dòng 6 / dòng 7). Socket khác: in thông tin, chưa có bảng tra.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-bootdiag                    in báo cáo (tự xin sudo để đọc dmidecode: socket, khe RAM, BIOS)
+#   depot-bootdiag --save [THƯ_MỤC]   in + lưu báo cáo .txt (không ghi THƯ_MỤC: gốc USB ghi được, không có thì thư mục nhà)
+#   depot-bootdiag --pause            chờ Enter trước khi thoát (lối tắt trên menu ứng dụng)
+#   depot-bootdiag --dump THƯ_MỤC     lưu dữ liệu thô của máy này (dmidecode, lspci, cpuinfo) để gửi người khác xem
+#   depot-bootdiag --sample THƯ_MỤC   chạy trên dữ liệu thô đã lưu (bằng --dump) thay vì máy đang chạy
+#   depot-bootdiag --boot             depot-bootdiag.service gọi khi boot bằng mục "Chẩn đoán phần cứng"
+#
+# Chỉ đọc: không ghi gì vào ổ trong máy. --save/--boot chỉ ghi 1 file .txt ra USB (vfat/exfat/ntfs) hoặc thư mục nhà.
+set -u
+export LC_ALL=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+SAMPLE=""; SAVE=0; SAVE_DIR=""; PAUSE=0; BOOT=0; DUMP=""
+ON_VT=0; [ "${TERM:-}" = linux ] && ON_VT=1   # màn chữ (VT) không có font tiếng Việt → bỏ dấu
+WORK=/run/depot-bootdiag
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --save)   SAVE=1; if [ -n "${2:-}" ] && [ "${2#--}" = "$2" ]; then SAVE_DIR=$2; shift; fi ;;
+        --pause)  PAUSE=1 ;;
+        --sample) SAMPLE=${2:?thiếu THƯ_MỤC}; shift ;;
+        --dump)   DUMP=${2:?thiếu THƯ_MỤC}; shift ;;
+        --boot)   BOOT=1; SAVE=1; ON_VT=1 ;;
+        -h|--help|*) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+    esac
+    shift
+done
+
+plain() { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; }
+show()  { if [ "$ON_VT" = 1 ]; then printf '%s\n' "$*" | plain; else printf '%s\n' "$*"; fi; }
+
+# ================================================================ đọc dữ liệu
+read_dmidecode() {
+    command -v dmidecode >/dev/null || return 0
+    if [ "$(id -u)" = 0 ]; then dmidecode 2>/dev/null
+    elif sudo -n true 2>/dev/null; then sudo -n dmidecode 2>/dev/null
+    elif [ -t 0 ] && [ -t 2 ]; then
+        show "Cần quyền root để đọc socket, khe RAM (dmidecode). Không có thì báo cáo thiếu phần RAM." >&2
+        sudo -p "[sudo] mật khẩu của %u: " dmidecode 2>/dev/null
+    fi
+}
+
+load_data() {
+    if [ -n "$SAMPLE" ]; then
+        [ -d "$SAMPLE" ] || { echo "Không có thư mục $SAMPLE" >&2; exit 1; }
+        DMI=$(cat "$SAMPLE/dmidecode.txt" 2>/dev/null)
+        PCI=$(cat "$SAMPLE/lspci.txt" 2>/dev/null)
+        CPUINFO=$(cat "$SAMPLE/cpuinfo.txt" 2>/dev/null)
+        MEMINFO=$(cat "$SAMPLE/meminfo.txt" 2>/dev/null)
+        IDDIR=$SAMPLE/dmi-id
+        VIRT=$(cat "$SAMPLE/virt.txt" 2>/dev/null)
+        SRC="dữ liệu mẫu: $SAMPLE"
+    else
+        DMI=$(read_dmidecode)
+        PCI=$(lspci -nn 2>/dev/null)
+        CPUINFO=$(cat /proc/cpuinfo 2>/dev/null)
+        MEMINFO=$(cat /proc/meminfo 2>/dev/null)
+        IDDIR=/sys/class/dmi/id
+        VIRT=$(systemd-detect-virt 2>/dev/null)
+        SRC="máy đang chạy ($(hostname 2>/dev/null))"
+    fi
+    printf '%s\n' "$DMI" | grep -q '^Handle ' || DMI=""   # WSL/máy không có SMBIOS: dmidecode chỉ in lỗi
+    [ "$VIRT" = none ] && VIRT=""
+}
+
+junk() {   # bỏ chuỗi rác OEM để trống
+    sed -E 's/[[:space:]]+$//; /^(To [Bb]e [Ff]illed [Bb]y O\.E\.M\.?|Default [Ss]tring|Not Specified|Not Applicable|None|Unknown|Other|System Product Name|System [Mm]anufacturer|System Version|Base Board Version|Base Board Product Name|x\.x|X\.X|0123456789|N\/A|)$/d'
+}
+dmi() {    # dmi LOẠI "Trường" → giá trị đầu tiên
+    [ -n "$DMI" ] || return 0
+    printf '%s\n' "$DMI" | awk -v t="$1" -v f="$2" '
+        /^Handle /{ cur = ($0 ~ ("DMI type " t ",")); next }
+        cur && index($0, "\t" f ": ") == 1 { print substr($0, length(f) + 4); exit }' | junk
+}
+idf() { cat "$IDDIR/$1" 2>/dev/null | head -1 | junk; }
+first() { local v; for v in "$@"; do [ -n "$v" ] && { printf '%s' "$v"; return; }; done; }
+cpuf() { printf '%s\n' "$CPUINFO" | awk -F': *' -v k="$1" '$1 ~ "^" k "[ \t]*$" { print $2; exit }'; }
+
+collect() {
+    BOARD_VENDOR=$(first "$(dmi 2 Manufacturer)" "$(idf board_vendor)")
+    BOARD_NAME=$(first "$(dmi 2 'Product Name')" "$(idf board_name)")
+    BOARD_VER=$(first "$(dmi 2 Version)" "$(idf board_version)")
+    SYS_VENDOR=$(first "$(dmi 1 Manufacturer)" "$(idf sys_vendor)")
+    SYS_PRODUCT=$(first "$(dmi 1 'Product Name')" "$(idf product_name)")
+    SYS_VERSION=$(first "$(dmi 1 Version)" "$(idf product_version)")
+    BIOS_VENDOR=$(first "$(dmi 0 Vendor)" "$(idf bios_vendor)")
+    BIOS_VER=$(first "$(dmi 0 Version)" "$(idf bios_version)")
+    BIOS_DATE=$(first "$(dmi 0 'Release Date')" "$(idf bios_date)")
+    BIOS_YMD=""
+    case $BIOS_DATE in
+        [0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]) BIOS_YMD=${BIOS_DATE:6:4}${BIOS_DATE:0:2}${BIOS_DATE:3:2} ;;
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) BIOS_YMD=${BIOS_DATE//-/} ;;
+    esac
+
+    # CPU
+    CPU_NAME=$(first "$(cpuf 'model name' | sed -E 's/\(R\)|\(TM\)|\(tm\)//g; s/ CPU//; s/  +/ /g')" "$(dmi 4 Version)")
+    CPU_FAM=$(cpuf 'cpu family'); CPU_MODEL=$(cpuf model)
+    CPU_THREADS=$(printf '%s\n' "$CPUINFO" | grep -c '^processor')
+    CPU_CORES=$(first "$(dmi 4 'Core Count')" "$(cpuf 'cpu cores')")
+    [ "$CPU_THREADS" = 0 ] && CPU_THREADS=$(dmi 4 'Thread Count')
+    CPU_GEN=other
+    if [ "${CPU_FAM:-}" = 6 ]; then
+        case ${CPU_MODEL:-} in 42) CPU_GEN=snb ;; 58) CPU_GEN=ivb ;; 45) CPU_GEN=snbe ;; 62) CPU_GEN=ivbe ;; esac
+    fi
+    if [ "$CPU_GEN" = other ]; then
+        case $CPU_NAME in
+            *i[357]-2[0-9][0-9][0-9]*|*E3-12[0-9][0-9]\ *|*E3-12[0-9][0-9]|*E3-12[0-9][0-9][LW]*|*G[4-8][0-9][0-9]*) CPU_GEN=snb ;;
+            *i[357]-3[0-9][0-9][0-9]*|*E3-12[0-9][0-9]*v2*|*G1[0-9][0-9][0-9]*|*G2[0-9][0-9][0-9]*) CPU_GEN=ivb ;;
+        esac
+    fi
+
+    # Socket: dmidecode "Upgrade: Socket LGA1155" là đáng tin nhất
+    SOCKET=""; SOCKET_SRC=""
+    local up des; up=$(dmi 4 Upgrade); des=$(dmi 4 'Socket Designation')
+    case $up in Socket\ *) SOCKET=${up#Socket }; SOCKET_SRC=dmidecode ;; esac
+    if [ -z "$SOCKET" ]; then
+        case $des in *LGA*|*AM[0-9]*|*FM[0-9]*|*G[1-3]*|*BGA*|*PGA*|*775*|*115[0-9]*|*1200*|*1700*|*2011*)
+            SOCKET=$(printf '%s' "$des" | sed -E 's/^(CPU ?[0-9]*|SOCKET ?[0-9]*)[ :]*//I'); SOCKET_SRC=dmidecode ;;
+        esac
+    fi
+
+    # Chipset: cầu nối ISA/LPC (00:1f.0) trong lspci -nn
+    local lpc; lpc=$(printf '%s\n' "$PCI" | grep -m1 -E 'ISA bridge|\[0601\]')
+    LPC_ID=$(printf '%s' "$lpc" | grep -oE '\[[0-9a-f]{4}:[0-9a-f]{4}\]' | tail -1 | tr -d '[]')
+    LPC_REV=$(printf '%s' "$lpc" | grep -oE '\(rev [0-9a-f]+\)' | grep -oE '[0-9a-f]+\)$' | tr -d ')')
+    LPC_TEXT=$(printf '%s' "$lpc" | sed -E 's/^[^ ]+ [^:]*: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')
+    CHIP=""; SERIES=""; KIND=""; CHIP_SOCKET=""
+    if [ "${LPC_ID%%:*}" = 8086 ]; then chipset_lookup "${LPC_ID#*:}"; fi
+    if [ -z "$CHIP" ] && [ -n "$LPC_TEXT" ]; then
+        CHIP=$(printf '%s' "$LPC_TEXT" | grep -oE '\b[A-Z]{1,2}[0-9]{2,3}[A-Z]?\b' | head -1)
+    fi
+    if [ -z "$SOCKET" ] && [ -n "$CHIP_SOCKET" ]; then SOCKET=$CHIP_SOCKET; SOCKET_SRC="suy ra từ chipset"; fi
+    IS1155=0   # máy xách tay (KIND=mob) có chipset dòng 6/7 nhưng xử lý riêng
+    case $SOCKET in *1155*) IS1155=1 ;; esac
+    case $SERIES in 6|7) IS1155=1 ;; esac
+
+    # GPU
+    IGPU=""; DGPU=""
+    local l id
+    while IFS= read -r l; do
+        id=$(printf '%s' "$l" | grep -oE '\[[0-9a-f]{4}:[0-9a-f]{4}\]' | tail -1 | tr -d '[]')
+        case $id in
+            8086:0102|8086:0106) IGPU="Intel HD Graphics 2000" ;;
+            8086:0112|8086:0116|8086:0122|8086:0126) IGPU="Intel HD Graphics 3000" ;;
+            8086:010a) IGPU="Intel HD Graphics P3000" ;;
+            8086:0152|8086:0156) IGPU="Intel HD Graphics 2500" ;;
+            8086:0162|8086:0166) IGPU="Intel HD Graphics 4000" ;;
+            8086:016a) IGPU="Intel HD Graphics P4000" ;;
+            8086:*) IGPU=$(printf '%s' "$l" | sed -E 's/^[^ ]+ [^:]*: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//') ;;
+            15ad:*|1234:*|1af4:*|80ee:*|1414:*) ;;     # card ảo của VMware/QEMU/VirtualBox/Hyper-V
+            ?*) DGPU="${DGPU:+$DGPU; }$(printf '%s' "$l" | sed -E 's/^[^ ]+ [^:]*: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')" ;;
+        esac
+    done < <(printf '%s\n' "$PCI" | grep -E 'VGA compatible|3D controller|Display controller')
+
+    # Khe PCIe x16 theo dmidecode (máy đồng bộ hay báo sai — chỉ để tham khảo)
+    X16=unknown
+    if printf '%s\n' "$DMI" | grep -q 'DMI type 9,'; then
+        X16=no
+        printf '%s\n' "$DMI" | awk '/^Handle /{c=($0 ~ /DMI type 9,/)} c && /^\tType: .*x16/' | grep -q . && X16=yes
+    fi
+
+    # RAM: mỗi khe một dòng, ngăn bằng | (tab là khoảng trắng của IFS: ô rỗng liền nhau bị read gộp → lệch cột):
+    # vị trí, bank, MB, loại, tốc độ, tốc độ đang chạy, hãng, mã, kênh
+    RAM_ROWS=""
+    [ -n "$DMI" ] && RAM_ROWS=$(printf '%s\n' "$DMI" | awk '
+        function out(   s, mb, sp, cs, loc, ch) {
+            s = v["Size"]
+            if (s ~ /^[0-9]+ MB/) mb = s + 0; else if (s ~ /^[0-9]+ GB/) mb = (s + 0) * 1024; else mb = 0
+            sp = v["Speed"]; cs = v["Configured Memory Speed"]; if (cs == "") cs = v["Configured Clock Speed"]
+            if (sp !~ /^[1-9]/) sp = ""; if (cs !~ /^[1-9]/) cs = ""
+            sub(/ .*/, "", sp); sub(/ .*/, "", cs)
+            loc = v["Locator"] " " v["Bank Locator"]; ch = "?"
+            if (match(loc, /[Cc][Hh][Aa][Nn][Nn][Ee][Ll] ?[AB]/)) ch = substr(loc, RSTART + RLENGTH - 1, 1)
+            else if (match(loc, /DIMM[_ -]?[AB][0-9]/)) ch = substr(loc, RSTART + RLENGTH - 2, 1)
+            else if (match(loc, /(^|[ _-])[AB][0-9]([ _-]|$)/)) { ch = substr(loc, RSTART, RLENGTH); gsub(/[^AB]/, "", ch); ch = substr(ch, 1, 1) }
+            t = v["Type"]; if (t ~ /Unknown|Other/) t = ""
+            m = v["Manufacturer"]; if (m ~ /Not Specified|Unknown|^[0-9A-F]+$|Manufacturer[0-9]*|^$/) m = ""
+            p = v["Part Number"]; if (p ~ /Not Specified|Unknown|PartNum[0-9]*|^$/) p = ""; gsub(/ +$/, "", p)
+            gsub(/[|]/, "/", m); gsub(/[|]/, "/", p)
+            printf "%s|%s|%d|%s|%s|%s|%s|%s|%s\n", v["Locator"], v["Bank Locator"], mb, t, sp, cs, m, p, ch
+        }
+        /^Handle /{ if (in17) out(); in17 = ($0 ~ /DMI type 17,/); split("", v); next }
+        in17 && /^\t[^\t]/ { k = $0; sub(/^\t/, "", k); val = k; sub(/:.*/, "", k); sub(/^[^:]*: ?/, "", val); v[k] = val }
+        END { if (in17) out() }')
+    RAM_MAX_DMI=$(dmi 16 'Maximum Capacity')
+    RAM_ECC=$(dmi 16 'Error Correction Type')
+    MEM_TOTAL_KB=$(printf '%s\n' "$MEMINFO" | awk '/^MemTotal:/{print $2; exit}')
+}
+
+chipset_lookup() {   # mã thiết bị LPC Intel → CHIP SERIES KIND CHIP_SOCKET
+    local r=""
+    case $1 in
+        1c44) r="Z68 6 desk" ;; 1c46) r="P67 6 desk" ;; 1c4a) r="H67 6 desk" ;; 1c4c) r="Q65 6 desk" ;;
+        1c4e) r="Q67 6 desk" ;; 1c50) r="B65 6 desk" ;; 1c5c) r="H61 6 desk" ;;
+        1c52) r="C202 6 srv" ;; 1c54) r="C204 6 srv" ;; 1c56) r="C206 6 srv" ;;
+        1c47) r="UM67 6 mob" ;; 1c49) r="HM65 6 mob" ;; 1c4b) r="HM67 6 mob" ;; 1c4d) r="QS67 6 mob" ;; 1c4f) r="QM67 6 mob" ;;
+        1e44) r="Z77 7 desk" ;; 1e46) r="Z75 7 desk" ;; 1e47) r="Q77 7 desk" ;; 1e48) r="Q75 7 desk" ;;
+        1e49) r="B75 7 desk" ;; 1e4a) r="H77 7 desk" ;; 1e53) r="C216 7 srv" ;;
+        1e55) r="QM77 7 mob" ;; 1e56) r="QS77 7 mob" ;; 1e57) r="HM77 7 mob" ;; 1e58) r="UM77 7 mob" ;;
+        1e59) r="HM76 7 mob" ;; 1e5d) r="HM75 7 mob" ;; 1e5e) r="HM70 7 mob" ;; 1e5f) r="NM70 7 mob" ;;
+        3b0?|3b1?)      SERIES=5; KIND=other; CHIP_SOCKET="LGA1156 (máy bàn dòng 5)" ;;
+        1d4[01])        CHIP=X79; SERIES=x79; KIND=other; CHIP_SOCKET=LGA2011 ;;
+        8c4?|8c5?)      SERIES=8; KIND=other; CHIP_SOCKET="LGA1150 (Intel dòng 8)" ;;
+        8cc?)           SERIES=9; KIND=other; CHIP_SOCKET="LGA1150 (Intel dòng 9)" ;;
+        a14?|a15?)      SERIES=100; KIND=other; CHIP_SOCKET="LGA1151 (Intel dòng 100)" ;;
+        a2c?)           SERIES=200; KIND=other; CHIP_SOCKET="LGA1151 (Intel dòng 200)" ;;
+    esac
+    if [ -n "$r" ]; then
+        set -- $r; CHIP=$1; SERIES=$2; KIND=$3
+        [ "$KIND" = mob ] && CHIP_SOCKET="G2 (rPGA988B) hoặc CPU hàn — máy xách tay" || CHIP_SOCKET=LGA1155
+    fi
+}
+
+# ================================================================ bảng tra
+# Main đã biết (khớp theo hãng/model máy + main). Thông tin cộng đồng / thông số hãng — chưa kiểm trên máy thật.
+# Cột (ngăn bằng #): biểu thức khớp # lên Ivy (no / ? / yes) # thùng mỏng 65 W (1/0) # không khe x16 (1/0) # ghi chú
+KNOWN_BOARDS='
+MS-7770#?#1#1#Bo MSI MS-7770 làm riêng cho máy NEC (Mate J / Valuestar). Bản Mate J MJ33L/L-D (10/2011) dùng chipset B65, 4 khe DDR3, NEC bán kèm Core i3-2120 và ghi RAM tối đa 4 GB (đó là giới hạn cấu hình bán, máy thực tế nhận hơn). Có tin rao bán MS-7770 kèm i3-3240 (Ivy) nhưng chưa rõ bản chipset/BIOS nào — CHƯA xác nhận lên Ivy được. Chưa tìm thấy BIOS chính hãng để tải; file BIOS trên forum sửa main (vd vinafix) là bản dump để cứu main — MS-7770 và MS-7770N1 là hai bản khác nhau, nạp nhầm có thể hỏng main. Thùng mỏng low-profile, không có khe PCIe x16.
+OptiPlex (790|990)#no#0#0#Dell OptiPlex 790/990 (Q67): Dell không phát hành BIOS hỗ trợ Ivy Bridge.
+(Compaq 8200 Elite|Compaq Pro 6200|Compaq 6200 Pro)#no#0#0#HP Compaq 8200 Elite / 6200 Pro (Q67/Q65): HP không phát hành BIOS hỗ trợ Ivy Bridge.
+ThinkCentre M91#no#0#0#Lenovo ThinkCentre M91/M91p (Q65/Q67): không hỗ trợ Ivy Bridge (M92/M92p mới hỗ trợ).
+'
+known_board() {
+    KB_IVB=""; KB_SLIM=0; KB_NOX16=0; KB_NOTE=""
+    local hay="$SYS_VENDOR $SYS_PRODUCT $SYS_VERSION $BOARD_VENDOR $BOARD_NAME $BOARD_VER" re ivb slim nox note
+    while IFS='#' read -r re ivb slim nox note; do
+        [ -n "$re" ] || continue
+        if printf '%s' "$hay" | grep -qiE "$re"; then KB_IVB=$ivb; KB_SLIM=$slim; KB_NOX16=$nox; KB_NOTE=$note; return 0; fi
+    done <<<"$KNOWN_BOARDS"
+    return 1
+}
+is_oem() { printf '%s %s' "$SYS_VENDOR" "$BOARD_VENDOR" | grep -qiE 'dell|hewlett|\bhp\b|lenovo|\bnec\b|fujitsu|acer|toshiba|panasonic|sony|medion|packard bell'; }
+
+# CPU gợi ý: tên | nhân/luồng | xung | iGPU | TDP
+CPU_IVB='i7-3770|4 nhân/8 luồng|3,4–3,9 GHz|HD 4000|77 W
+i7-3770S|4 nhân/8 luồng|3,1–3,9 GHz|HD 4000|65 W
+i5-3570|4 nhân/4 luồng|3,4–3,8 GHz|HD 2500|77 W
+i5-3570S|4 nhân/4 luồng|3,1–3,8 GHz|HD 2500|65 W
+i5-3470|4 nhân/4 luồng|3,2–3,6 GHz|HD 2500|77 W
+Xeon E3-1230 v2|4 nhân/8 luồng|3,3–3,7 GHz|không có|69 W
+Xeon E3-1245 v2|4 nhân/8 luồng|3,4–3,8 GHz|HD P4000|77 W
+i3-3220|2 nhân/4 luồng|3,3 GHz|HD 2500|55 W'
+CPU_SNB='i7-2600|4 nhân/8 luồng|3,4–3,8 GHz|HD 2000|95 W
+i7-2600S|4 nhân/8 luồng|2,8–3,8 GHz|HD 2000|65 W
+i5-2500|4 nhân/4 luồng|3,3–3,7 GHz|HD 2000|95 W
+i5-2500S|4 nhân/4 luồng|2,7–3,7 GHz|HD 2000|65 W
+i5-2400|4 nhân/4 luồng|3,1–3,4 GHz|HD 2000|95 W
+Xeon E3-1230|4 nhân/8 luồng|3,2–3,6 GHz|không có|80 W
+Xeon E3-1245|4 nhân/8 luồng|3,3–3,7 GHz|HD P3000|95 W
+i3-2130|2 nhân/4 luồng|3,4 GHz|HD 2000|65 W'
+cpu_line() {   # cpu_line TÊN → "TÊN (4 nhân/8 luồng, 3,4–3,9 GHz, HD 4000, 77 W)"
+    local n c f g t
+    while IFS='|' read -r n c f g t; do
+        [ "$n" = "$1" ] && { [ "$g" = "không có" ] && g="KHÔNG có iGPU — cần card rời" || g="iGPU $g"; printf '%s (%s, %s, %s, %s)' "$n" "$c" "$f" "$g" "$t"; return; }
+    done <<<"$CPU_IVB
+$CPU_SNB"
+    printf '%s' "$1"
+}
+
+# ================================================================ báo cáo
+R=""
+p() { R+="$*"$'\n'; }
+gb() { awk -v m="$1" 'BEGIN { g = m / 1024; if (g == int(g)) printf "%d GB", g; else printf "%.1f GB", g }'; }
+ymd_h() { [ -n "$1" ] && printf '%s/%s/%s' "${1:6:2}" "${1:4:2}" "${1:0:4}"; }
+
+build_report() {
+    R=""
+    local board sysn
+    board=$(first "$(printf '%s %s' "$BOARD_VENDOR" "$BOARD_NAME" | sed 's/^ //; s/ $//')" "không đọc được")
+    sysn=$(printf '%s %s' "$SYS_VENDOR" "$SYS_PRODUCT" | sed 's/^ //; s/ $//')
+    known_board; local kb=$?
+    p "================ DEPOT BOOT DIAG — chẩn đoán main / CPU nâng cấp ================"
+    p "Nguồn: $SRC · $(date '+%d/%m/%Y %H:%M')"
+    if [ -n "$VIRT" ] || printf '%s %s' "$SYS_VENDOR" "$SYS_PRODUCT" | grep -qiE 'vmware|qemu|virtualbox|innotek|virtual machine|kvm|bochs|xen'; then
+        p ""
+        p "!! ĐÂY LÀ MÁY ẢO (${VIRT:-$SYS_VENDOR}): main, chipset, BIOS là phần cứng GIẢ LẬP, không phải main thật."
+        p "   Chạy lại trên máy thật (boot USB Depot OS → mục \"Chẩn đoán phần cứng\")."
+    fi
+    [ -z "$DMI" ] && { p ""; p "!! Không đọc được dmidecode (cần root, hoặc máy không có SMBIOS): thiếu socket, khe RAM."; }
+    p ""
+    p "MAIN     : $board${BOARD_VER:+ (bản $BOARD_VER)}"
+    [ -n "$sysn" ] && [ "$sysn" != "$board" ] && p "MÁY      : $sysn${SYS_VERSION:+ ($SYS_VERSION)}"
+    p "CHIPSET  : $(first "${CHIP:+Intel $CHIP${SERIES:+ (dòng $SERIES)}}" "$LPC_TEXT" "không xác định")${LPC_ID:+  [pci $LPC_ID${LPC_REV:+ rev $LPC_REV}]}"
+    p "SOCKET   : $(first "$SOCKET" "không xác định")${SOCKET_SRC:+  ($SOCKET_SRC)}"
+    p "BIOS     : $(first "$BIOS_VER" "?") · ngày $(first "$(ymd_h "$BIOS_YMD")" "$BIOS_DATE" "?")${BIOS_VENDOR:+ · $BIOS_VENDOR}"
+    p "CPU      : $(first "$CPU_NAME" "?")${CPU_CORES:+ · $CPU_CORES nhân}${CPU_THREADS:+/$CPU_THREADS luồng}$(gen_label)"
+    p "ĐỒ HOẠ   : $(first "$IGPU" "không có iGPU Intel")${DGPU:+ + card rời: $DGPU}"
+    ram_summary
+    p ""
+    if [ "$IS1155" = 1 ] && [ "$KIND" != mob ]; then verdict_1155 "$kb"
+    elif [ "$KIND" = mob ]; then
+        p "KẾT LUẬN: máy xách tay (chipset $CHIP). CPU socket G2 (rPGA988B) hoặc hàn chết vào main."
+        p "  Chưa có bảng tra cho laptop. Bản chipset 6 thường lên được Core i 2xxx M; i 3xxx M cần BIOS hãng hỗ trợ."
+    else
+        p "KẾT LUẬN: socket ${SOCKET:-?}${CHIP:+, chipset $CHIP} — CHƯA CÓ BẢNG TRA cho socket này (hiện có: LGA1155)."
+        p "  Lưu báo cáo (depot-bootdiag --save) và dữ liệu thô (sudo depot-bootdiag --dump THƯ_MỤC) để bổ sung bảng."
+    fi
+    ram_detail
+    p ""
+    p "-- By WrenEvil.tech & nguyenquocanhz (nqatech) · depot-bootdiag --help"
+}
+
+gen_label() {
+    case $CPU_GEN in
+        snb) printf ' · Sandy Bridge (Core đời 2)' ;; ivb) printf ' · Ivy Bridge (Core đời 3)' ;;
+        snbe) printf ' · Sandy Bridge-E' ;; ivbe) printf ' · Ivy Bridge-E' ;;
+    esac
+}
+
+ram_summary() {
+    local n=0 used=0 total=0 sizes="" types="" loc bank mb t sp cs m pn ch
+    while IFS='|' read -r loc bank mb t sp cs m pn ch; do
+        [ -n "$loc$bank" ] || continue
+        n=$((n + 1)); [ "$mb" -gt 0 ] || continue
+        used=$((used + 1)); total=$((total + mb)); sizes="${sizes:+$sizes + }$(gb "$mb" | sed 's/ GB//')"
+        [ -n "$t" ] && types=$t
+    done <<<"$RAM_ROWS"
+    RAM_SLOTS=$n; RAM_USED=$used; RAM_TOTAL=$total
+    if [ "$n" -gt 0 ]; then
+        p "RAM      : $(gb "$total") (${sizes:-?} GB) ${types:+$types }· đang cắm $used/$n khe"
+    elif [ -n "$MEM_TOTAL_KB" ]; then
+        p "RAM      : ~$(awk -v k="$MEM_TOTAL_KB" 'BEGIN{printf "%.1f", k/1048576}') GB (không có dmidecode nên không biết số khe)"
+    fi
+}
+
+verdict_1155() {
+    local kb=$1 ivb snb_txt ivb_txt slim=0 nox16=0 oc=0 noigp=0 oem=0 picks=""
+    is_oem && oem=1
+    [ "$kb" = 0 ] && { slim=$KB_SLIM; nox16=$KB_NOX16; }
+    [ "$X16" = no ] && nox16=1
+    case $CHIP in Z68|Z75|Z77|P67) oc=1 ;; esac
+    [ "$CHIP" = P67 ] && noigp=1
+
+    # --- Sandy Bridge
+    if [ "$KIND" = srv ]; then
+        snb_txt="[ĐƯỢC] Xeon E3-12xx, Core i3 2xxx, Pentium (main máy chủ $CHIP thường KHÔNG nhận Core i5/i7)"
+    else
+        snb_txt="[ĐƯỢC] Core i 2xxx (Sandy Bridge): lên được ngay, không cần nâng BIOS"
+    fi
+    # --- Ivy Bridge
+    if [ "$CPU_GEN" = ivb ]; then
+        ivb=yes; ivb_txt="[ĐƯỢC] máy đang chạy CPU Ivy Bridge → BIOS đã hỗ trợ Core i 3xxx"
+    elif [ "$kb" = 0 ] && [ "$KB_IVB" = no ]; then
+        ivb=no; ivb_txt="[KHÔNG] hãng máy không ra BIOS hỗ trợ Core i 3xxx (xem ghi chú main bên dưới)"
+    elif [ "$SERIES" = 7 ]; then
+        ivb=yes; ivb_txt="[ĐƯỢC] chipset dòng 7 hỗ trợ sẵn Core i 3xxx (Ivy Bridge)"
+        [ "$KIND" = srv ] && ivb_txt="[ĐƯỢC] Xeon E3-12xx v2 (Ivy Bridge) — chipset máy chủ $CHIP"
+    else
+        case $CHIP in
+            Q65|Q67|B65)
+                ivb=biz
+                ivb_txt="[KHÓ] Intel KHÔNG hỗ trợ Ivy Bridge trên $CHIP (chỉ H61/H67/P67/Z68 được, có BIOS mới)."
+                ;;
+            C202|C204|C206)
+                ivb=bios; ivb_txt="[CẦN BIOS] Xeon E3-12xx v2 chạy được nếu BIOS mới (xem CPU Support List của hãng)" ;;
+            *)
+                ivb=bios; ivb_txt="[CẦN BIOS] Core i 3xxx (Ivy Bridge) chạy được trên $CHIP NẾU BIOS đã hỗ trợ Ivy" ;;
+        esac
+    fi
+    p "KẾT LUẬN (socket LGA1155, chipset ${CHIP:-?}):"
+    p "  Đời 2 — $snb_txt"
+    p "  Đời 3 — $ivb_txt"
+    if [ "$ivb" = bios ] || [ "$ivb" = biz ]; then
+        bios_hint "$ivb"
+    fi
+    [ "$ivb" = "biz" ] && [ "$kb" = 0 ] && [ "$KB_IVB" = "?" ] && p "           Main này: chưa có xác nhận lên Ivy (xem ghi chú main) → coi như chỉ lên được đời 2."
+
+    # --- gợi ý CPU
+    local use_ivb=0
+    [ "$ivb" = yes ] && use_ivb=1
+    p ""
+    p "NÊN MUA (mạnh nhất hợp lý cho main này):"
+    if [ "$use_ivb" = 1 ]; then
+        if [ "$slim" = 1 ]; then picks="i7-3770S i5-3570S i7-3770"; else picks="i7-3770 i5-3570 Xeon E3-1230 v2 Xeon E3-1245 v2"; fi
+    elif [ "$ivb" = bios ]; then
+        if [ "$slim" = 1 ]; then picks="i7-2600S i5-2500S"; else picks="i7-2600 i5-2500 Xeon E3-1230"; fi
+    else
+        if [ "$slim" = 1 ]; then picks="i7-2600S i5-2500S i7-2600"; else picks="i7-2600 i5-2500 Xeon E3-1230 Xeon E3-1245"; fi
+    fi
+    [ "$KIND" = srv ] && { [ "$use_ivb" = 1 ] && picks="Xeon E3-1230 v2 Xeon E3-1245 v2" || picks="Xeon E3-1230 Xeon E3-1245"; }
+    local c n=0 x
+    # tách danh sách theo tên (tên Xeon có dấu cách)
+    for x in $(printf '%s' "$picks" | sed -E 's/Xeon E3-([0-9]+) v2/Xeon_E3-\1_v2/g; s/Xeon E3-([0-9]+)/Xeon_E3-\1/g'); do
+        c=${x//_/ }
+        # không có khe x16 → không gắn được card rời → bỏ Xeon không iGPU
+        case $c in "Xeon E3-1230"|"Xeon E3-1230 v2") [ "$nox16" = 1 ] && continue ;; esac
+        n=$((n + 1)); p "  $n. $(cpu_line "$c")"
+    done
+    if [ "$ivb" = bios ] || { [ "$ivb" = biz ] && [ "$oem" = 0 ] && [ "$kb" != 0 ]; }; then
+        p "  Nếu BIOS đã hỗ trợ Ivy: $(cpu_line "$([ "$slim" = 1 ] && echo i7-3770S || echo i7-3770)")"
+        [ "$slim" = 1 ] || [ "$nox16" = 1 ] || p "                        hoặc $(cpu_line "Xeon E3-1230 v2")"
+    fi
+    [ "$oc" = 1 ] && [ "$CHIP" != P67 ] && p "  Muốn ép xung: bản K (i7-$([ "$use_ivb" = 1 ] && echo 3770K || echo 2600K), i5-$([ "$use_ivb" = 1 ] && echo 3570K || echo 2500K)) — $CHIP cho chỉnh hệ số nhân."
+    [ "$CHIP" = P67 ] && p "  P67 KHÔNG xuất hình iGPU: luôn cần card rời (Xeon không iGPU là lựa chọn rẻ)." && p "  Ép xung: bản K."
+    case $CPU_NAME in *i7-3770*|*E3-12[3-9]0*v2*|*E3-12[3-9]5*v2*)
+        p "  → CPU đang dùng đã thuộc nhóm mạnh nhất cho socket này: nâng CPU không đáng tiền nữa." ;; esac
+    [ "$ivb" != yes ] && case $CPU_NAME in *i7-2600*|*i7-2700*|*E3-12[3-9]0\ *|*E3-12[3-9]0)
+        p "  → CPU đang dùng đã là mạnh nhất của đời 2." ;; esac
+
+    # --- lưu ý
+    p ""
+    p "LƯU Ý:"
+    if [ "$nox16" = 1 ]; then
+        p "  · Main không có khe PCIe x16 ($([ "$KB_NOX16" = 1 ] && echo 'theo ghi chú main' || echo 'theo dmidecode')): không gắn được card màn hình thường →"
+        p "    BẮT BUỘC chọn CPU có iGPU, bỏ qua Xeon E3-1230/1230 v2 (không có iGPU)."
+    elif [ -z "$DGPU" ] && [ "$noigp" = 0 ]; then
+        p "  · Đang dùng iGPU: Xeon E3-1230 / 1230 v2 KHÔNG có iGPU → chỉ chọn khi gắn thêm card rời."
+        p "    Main phổ thông thường nhận Xeon E3-12xx; máy đồng bộ thì xem danh sách CPU của hãng."
+    fi
+    if [ "$slim" = 1 ] || [ "$oem" = 1 ]; then
+        p "  · Máy đồng bộ$([ "$slim" = 1 ] && echo '/thùng mỏng'): tản nhiệt và nguồn thiết kế cho CPU gốc (~65 W). Ưu tiên bản đuôi S (65 W);"
+        p "    CPU 77–95 W chỉ nên dùng khi đã kiểm tản nhiệt (depot-hwmon --kiem-tra 5 sau khi lắp)."
+    fi
+    if [ "$SERIES" = 7 ]; then
+        p "  · PCIe 3.0 (khe x16) và RAM DDR3-1600 chính thức: chỉ khi lắp CPU Ivy (đời 3) trên main dòng 7 này."
+        p "    CPU Sandy (đời 2) trên main này vẫn chỉ PCIe 2.0, RAM 1333. USB 3.0 có sẵn từ chipset."
+    else
+        p "  · Main dòng 6: PCIe 2.0, RAM chính thức DDR3-1333 (kể cả khi lắp Ivy). PCIe 3.0 / RAM 1600 cần Ivy + main dòng 7"
+        p "    (trừ vài main ghi rõ \"Gen3\"; Z68/P67 cho chỉnh RAM lên 1600)."
+    fi
+    p "  · iGPU: Sandy có HD 2000 (đa số) / HD 3000 (i3-2105/2125, bản K). Ivy có HD 2500 / HD 4000 (i7-3770, i5-3570K,"
+    p "    i3-3225/3245) — HD 4000 mạnh hơn HD 3000 rõ, OpenGL 4.2 trên Linux (HD 2000/3000: OpenGL 3.3)."
+    [ "$CHIP" = H61 ] && p "  · H61 không có cổng SATA 6 Gb/s (chỉ 3 Gb/s): SSD SATA vẫn chạy, nhưng tối đa ~280 MB/s."
+    if [ "$SERIES" = 6 ] && [ "$LPC_REV" = 04 ]; then
+        p "  · Chipset rev 04 có thể là bản B2 (lỗi cổng SATA 3 Gb/s xuống cấp theo thời gian): ưu tiên cắm ổ vào cổng SATA 6 Gb/s"
+        p "    (port 0/1). Bản sửa lỗi B3 là rev 05."
+    fi
+    if [ "$kb" = 0 ] && [ -n "$KB_NOTE" ]; then
+        p ""; p "GHI CHÚ MAIN (thông tin cộng đồng / thông số hãng, chưa kiểm trên máy thật):"
+        p "$(printf '%s\n' "$KB_NOTE" | fold -s -w 100 | sed 's/^/  /')"
+    fi
+}
+
+bios_hint() {   # $1 = bios | biz
+    local y=$BIOS_YMD d; d=$(ymd_h "$y")
+    if [ "$1" = biz ]; then
+        p "           Một số main hãng lẻ (ASUS/MSI/Gigabyte…) vẫn ra BIOS chạy Ivy cho $CHIP; máy đồng bộ thì gần như không."
+    fi
+    if [ -z "$y" ]; then
+        p "           BIOS đang dùng: không đọc được ngày → xem trang hỗ trợ của hãng."
+    elif [ "$y" -lt 20110901 ]; then
+        p "           BIOS đang dùng ($BIOS_VER, $d) ra TRƯỚC khi các hãng thêm Ivy (từ ~9/2011): CHẮC CHẮN phải nâng BIOS."
+    elif [ "$y" -lt 20120601 ]; then
+        p "           BIOS đang dùng ($BIOS_VER, $d) ra đúng giai đoạn các hãng thêm Ivy: CHƯA CHẮC, phải tra lịch sử BIOS."
+    else
+        p "           BIOS đang dùng ($BIOS_VER, $d) ra sau khi Ivy bán (4/2012): nếu hãng có hỗ trợ Ivy thì nhiều khả năng"
+        p "           bản này đã có — vẫn nên kiểm lại."
+    fi
+    p "           Bản BIOS tối thiểu: chưa có trong bảng tra — xem \"CPU Support List\" của main trên trang hãng"
+    p "           (cột BIOS ghi bản tối thiểu cho từng CPU) hoặc lịch sử BIOS có dòng \"3rd Gen\" / \"Ivy Bridge\"."
+    p "           Nâng BIOS TRƯỚC khi tháo CPU cũ (cần CPU đời 2 đang chạy); một số main cần nâng cả Intel ME."
+    p "           Không tắt điện khi đang nạp BIOS."
+}
+
+ram_detail() {
+    [ "${RAM_SLOTS:-0}" -gt 0 ] || return 0
+    local loc bank mb t sp cs m pn ch slots=$RAM_SLOTS a=0 b=0 chk=1 maxmb=0 minmb=999999 mixed=0 sp_any="" cs_any="" empty=0
+    p ""
+    p "RAM TỪNG KHE:"
+    while IFS='|' read -r loc bank mb t sp cs m pn ch; do
+        [ -n "$loc$bank" ] || continue
+        if [ "$mb" -gt 0 ]; then
+            p "  $(printf '%-16s' "$loc${bank:+ / $bank}") $(printf '%6s' "$(gb "$mb")") ${t:-} ${sp:+$sp MT/s}${cs:+ (đang chạy $cs)}${m:+ · $m}${pn:+ $pn}"
+            [ "$mb" -gt "$maxmb" ] && maxmb=$mb; [ "$mb" -lt "$minmb" ] && minmb=$mb
+            [ -n "$sp" ] && sp_any=$sp; [ -n "$cs" ] && cs_any=$cs
+        elif [ "$slots" -le 8 ]; then
+            p "  $(printf '%-16s' "$loc${bank:+ / $bank}") (trống)"
+        else
+            empty=$((empty + 1))   # máy ảo khai báo hàng chục khe ảo: chỉ đếm
+        fi
+        case $ch in A) a=$((a + mb)) ;; B) b=$((b + mb)) ;; *) chk=0 ;; esac
+    done <<<"$RAM_ROWS"
+    [ "$empty" -gt 0 ] && p "  (+ $empty khe trống)"
+    [ "$maxmb" -gt 0 ] && [ "$minmb" != "$maxmb" ] && mixed=1
+    if [ "$IS1155" = 1 ] && [ "$KIND" != mob ]; then
+        local phys=$slots
+        if [ "$CHIP" = H61 ] && [ "$slots" -gt 2 ]; then phys=2; p "  (dmidecode báo $slots khe nhưng H61 chỉ có tối đa 2 khe)"; fi
+        local maxgb=$((phys * 8)); [ "$maxgb" -gt 32 ] && maxgb=32
+        p "  Tối đa: $maxgb GB = $phys khe × 8 GB DDR3 (Sandy/Ivy không nhận thanh 16 GB).${RAM_MAX_DMI:+ dmidecode ghi: $RAM_MAX_DMI.}"
+        [ "$chk" = 1 ] && [ "$RAM_USED" -gt 1 ] && {
+            if [ "$a" = "$b" ]; then p "  Dual channel: kênh A $(gb "$a") = kênh B $(gb "$b") → chạy kênh đôi toàn bộ."
+            else p "  Kênh A $(gb "$a") ≠ kênh B $(gb "$b"): chỉ phần bằng nhau chạy kênh đôi (Flex Mode) — đổi chỗ thanh cho 2 kênh bằng nhau."; fi
+        }
+        if [ "$mixed" = 1 ]; then
+            p "  Đang cắm lẫn thanh $(gb "$minmb") + $(gb "$maxmb"): cắm mỗi cặp thanh GIỐNG NHAU vào 2 khe CÙNG MÀU để mỗi kênh"
+            p "  bằng nhau (vd 2+4 | 2+4 → kênh đôi đủ $(gb "$RAM_TOTAL"))."
+            [ "$RAM_USED" = "$phys" ] && p "  Lên $(gb $((phys * maxmb))): thay các thanh $(gb "$minmb") bằng thanh $(gb "$maxmb"). Lên $maxgb GB: $phys thanh 8 GB."
+        elif [ "$RAM_TOTAL" -lt $((maxgb * 1024)) ]; then
+            p "  Lên $maxgb GB: $phys thanh 8 GB DDR3 (cùng loại, ưu tiên mua theo cặp)."
+        fi
+        local want=1333; [ "$SERIES" = 7 ] && [ "$CPU_GEN" = ivb ] && want=1600
+        [ -n "$cs_any" ] && p "  RAM đang chạy $cs_any MT/s; mức chính thức với CPU + main hiện tại: DDR3-$want."
+        case $RAM_ECC in *ECC*|*Multi-bit*|*Single-bit*) [ "$RAM_ECC" != None ] && p "  Main báo hỗ trợ ECC ($RAM_ECC)." ;; esac
+    fi
+}
+
+# ================================================================ lưu file
+slug() { printf '%s' "$1" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null | tr -c 'A-Za-z0-9._-' '-' | sed -E 's/-+/-/g; s/^-//; s/-$//' | cut -c1-40; }
+report_name() { printf 'depot-bootdiag-%s-%s.txt' "$(first "$(slug "$BOARD_NAME")" "$(slug "$SYS_PRODUCT")" may)" "$(date +%Y%m%d-%H%M)"; }
+write_to() {   # write_to THƯ_MỤC → in đường dẫn nếu ghi được
+    local f="$1/$(report_name)"
+    { printf '%s' "$R" >"$f"; } 2>/dev/null && sync -f "$f" 2>/dev/null; [ -s "$f" ] && { printf '%s' "$f"; return 0; }
+    rm -f "$f" 2>/dev/null; return 1
+}
+live_disks() {   # đĩa chứa ISO đang boot (dd ra USB: phân vùng trên đó là một phần của ISO, không ghi vào)
+    local s; s=$(findmnt -nvo SOURCE /run/live/medium 2>/dev/null | head -1)
+    [ -n "$s" ] && { echo "$s"; lsblk -nro PKNAME "$s" 2>/dev/null; }
+}
+save_usb() {
+    local live l NAME TYPE FSTYPE MOUNTPOINT HOTPLUG PKNAME mp f
+    live=$(live_disks)
+    while IFS= read -r l; do
+        NAME="" TYPE="" FSTYPE="" MOUNTPOINT="" HOTPLUG="" PKNAME=""
+        eval "$l" 2>/dev/null || continue
+        [ "$TYPE" = part ] && [ "$HOTPLUG" = 1 ] || continue
+        case $FSTYPE in vfat|exfat|ntfs|ntfs3) ;; *) continue ;; esac
+        printf '%s\n' "$live" | grep -qxF -e "$NAME" -e "/dev/$PKNAME" -e "$PKNAME" && continue
+        mp=$(printf '%b' "$MOUNTPOINT")
+        if [ -n "$mp" ]; then
+            f=$(write_to "$mp") && { printf '%s' "$f"; return 0; }
+            continue
+        fi
+        if [ "$(id -u)" = 0 ]; then
+            mkdir -p "$WORK/usb"
+            mount "$NAME" "$WORK/usb" 2>/dev/null || continue
+            if f=$(write_to "$WORK/usb"); then
+                umount "$WORK/usb" 2>/dev/null
+                printf '%s (gốc %s)' "$(basename "$f")" "$NAME"; return 0
+            fi
+            umount "$WORK/usb" 2>/dev/null
+        elif command -v udisksctl >/dev/null; then
+            mp=$(udisksctl mount --no-user-interaction -b "$NAME" 2>/dev/null | sed -n 's/^Mounted .* at \(.*\)\.\{0,1\}$/\1/p' | sed 's/\.$//')
+            [ -n "$mp" ] && f=$(write_to "$mp") && { printf '%s' "$f"; return 0; }
+        fi
+    done < <(lsblk -nPp -o NAME,TYPE,FSTYPE,MOUNTPOINT,HOTPLUG,PKNAME 2>/dev/null)
+    return 1
+}
+save_report() {
+    local f
+    if [ -n "$SAVE_DIR" ]; then
+        mkdir -p "$SAVE_DIR" 2>/dev/null
+        f=$(write_to "$SAVE_DIR") && { SAVED="$f"; return 0; }
+        SAVED=""; return 1
+    fi
+    if f=$(save_usb); then SAVED="$f (USB)"; return 0; fi
+    if [ "$BOOT" = 1 ]; then
+        mkdir -p /var/log/depot && f=$(write_to /var/log/depot) && { SAVED="$f (trong RAM — mất khi tắt máy; không có USB ghi được)"; return 0; }
+    else
+        f=$(write_to "${HOME:-/tmp}") && { SAVED="$f"; return 0; }
+    fi
+    SAVED=""; return 1
+}
+
+# ================================================================ chế độ
+do_dump() {
+    [ "$(id -u)" = 0 ] || { echo "Cần root: sudo depot-bootdiag --dump $DUMP" >&2; exit 1; }
+    mkdir -p "$DUMP/dmi-id" || exit 1
+    dmidecode >"$DUMP/dmidecode.txt" 2>&1
+    lspci -nn >"$DUMP/lspci.txt" 2>&1
+    cp /proc/cpuinfo "$DUMP/cpuinfo.txt"; cp /proc/meminfo "$DUMP/meminfo.txt"
+    systemd-detect-virt >"$DUMP/virt.txt" 2>/dev/null
+    local f; for f in /sys/class/dmi/id/*; do [ -f "$f" ] && [ -r "$f" ] && cat "$f" >"$DUMP/dmi-id/$(basename "$f")" 2>/dev/null; done
+    echo "Đã lưu dữ liệu thô vào $DUMP — chạy lại: depot-bootdiag --sample $DUMP"
+}
+
+boot_mode() {   # gọi từ depot-bootdiag.service (mục boot "Chẩn đoán phần cứng"): màn chữ tty1, chờ phím
+    command -v plymouth >/dev/null && plymouth quit 2>/dev/null
+    dmesg -n 1 2>/dev/null
+    [ -t 0 ] || exec </dev/tty1 >/dev/tty1 2>&1
+    export TERM=linux
+    printf '\033c'
+    show "Depot Boot Diag — đang dò phần cứng…"
+    udevadm settle -t 15 2>/dev/null
+    load_data; collect; build_report
+    if save_report; then R+=$'\n'"Đã lưu báo cáo: $SAVED"$'\n'; else R+=$'\n'"Không lưu được báo cáo (không có USB FAT32/exFAT/NTFS ghi được)."$'\n'; fi
+    local k
+    while :; do
+        printf '\033c'
+        if command -v less >/dev/null; then
+            printf '%s' "$R" | plain | LESSSECURE=1 less -c -P'Dau cach = trang sau,  b = trang truoc,  q = xong (chon tiep)'   # dấu ? : . % trong -P là ký tự đặc biệt của less
+        else
+            printf '%s' "$R" | plain; read -r -p "Enter: tiếp" k
+        fi
+        show ""
+        show "[Enter] xem lại   [D] vào desktop phiên live   [R] khởi động lại   [T] tắt máy   [L] lưu lại ra USB"
+        read -r -s -n 1 k
+        case $k in
+            d|D) printf '\033c'; show "Vào phiên live…"; exit 0 ;;
+            r|R) show "Khởi động lại…"; systemctl reboot; sleep 60 ;;
+            t|T) show "Tắt máy…"; systemctl poweroff; sleep 60 ;;
+            l|L) if save_report; then show "Đã lưu: $SAVED"; else show "Không có USB ghi được."; fi; sleep 3 ;;
+        esac
+    done
+}
+
+if [ -n "$DUMP" ]; then do_dump; exit; fi
+if [ "$BOOT" = 1 ]; then boot_mode; exit 0; fi
+
+load_data; collect; build_report
+if [ "$ON_VT" = 1 ]; then printf '%s' "$R" | plain; else printf '%s' "$R"; fi
+if [ "$SAVE" = 1 ]; then
+    if save_report; then show "Đã lưu báo cáo: $SAVED"; else show "!! Không lưu được báo cáo${SAVE_DIR:+ vào $SAVE_DIR}"; fi
+fi
+[ "$PAUSE" = 1 ] && [ -t 0 ] && { read -r -p "$(show 'Nhấn Enter để đóng…')" _; }
+exit 0

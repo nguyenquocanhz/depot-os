@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Giới thiệu máy này
+GenericName=About This Computer
+Comment=Tên máy, chip, đồ hoạ, RAM, ổ đĩa, hệ điều hành
+Exec=depot-about
+Icon=depot-logo
+Terminal=false
+Categories=System;
+Keywords=about;giới thiệu;thông tin máy;cấu hình;chip;cpu;ram;neofetch;

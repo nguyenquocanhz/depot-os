@@ -1,0 +1,5 @@
+#!/bin/sh
+# Depot OS — dọn dẹp giữa các lần build: lb clean
+set -e
+lb clean noauto "${@}"
+rm -f build.log

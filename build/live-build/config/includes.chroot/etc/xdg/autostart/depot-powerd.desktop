@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Depot — Chế độ pin (chạy nền)
+Comment=Tự đổi mức tiết kiệm pin theo % pin, cho app không dùng ngủ sâu
+Exec=depot-powerd
+Icon=battery
+Terminal=false
+NoDisplay=true
+OnlyShowIn=XFCE;
+X-XFCE-Autostart-Override=true

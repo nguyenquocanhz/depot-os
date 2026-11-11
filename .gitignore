@@ -1,0 +1,36 @@
+# live-build artifacts (không commit)
+build/live-build/chroot/
+build/live-build/cache/
+build/live-build/binary/
+build/live-build/.stage/
+build/live-build/local/
+build/live-build/*.iso
+build/live-build/build.log
+build/live-build/config/binary
+
+# file cài tự động nhúng vào ISO: có mật khẩu, không commit
+build/live-build/config/includes.binary/depot-autoinstall.conf
+
+# app Depot Unattend: file build
+tools/autoinstall/DepotUnattend/bin/
+tools/autoinstall/DepotUnattend/obj/
+
+# dotfiles được sync vào đây lúc build — nguồn thật nằm ở /dotfiles
+# (chỉ hai thư mục do auto/build sinh ra; bash/, editions/, fastfetch/, layouts/, settings-names.conf là nguồn thật)
+build/live-build/config/includes.chroot/usr/share/depot-os/dotfiles/
+build/live-build/config/includes.chroot/usr/share/depot-os/autoinstall/
+
+# ISO đã build và bản nén: vài GB, không đưa lên git (phát hành thì dùng GitHub Releases hoặc nơi khác)
+*.iso
+*.iso.7z
+*.iso.sha256
+*.iso.zsync
+
+# máy ảo thử nghiệm VMware: đĩa ảo vài GB, README có mật khẩu vùng lưu của máy thử
+vmware/
+
+# trạng thái của công cụ trên máy người làm, không phải mã nguồn
+.mimosa/
+.claude/
+__pycache__/
+*.pyc

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Depot OS — ngôn ngữ mặc định của ISO: tiếng Việt.
+# Phải chạy SAU hook 1020-create-locales-files của live-build: hook đó ghi thẳng "LANG=C.UTF-8" vào
+# /etc/default/locale, đè file trong includes (mở squashfs v0.19.3 thấy đúng như vậy, /etc/locale.conf thì chỉ có
+# dòng chú thích). Debian 13: update-locale ghi /etc/locale.conf (systemd đọc), PAM đọc /etc/default/locale lúc
+# đăng nhập — đặt cả hai. Phiên live vẫn theo tham số locales= của live-config, Calamares ghi lại lúc cài; đây là
+# mặc định cho mọi đường khác. Người dùng đổi sau bằng "Ngôn ngữ và ngày giờ" (depot-region).
+set -e
+update-locale --reset LANG=vi_VN.UTF-8 LANGUAGE=vi:en
+if [ ! -L /etc/default/locale ]; then
+    grep -v '^#' /etc/locale.conf > /etc/default/locale
+    chmod 644 /etc/default/locale
+fi
+echo ">> Depot locale: $(grep -h '^LANG=' /etc/locale.conf /etc/default/locale | sort -u | tr '\n' ' ')"

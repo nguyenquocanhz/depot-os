@@ -1,0 +1,39 @@
+#!/bin/sh
+# Depot OS — vùng lưu mã hoá trên USB (depot-persist): phần trong initramfs.
+# live-boot mở vùng lưu LUKS ngay lúc boot (tham số kernel "persistence persistence-encryption=none,lukslabel",
+# hook 1325 thêm vào menu boot). Cần hai thứ, thiếu là ISO boot vẫn lên nhưng vùng lưu mã hoá không bao giờ mở được
+# nên cho build dừng hẳn:
+#   1. gói cryptsetup-initramfs — đưa cryptsetup + dm-crypt vào initramfs (live-build ghi CRYPTSETUP=yes sẵn);
+#   2. live-boot có kiểu "lukslabel" — chỉ hỏi mật khẩu cho LUKS mang nhãn "persistence", không hỏi ổ mã hoá
+#      khác trong máy (ổ cứng cài Linux mã hoá).
+# Việt hoá hai câu hỏi của live-boot trên màn boot. Màn boot có theme (plymouth) vẽ được chữ có dấu; màn chữ
+# (chế độ an toàn, nosplash) dùng font console không có dấu tiếng Việt nên câu ở đó viết không dấu.
+# initramfs được dựng lại sau mọi hook (lb chroot_hacks) nên sửa ở đây là vào initrd của ISO.
+set -e
+# Thử ngoài chroot: DEPOT_LIVEBOOT_HELPERS=/bản-sao/9990-misc-helpers.sh (bỏ qua bước kiểm gói)
+H=${DEPOT_LIVEBOOT_HELPERS:-/usr/lib/live/boot/9990-misc-helpers.sh}
+
+[ -n "${DEPOT_LIVEBOOT_HELPERS:-}" ] || dpkg-query -W -f='${Status}' cryptsetup-initramfs 2>/dev/null | grep -q 'install ok installed' ||
+    { echo "!! thiếu gói cryptsetup-initramfs (package list) — vùng lưu mã hoá sẽ không mở được lúc boot"; exit 1; }
+[ -f "$H" ] && grep -q 'lukslabel' "$H" ||
+    { echo "!! live-boot trong chroot không hỗ trợ persistence-encryption=lukslabel"; exit 1; }
+
+# live-boot coi "có lệnh plymouth" là "plymouth đang chạy". Boot không có splash (nosplash, hoặc plymouthd không lên
+# được) thì lệnh plymouth trả lỗi ngay, mật khẩu rỗng, câu "thử lại?" cũng không ai trả lời → vòng lặp vô hạn, máy
+# đứng ở màn boot. Chỉ dùng plymouth khi nó trả lời --ping; không thì hỏi trên màn chữ (askpass).
+sed -i '/^open_luks_device ()/,/^}/ s|^\([[:space:]]*\)if \[ -x /bin/plymouth \]$|\1if [ -x /bin/plymouth ] \&\& plymouth --ping|' "$H"
+grep -q 'if \[ -x /bin/plymouth \] && plymouth --ping' "$H" ||
+    echo ".. Depot persist: không vá được chỗ kiểm plymouth (live-boot đổi mã) — boot nosplash có thể kẹt ở bước hỏi mật khẩu"
+
+sed -i \
+    -e 's|cryptkeyprompt="Please unlock disk ${dev}"$|cryptkeyprompt="Nhập mật khẩu vùng lưu trên USB (${dev})"|' \
+    -e 's|cryptkeyprompt="Please unlock disk ${dev}: "$|cryptkeyprompt="Mat khau vung luu tren USB (${dev}): "|' \
+    -e 's|retryprompt="There was an error decrypting ${dev} \.\.\. Retry? \[Y/n\]"$|retryprompt="Sai mat khau vung luu. Thu lai? [Y/n]"; [ "${_PLYMOUTH}" = "true" ] \&\& retryprompt="Sai mật khẩu vùng lưu. Bấm Y để nhập lại — bấm N để chạy không có vùng lưu"|' \
+    "$H"
+n=$(grep -c 'vùng lưu\|vung luu' "$H" || true)
+if [ "$n" -ge 3 ]; then
+    echo ">> Depot persist: đã Việt hoá câu hỏi mật khẩu vùng lưu của live-boot ($n dòng)"
+else
+    echo ".. Depot persist: live-boot đổi câu chữ, chỉ Việt hoá được $n chỗ (vùng lưu vẫn chạy, câu hỏi tiếng Anh)"
+fi
+sh -n "$H" || { echo "!! $H hỏng cú pháp sau khi sửa"; exit 1; }

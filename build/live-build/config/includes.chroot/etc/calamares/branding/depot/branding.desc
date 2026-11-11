@@ -1,0 +1,37 @@
+---
+# Depot OS — branding Calamares "Depot by WrenEvil" (logo Bóng ma). Hook 0965 trỏ settings.conf sang đây.
+# Ảnh sinh từ design/identity/wrenevil/wrenevil_logo.py (gen-calamares). By WrenEvil.tech & nguyenquocanhz (nqatech)
+componentName:   depot
+welcomeStyleCalamares: true
+welcomeExpandingLogo: true
+windowExpanding: normal
+windowSize: 860px,600px
+windowPlacement: center
+strings:
+    productName:         Depot OS
+    shortProductName:    Depot
+    version:             by WrenEvil
+    shortVersion:        Depot
+    versionedName:       Depot OS by WrenEvil
+    shortVersionedName:  Depot OS
+    # GIỮ "Debian": GRUB ký Secure Boot của Debian chỉ tìm grub.cfg ở /EFI/debian — đổi tên mục boot ở đây
+    # thì máy bật Secure Boot có thể không khởi động được hệ thống vừa cài.
+    bootloaderEntryName: Debian
+    productUrl:          https://wrenevil.tech
+    supportUrl:          https://wrenevil.tech
+    knownIssuesUrl:      ""
+    releaseNotesUrl:     ""
+    donateUrl:           ""
+sidebar: widget
+navigation: widget
+images:
+    productLogo:         "depot-logo.png"
+    productIcon:         "depot-logo.png"
+    productWelcome:      "welcome.png"
+slideshow:               "show.qml"
+style:
+   SidebarBackground:    "#07080c"
+   SidebarText:          "#c9cfdc"
+   SidebarTextCurrent:   "#ffffff"
+   SidebarBackgroundCurrent: "#3a0f16"
+slideshowAPI: 2

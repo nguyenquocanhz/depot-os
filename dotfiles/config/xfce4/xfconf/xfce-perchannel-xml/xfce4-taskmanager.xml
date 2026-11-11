@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Depot OS — Task Manager kiểu Windows: tên app kèm icon, chỉ CPU và Bộ nhớ, app nặng nhất nằm trên cùng -->
+<channel name="xfce4-taskmanager" version="1.0">
+  <property name="interface" type="empty">
+    <!-- tên ngắn thay vì cả dòng lệnh dài -->
+    <property name="full-command-line" type="bool" value="false"/>
+    <property name="show-application-icons" type="bool" value="true"/>
+    <!-- danh sách phẳng: cây tiến trình làm app bị vùi dưới dbus, sh… -->
+    <property name="process-tree" type="bool" value="false"/>
+    <!-- bỏ dải chú thích màu ở đáy cửa sổ -->
+    <property name="show-legend" type="bool" value="false"/>
+    <property name="show-all-processes" type="bool" value="false"/>
+    <!-- 2 giây/lần thay vì 0,75: Task Manager tự ăn ít CPU hơn trên Sandy Bridge -->
+    <property name="refresh-rate" type="uint" value="2000"/>
+  </property>
+  <property name="columns" type="empty">
+    <property name="column-pid" type="bool" value="false"/>
+    <property name="column-ppid" type="bool" value="false"/>
+    <property name="column-state" type="bool" value="false"/>
+    <property name="column-vsz" type="bool" value="false"/>
+    <property name="column-group-vsz" type="bool" value="false"/>
+    <property name="column-rss" type="bool" value="true"/>
+    <property name="column-group-rss" type="bool" value="false"/>
+    <property name="column-uid" type="bool" value="false"/>
+    <property name="column-cpu" type="bool" value="true"/>
+    <property name="column-group-cpu" type="bool" value="false"/>
+    <property name="column-priority" type="bool" value="false"/>
+    <!-- xếp theo bộ nhớ, giảm dần -->
+    <property name="sort-id" type="uint" value="6"/>
+    <property name="sort-type" type="uint" value="1"/>
+  </property>
+  <property name="window-width" type="int" value="760"/>
+  <property name="window-height" type="int" value="560"/>
+</channel>

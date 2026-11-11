@@ -1,0 +1,20 @@
+#!/bin/sh
+# Depot OS — chống lệch 7 tiếng khi dual-boot Windows (xem /usr/bin/depot-rtc):
+# 1) bật depot-rtc.service (live + máy đã cài)
+# 2) chèn bước shellprocess@depotrtc vào Calamares NGAY SAU hwclock (hwclock luôn ghi RTC theo UTC)
+set -e
+
+systemctl enable depot-rtc.service
+
+S=/etc/calamares/settings.conf
+if ! grep -q 'shellprocess@depotrtc' "$S"; then
+    grep -q '^  - hwclock$' "$S" || { echo "!! $S không có bước hwclock: kiểm lại sau khi nâng Calamares"; exit 1; }
+    sed -i 's/^  - hwclock$/  - hwclock\n  - shellprocess@depotrtc/' "$S"
+    if grep -q '^instances:' "$S"; then
+        sed -i '/^instances:/a - id: depotrtc\n  module: shellprocess\n  config: shellprocess-depotrtc.conf' "$S"
+    else
+        sed -i '/^sequence:/i instances:\n- id: depotrtc\n  module: shellprocess\n  config: shellprocess-depotrtc.conf\n' "$S"
+    fi
+fi
+
+echo ">> Depot RTC: depot-rtc.service bật, Calamares: $(grep -A1 '^  - hwclock$' "$S" | tr -d ' \n')"

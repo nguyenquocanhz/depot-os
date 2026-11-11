@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DNS và Proxy
+Comment=Đổi máy chủ DNS và proxy cho mọi mạng
+Exec=depot-dns-proxy
+TryExec=yad
+Icon=preferences-system-network-proxy
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;Network;
+Keywords=dns;proxy;mạng;network;internet;

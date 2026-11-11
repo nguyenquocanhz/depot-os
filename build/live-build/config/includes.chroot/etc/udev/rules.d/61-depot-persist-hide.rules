@@ -1,0 +1,6 @@
+# Depot OS — vùng lưu trên USB (depot-persist): không hiện phân vùng "persistence" như một ổ đĩa để bấm vào.
+# Phiên USB không mở vùng lưu (vừa tạo xong, sai mật khẩu, mục "không mở vùng lưu") thì xfdesktop / Thunar hiện
+# phân vùng LUKS này thành icon "persistence": bấm vào sẽ hỏi mật khẩu rồi gắn ở /media — sửa nhầm trong đó là hỏng
+# dữ liệu lần boot sau. UDISKS_IGNORE = udisks/gvfs bỏ qua (cả phân vùng mã hoá lẫn ext4 bên trong khi đã mở).
+# live-boot và depot-persist-helper dùng thẳng thiết bị nên không bị ảnh hưởng. (Thấy khi boot thử VMware 11/11/2026.)
+SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="persistence", ENV{UDISKS_IGNORE}="1"

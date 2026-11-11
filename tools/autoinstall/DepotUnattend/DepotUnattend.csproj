@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DepotUnattend</AssemblyName>
+    <RootNamespace>DepotUnattend</RootNamespace>
+    <Product>Depot Unattend</Product>
+    <Version>1.0.0</Version>
+    <Authors>WrenEvil.tech &amp; nguyenquocanhz (nqatech)</Authors>
+    <Company>WrenEvil.tech &amp; nqatech</Company>
+    <Copyright>© 2026 WrenEvil.tech &amp; nguyenquocanhz (nqatech)</Copyright>
+    <AssemblyTitle>Depot Unattend - Tạo file cài Depot OS tự động</AssemblyTitle>
+  </PropertyGroup>
+
+</Project>

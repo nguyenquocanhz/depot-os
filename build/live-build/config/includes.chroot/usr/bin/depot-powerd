@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+# Depot OS — depot-powerd: chạy nền trong phiên (XFCE, i3) cho "Chế độ pin" (depot-power)
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# 1) Tự động: theo % pin / cắm sạc (UPower + /sys/class/power_supply) chọn mức Low/Medium/High/Ultra/Tắt,
+#    đổi mức thì gọi "depot-power apply-level".
+# 2) Ngủ sâu: ở mức High (5 phút) / Ultra (2 phút), app có cửa sổ mà lâu không được bấm vào thì cho "ngủ"
+#    (SIGSTOP cả cây tiến trình: không tốn CPU, không đánh thức máy). Bấm lại cửa sổ (dock, taskbar, Alt+Tab)
+#    là chạy tiếp ngay. Cắm sạc, tắt chế độ, tắt "Ngủ sâu" hay thoát phiên: mọi app thức dậy.
+#    Không bao giờ cho ngủ: app hệ thống, app đang phát tiếng, app trong danh sách "chừa ra" của depot-power.
+# Thử: DEPOT_SLEEP_AFTER=GIÂY (thay 5/2 phút), DEPOT_POWERD_DEBUG=1 (in ra việc đang làm)
+
+import fcntl
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+from gi.repository import Gio, GLib  # noqa: E402
+
+HOME = os.path.expanduser('~')
+CONF = os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.join(HOME, '.config'), 'depot', 'power')
+RUN = os.environ.get('XDG_RUNTIME_DIR') or '/tmp'
+FROZEN_FILE = os.path.join(RUN, 'depot-powerd.frozen')
+DEBUG = bool(os.environ.get('DEPOT_POWERD_DEBUG'))
+SLEEP_AFTER = {'high': 300, 'ultra': 120}
+if os.environ.get('DEPOT_SLEEP_AFTER', '').isdigit():
+    SLEEP_AFTER = {k: int(os.environ['DEPOT_SLEEP_AFTER']) for k in SLEEP_AFTER}
+DEFAULT_EXCEPT = ('telegram discord zalo signal localsend xfce4-terminal x-terminal-emulator gnome-terminal tilix '
+                  'kitty alacritty vlc mpv rhythmbox spotify obs')
+
+# app hệ thống: không bao giờ cho ngủ (so với tên tiến trình / dòng lệnh)
+SYSTEM = {
+    'xfce4-panel', 'xfwm4', 'xfdesktop', 'xfsettingsd', 'xfconfd', 'xfce4-session', 'xfce4-power-manager',
+    'xfce4-power-man', 'xfce4-notifyd', 'xfce4-settings-', 'xfce4-settings-manager', 'xfce4-taskmanager',
+    'xfce4-taskmanag', 'xfce4-appfinder', 'xfce4-screensaver', 'thunar', 'plank', 'conky', 'picom', 'picom-animated',
+    'nm-applet', 'nm-connection-editor', 'nm-connection-e', 'blueman-applet', 'blueman-manager', 'blueman-tray',
+    'pipewire', 'pipewire-pulse', 'wireplumber', 'pulseaudio', 'pavucontrol', 'fcitx5', 'fcitx5-config-qt',
+    'lxpolkit', 'polkit-mate-authentication-agent-1', 'polkit-mate-aut', 'dunst', 'i3', 'i3bar', 'i3status',
+    'rofi', 'xorg', 'lightdm', 'light-locker', 'calamares', 'gnome-software', 'yad', 'zenity', 'wrapper-2.0',
+    'xfce4-terminal-emulator', 'vmtoolsd', 'xiccd', 'gnome-keyring-daemon', 'ibus-daemon', 'gparted', 'gpartedbin',
+    'apt', 'dpkg', 'synaptic', 'update-manager', 'timeshift', 'timeshift-gtk',
+}
+# theo dòng lệnh (KHÔNG dùng /usr/lib/: Firefox cũng chạy từ /usr/lib/firefox-esr/)
+SYSTEM_CMD = re.compile(r'/usr/libexec/|depot-|calamares|lightdm|polkit|xfce4-|gparted|timeshift|apt-get|dpkg')
+
+
+def log(*a):
+    if DEBUG:
+        print(time.strftime('%H:%M:%S'), *a, flush=True)
+
+
+def read(path):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except OSError:
+        return ''
+
+
+def conf():
+    c = {'MODE': 'auto', 'DEEPSLEEP': '1', 'EXCEPT': DEFAULT_EXCEPT}
+    for l in read(CONF).splitlines():
+        m = re.match(r'\s*([A-Z]+)=\"?(.*?)\"?\s*$', l)
+        if m:
+            c[m.group(1)] = m.group(2)
+    if c['MODE'] not in ('auto', 'off', 'low', 'medium', 'high', 'ultra'):
+        c['MODE'] = 'auto'
+    return c
+
+
+def battery():
+    """(% pin, đang cắm sạc?) — không có pin: (None, True)."""
+    base = '/sys/class/power_supply'
+    pct, ac = None, None
+    try:
+        names = os.listdir(base)
+    except OSError:
+        names = []
+    for n in names:
+        t = read(os.path.join(base, n, 'type')).strip()
+        if t == 'Mains':
+            ac = (ac or False) or read(os.path.join(base, n, 'online')).strip() == '1'
+        elif t == 'Battery' and read(os.path.join(base, n, 'scope')).strip() != 'Device':
+            c = read(os.path.join(base, n, 'capacity')).strip()
+            st = read(os.path.join(base, n, 'status')).strip()
+            if c.isdigit():
+                pct = int(c)
+            if st in ('Charging', 'Full', 'Not charging') and ac is None:
+                ac = True
+            if st == 'Discharging':
+                ac = False if ac is None else ac
+    if pct is None:
+        return None, True
+    return pct, bool(ac)
+
+
+def auto_level():
+    pct, ac = battery()
+    if ac or pct is None:
+        return 'off'
+    if pct > 50:
+        return 'low'
+    if pct > 30:
+        return 'medium'
+    if pct > 15:
+        return 'high'
+    return 'ultra'
+
+
+# ------------------------------------------------------------------ tiến trình
+def proc_table():
+    """pid -> (ppid, comm, uid)"""
+    t = {}
+    for d in os.listdir('/proc'):
+        if not d.isdigit():
+            continue
+        s = read('/proc/%s/stat' % d)
+        m = re.match(r'\d+ \((.*)\) \S+ (\d+)', s)
+        if not m:
+            continue
+        try:
+            uid = os.stat('/proc/' + d).st_uid
+        except OSError:
+            continue
+        t[int(d)] = (int(m.group(2)), m.group(1), uid)
+    return t
+
+
+def cmdline(pid):
+    return read('/proc/%d/cmdline' % pid).replace('\0', ' ').strip()
+
+
+def app_root(pid, table):
+    """Đi ngược lên cha khi cha cùng tên (firefox → firefox chính) — cả cây đó là một app."""
+    comm = table.get(pid, (0, '', 0))[1]
+    while True:
+        pp = table.get(pid, (0, '', 0))[0]
+        if pp <= 1 or pp not in table or table[pp][1] != comm:
+            return pid
+        pid = pp
+
+
+def tree(root, table):
+    kids = {}
+    for p, (pp, _c, _u) in table.items():
+        kids.setdefault(pp, []).append(p)
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo.extend(kids.get(p, []))
+    return out
+
+
+def audio_pids():
+    """pid của app đang phát tiếng (PipeWire/PulseAudio) — chỉ hỏi khi sắp cho một app ngủ."""
+    try:
+        out = subprocess.run(['pactl', '-f', 'json', 'list', 'sink-inputs'], capture_output=True, text=True,
+                             timeout=3).stdout
+        pids = set()
+        for s in json.loads(out or '[]'):
+            if s.get('corked'):
+                continue
+            p = (s.get('properties') or {}).get('application.process.id')
+            if p and str(p).isdigit():
+                pids.add(int(p))
+        return pids
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+
+
+# ------------------------------------------------------------------ cửa sổ X
+class Windows:
+    """Theo dõi cửa sổ đang dùng + danh sách cửa sổ bằng MỘT tiến trình "xprop -spy": X báo khi đổi,
+    không phải hỏi lại liên tục (GDK của Python không đọc được thuộc tính cửa sổ lạ)."""
+
+    def __init__(self, on_active, on_gone):
+        self.on_active, self.on_gone = on_active, on_gone
+        self.active, self.clients, self.pids = None, [], {}
+        self.p = subprocess.Popen(['xprop', '-root', '-spy', '_NET_ACTIVE_WINDOW', '_NET_CLIENT_LIST'],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        GLib.io_add_watch(self.p.stdout, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self._line)
+
+    def _line(self, src, cond):
+        if cond & (GLib.IO_HUP | GLib.IO_ERR):
+            self.on_gone()
+            return False
+        l = src.readline()
+        if not l:
+            self.on_gone()
+            return False
+        ids = [int(x, 16) for x in re.findall(r'0x[0-9a-fA-F]+', l)]
+        if l.startswith('_NET_CLIENT_LIST'):
+            self.clients = ids
+            live = set(ids)
+            for x in [x for x in self.pids if x not in live]:
+                self.pids.pop(x, None)
+        elif l.startswith('_NET_ACTIVE_WINDOW'):
+            a = ids[0] if ids and ids[0] else None
+            if a != self.active:
+                self.active = a
+                self.on_active(self.pid_of(a) if a else None)
+        return True
+
+    def pid_of(self, xid):
+        if xid in self.pids:
+            return self.pids[xid]
+        try:
+            out = subprocess.run(['xprop', '-id', str(xid), '_NET_WM_PID'], capture_output=True, text=True,
+                                 timeout=2).stdout
+            m = re.search(r'=\s*(\d+)', out)
+            pid = int(m.group(1)) if m else None
+        except (OSError, subprocess.SubprocessError):
+            pid = None
+        self.pids[xid] = pid
+        return pid
+
+    def client_pids(self):
+        return {p for p in (self.pid_of(x) for x in self.clients) if p}
+
+    def stop(self):
+        try:
+            self.p.terminate()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ daemon
+class Daemon:
+    def __init__(self):
+        self.loop = GLib.MainLoop()
+        self.c = conf()
+        self.level = None
+        self.uid = os.getuid()
+        self.last_active = {}     # app root pid -> lúc được bấm vào gần nhất
+        self.frozen = {}          # app root pid -> (danh sách pid đã dừng, tên, lúc ngủ)
+        self.cur_active = None
+        self.cur_active_root = None
+        self.win = Windows(self.on_active, self.quit)
+        self.evaluate()
+        GLib.timeout_add_seconds(15, self.tick_sleep)
+        GLib.timeout_add_seconds(30, lambda: (self.evaluate(), True)[1])
+        self.watch_upower()
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, self.reload)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
+
+    # --- mức
+    def watch_upower(self):
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            # cắm/rút sạc, % pin đổi: xét lại sau 0,5 giây (một lần — hàm trả False)
+            bus.signal_subscribe('org.freedesktop.UPower', 'org.freedesktop.DBus.Properties', 'PropertiesChanged',
+                                 None, None, Gio.DBusSignalFlags.NONE,
+                                 lambda *a: GLib.timeout_add(500, lambda: (self.evaluate(), False)[1]))
+        except GLib.Error:
+            pass   # không có UPower: vẫn đọc /sys mỗi 30 giây
+
+    def evaluate(self):
+        lvl = self.c['MODE'] if self.c['MODE'] != 'auto' else auto_level()
+        if lvl != self.level:
+            log('mức', self.level, '->', lvl)
+            self.level = lvl
+            subprocess.Popen(['depot-power', 'apply-level', lvl], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not self.sleep_on():
+                self.thaw_all('mức %s không ngủ sâu' % lvl)
+        return True
+
+    def sleep_on(self):
+        return self.c.get('DEEPSLEEP') == '1' and self.level in SLEEP_AFTER
+
+    def reload(self):
+        self.c = conf()
+        log('đọc lại cấu hình', self.c)
+        self.level = None          # áp lại mức (người dùng vừa đổi chế độ)
+        self.evaluate()
+        if not self.sleep_on():
+            self.thaw_all('tắt ngủ sâu')
+        return True
+
+    # --- ngủ sâu
+    def excluded(self, pid, table):
+        comm = table.get(pid, (0, '', 0))[1].lower()
+        cmd = cmdline(pid).lower()
+        if table.get(pid, (0, '', -1))[2] != self.uid or pid == os.getpid():
+            return True
+        if comm in SYSTEM or SYSTEM_CMD.search(cmd):
+            return True
+        exe = os.path.basename(cmd.split(' ')[0]) if cmd else comm
+        if exe in SYSTEM:
+            return True
+        for e in self.c.get('EXCEPT', '').lower().split():
+            if e and (e in comm or e in cmd):
+                return True
+        return False
+
+    def on_active(self, pid):
+        """X báo đổi cửa sổ đang dùng (xprop -spy)."""
+        now = time.monotonic()
+        # app vừa rời khỏi cũng tính là "vừa dùng" — đếm giờ ngủ từ lúc rời đi, không phải từ lần bấm trước
+        if self.cur_active_root:
+            self.last_active[self.cur_active_root] = now
+        self.cur_active = pid
+        self.cur_active_root = None
+        if not pid:
+            return
+        # cửa sổ vừa được bấm vào thuộc app đang ngủ → đánh thức ngay
+        for root, (pids, _name, _t) in list(self.frozen.items()):
+            if pid in pids or pid == root:
+                self.thaw(root, 'được bấm vào')
+        root = app_root(pid, proc_table())
+        self.cur_active_root = root
+        self.last_active[root] = now
+
+    def tick_sleep(self):
+        if not self.sleep_on():
+            return True
+        after = SLEEP_AFTER[self.level]
+        now = time.monotonic()
+        table = proc_table()
+        active_root = self.cur_active_root
+        for gone in [r for r in self.frozen if r not in table]:
+            self.frozen.pop(gone, None)
+        candidates = []
+        for pid in self.win.client_pids():
+            if pid not in table:
+                continue
+            root = app_root(pid, table)
+            if root in self.frozen or root == active_root:
+                continue
+            self.last_active.setdefault(root, now)       # app mới thấy: bắt đầu đếm từ giờ
+            if now - self.last_active[root] < after or self.excluded(root, table):
+                continue
+            candidates.append(root)
+        if not candidates:
+            return True
+        playing = audio_pids()
+        for root in candidates:
+            pids = tree(root, table)
+            if playing & set(pids):
+                log('bỏ qua (đang phát tiếng):', table[root][1])
+                continue
+            self.freeze(root, pids, table[root][1])
+        return True
+
+    def freeze(self, root, pids, name):
+        done = []
+        for p in reversed(pids):            # con trước, cha sau
+            try:
+                os.kill(p, signal.SIGSTOP)
+                done.append(p)
+            except OSError:
+                pass
+        if done:
+            self.frozen[root] = (done, name, time.time())
+            log('cho ngủ:', name, root, '(%d tiến trình)' % len(done))
+            self.write_state()
+
+    def thaw(self, root, why=''):
+        pids, name, _t = self.frozen.pop(root, ([], '', 0))
+        for p in pids:
+            try:
+                os.kill(p, signal.SIGCONT)
+            except OSError:
+                pass
+        self.last_active[root] = time.monotonic()
+        log('đánh thức:', name, root, why)
+        self.write_state()
+
+    def thaw_all(self, why=''):
+        for r in list(self.frozen):
+            self.thaw(r, why)
+
+    def write_state(self):
+        try:
+            with open(FROZEN_FILE + '.tmp', 'w', encoding='utf-8') as f:
+                for r, (_p, name, t) in self.frozen.items():
+                    f.write('%d\t%s\t%s\n' % (r, name, time.strftime('%H:%M', time.localtime(t))))
+            os.replace(FROZEN_FILE + '.tmp', FROZEN_FILE)
+        except OSError:
+            pass
+
+    def quit(self):
+        self.thaw_all('thoát')
+        self.win.stop()
+        self.loop.quit()
+        return False
+
+
+def main():
+    # mỗi phiên một bản
+    lock = open(os.path.join(RUN, 'depot-powerd.lock'), 'w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print('depot-powerd đang chạy', file=sys.stderr)
+        return
+    if not os.environ.get('DISPLAY'):
+        print('!! không có màn hình X (DISPLAY)', file=sys.stderr)
+        return
+    d = Daemon()
+    try:
+        d.loop.run()
+    finally:
+        d.thaw_all('thoát')
+
+
+if __name__ == '__main__':
+    main()

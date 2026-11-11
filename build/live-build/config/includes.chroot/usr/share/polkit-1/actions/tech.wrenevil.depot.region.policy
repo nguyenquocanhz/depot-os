@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Depot OS — đổi ngôn ngữ hệ thống, múi giờ, đồng bộ giờ ("Ngôn ngữ và ngày giờ", depot-region).
+     Mặc định hỏi mật khẩu quản trị; /etc/polkit-1/rules.d/50-depot-region.rules cho user nhóm sudo
+     đang ngồi máy đổi không hỏi, giống "DNS và Proxy". -->
+<policyconfig>
+  <vendor>Depot OS by WrenEvil</vendor>
+  <action id="tech.wrenevil.depot.region">
+    <description>Đổi ngôn ngữ, múi giờ và đồng bộ giờ</description>
+    <message>Đổi ngôn ngữ hoặc ngày giờ của máy cần quyền quản trị</message>
+    <icon_name>preferences-desktop-locale</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/depot-region-helper</annotate>
+  </action>
+</policyconfig>

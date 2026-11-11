@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logo Depot by WrenEvil</title>
+<!-- Depot OS — phương án logo "Depot by WrenEvil": vô tung vô ảnh như quỷ dữ
+     By WrenEvil.tech & nguyenquocanhz (nqatech). Mỗi SVG ở đây chép ra file riêng khi chọn xong. -->
+<style>
+  :root { --bg: #0b0c10; --card: #14161d; --fg: #e8ecf5; --dim: #8a90a2; --red: #ff2d3d; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 Inter, system-ui, sans-serif; padding: 28px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lead { color: var(--dim); margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; max-width: 1080px; }
+  .card { background: var(--card); border-radius: 16px; padding: 20px; }
+  .card h2 { font-size: 15px; margin: 0 0 2px; }
+  .card .why { color: var(--dim); font-size: 13px; margin: 0 0 16px; min-height: 40px; }
+  .hero { display: flex; align-items: center; gap: 16px; }
+  .hero svg.mark { width: 112px; height: 112px; flex: none; }
+  .word { line-height: 1.05; }
+  .word b { display: block; font-size: 28px; letter-spacing: .14em; font-weight: 800; }
+  .word span { font-size: 13px; color: var(--dim); letter-spacing: .06em; }
+  .word span i { font-style: normal; color: var(--red); }
+  .sizes { display: flex; align-items: end; gap: 14px; margin-top: 18px; padding-top: 14px; border-top: 1px solid #23262f; }
+  .sizes svg { display: block; }
+  .sizes small { color: var(--dim); font-size: 11px; display: block; text-align: center; margin-top: 4px; }
+  .light { background: #eef0f4; border-radius: 10px; padding: 6px; }
+</style>
+</head>
+<body>
+<h1>Logo “Depot by WrenEvil”</h1>
+<p class="lead">Ý: vô tung vô ảnh như quỷ dữ — thấy thì như không thấy, đi qua không để dấu. Giữ chữ D của Depot để người cũ vẫn nhận ra.</p>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <!-- 1. Bóng ma: thân D đặc bên trái, tan dần sang phải -->
+    <linearGradient id="fadeR" x1="0" x2="1">
+      <stop offset="0" stop-color="#e8ecf5"/>
+      <stop offset=".45" stop-color="#e8ecf5" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#e8ecf5" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <symbol id="m1" viewBox="0 0 160 160">
+      <rect width="160" height="160" rx="36" fill="#07080c"/>
+      <!-- sừng -->
+      <path d="M44 40 C42 30 44 22 50 16 C50 26 54 33 60 40 Z" fill="#e8ecf5"/>
+      <path d="M88 41 C92 31 98 25 106 22 C102 30 101 37 102 45 Z" fill="#e8ecf5" opacity=".55"/>
+      <!-- D: thân + vòng, lõi khoét -->
+      <path fill="url(#fadeR)" fill-rule="evenodd"
+            d="M40 40 H82 A46 46 0 0 1 82 132 H40 Z M62 60 H80 A26 26 0 0 1 80 112 H62 Z"/>
+      <!-- mắt -->
+      <g filter="url(#glow)" fill="#ff2d3d">
+        <path d="M66 82 L80 78 L78 86 Z"/>
+        <path d="M84 77 L98 81 L86 86 Z" opacity=".8"/>
+      </g>
+    </symbol>
+
+    <!-- 2. Viền sáng: D cùng màu bóng tối, chỉ lộ một vệt viền đỏ -->
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff2d3d"/>
+      <stop offset=".55" stop-color="#ff2d3d" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#ff2d3d" stop-opacity="0"/>
+    </linearGradient>
+    <symbol id="m2" viewBox="0 0 160 160">
+      <rect width="160" height="160" rx="36" fill="#050507"/>
+      <path fill="#0f1117" fill-rule="evenodd"
+            d="M38 30 H80 A50 50 0 0 1 80 130 H38 Z M60 52 H80 A28 28 0 0 1 80 108 H60 Z"/>
+      <path d="M38 130 V30 H80 A50 50 0 0 1 130 80" fill="none" stroke="url(#rim)" stroke-width="4" stroke-linecap="round"/>
+      <g filter="url(#glow)" fill="#ff2d3d"><circle cx="72" cy="80" r="3"/><circle cx="88" cy="80" r="3"/></g>
+    </symbol>
+
+    <!-- 3. Tan vào khói: nửa dưới chữ D vỡ thành vệt mảnh rồi mất -->
+    <clipPath id="slices">
+      <rect x="0" y="0" width="160" height="88"/>
+      <rect x="0" y="92" width="160" height="9"/>
+      <rect x="6" y="105" width="160" height="6"/>
+      <rect x="12" y="115" width="160" height="4"/>
+      <rect x="20" y="123" width="160" height="2"/>
+      <rect x="30" y="129" width="160" height="1"/>
+    </clipPath>
+    <symbol id="m3" viewBox="0 0 160 160">
+      <rect width="160" height="160" rx="36" fill="#0a0b10"/>
+      <path d="M42 34 C40 24 42 17 47 12 C48 21 52 28 57 34 Z" fill="#e8ecf5"/>
+      <path d="M96 38 C100 29 106 24 113 22 C109 29 108 35 109 42 Z" fill="#e8ecf5"/>
+      <g clip-path="url(#slices)">
+        <path fill="#e8ecf5" fill-rule="evenodd"
+              d="M40 34 H80 A48 48 0 0 1 80 130 H40 Z M62 56 H80 A26 26 0 0 1 80 108 H62 Z"/>
+      </g>
+      <path d="M70 78 L82 74 L80 81 Z" fill="#ff2d3d" filter="url(#glow)"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="grid">
+  <div class="card">
+    <h2>1 · Bóng ma</h2>
+    <p class="why">Chữ D đặc ở thân, tan dần sang phải như bóng ma đang biến mất; hai sừng, một sừng mờ; mắt đỏ trong lòng chữ.</p>
+    <div class="hero"><svg class="mark"><use href="#m1"/></svg>
+      <div class="word"><b>DEPOT</b><span>by Wren<i>Evil</i></span></div></div>
+    <div class="sizes">
+      <div><svg width="48" height="48"><use href="#m1"/></svg><small>48</small></div>
+      <div><svg width="32" height="32"><use href="#m1"/></svg><small>32</small></div>
+      <div><svg width="16" height="16"><use href="#m1"/></svg><small>16</small></div>
+      <div class="light"><svg width="32" height="32"><use href="#m1"/></svg><small>nền sáng</small></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Viền sáng</h2>
+    <p class="why">Chữ D gần như cùng màu bóng tối — chỉ lộ một vệt viền đỏ như ánh sáng quét qua, và hai đốm mắt. Thấy mà như không thấy.</p>
+    <div class="hero"><svg class="mark"><use href="#m2"/></svg>
+      <div class="word"><b>DEPOT</b><span>by Wren<i>Evil</i></span></div></div>
+    <div class="sizes">
+      <div><svg width="48" height="48"><use href="#m2"/></svg><small>48</small></div>
+      <div><svg width="32" height="32"><use href="#m2"/></svg><small>32</small></div>
+      <div><svg width="16" height="16"><use href="#m2"/></svg><small>16</small></div>
+      <div class="light"><svg width="32" height="32"><use href="#m2"/></svg><small>nền sáng</small></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3 · Tan vào khói</h2>
+    <p class="why">Nửa trên chữ D rõ nét kèm sừng; nửa dưới vỡ thành vệt mảnh dần rồi mất — đi qua không để lại dấu.</p>
+    <div class="hero"><svg class="mark"><use href="#m3"/></svg>
+      <div class="word"><b>DEPOT</b><span>by Wren<i>Evil</i></span></div></div>
+    <div class="sizes">
+      <div><svg width="48" height="48"><use href="#m3"/></svg><small>48</small></div>
+      <div><svg width="32" height="32"><use href="#m3"/></svg><small>32</small></div>
+      <div><svg width="16" height="16"><use href="#m3"/></svg><small>16</small></div>
+      <div class="light"><svg width="32" height="32"><use href="#m3"/></svg><small>nền sáng</small></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1440" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07080c" stop-opacity="1"/><stop offset="0.6" stop-color="#0b0d14" stop-opacity="1"/><stop offset="1" stop-color="#12090d" stop-opacity="1"/></linearGradient>
+<radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="1420" cy="600" r="760"><stop offset="0" stop-color="#c0182b" stop-opacity="0.34"/><stop offset="0.45" stop-color="#7a0f1c" stop-opacity="0.14"/><stop offset="1" stop-color="#7a0f1c" stop-opacity="0"/></radialGradient>
+<radialGradient id="eye" gradientUnits="userSpaceOnUse" cx="1090" cy="478" r="120"><stop offset="0" stop-color="#ff3048" stop-opacity="0.55"/><stop offset="0.3" stop-color="#ff3048" stop-opacity="0.16"/><stop offset="1" stop-color="#ff3048" stop-opacity="0"/></radialGradient>
+<radialGradient id="vig" gradientUnits="userSpaceOnUse" cx="960" cy="540" r="1150"><stop offset="0.55" stop-color="#000000" stop-opacity="0"/><stop offset="1" stop-color="#000000" stop-opacity="0.62"/></radialGradient>
+<linearGradient id="shard" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="0.05"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+</defs>
+<rect width="1920" height="1080" fill="url(#bg)"/>
+<rect width="1920" height="1080" fill="url(#glow)"/>
+<polygon points="260,0 500,0 -20,1080 -260,1080" fill="url(#shard)"/>
+<polygon points="760,0 1000,0 480,1080 240,1080" fill="url(#shard)"/>
+<polygon points="1340,0 1580,0 1060,1080 820,1080" fill="url(#shard)"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1090,540)" fill="none" stroke="#e9eaf0" stroke-opacity="0.440" stroke-width="3.2"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1156,540)" fill="none" stroke="#e4d5dc" stroke-opacity="0.375" stroke-width="3.0"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1222,540)" fill="none" stroke="#e0c0c8" stroke-opacity="0.314" stroke-width="2.9"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1288,540)" fill="none" stroke="#dcabb4" stroke-opacity="0.257" stroke-width="2.7"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1354,540)" fill="none" stroke="#d896a1" stroke-opacity="0.205" stroke-width="2.6"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1420,540)" fill="none" stroke="#d4818d" stroke-opacity="0.159" stroke-width="2.4"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1486,540)" fill="none" stroke="#d06c79" stroke-opacity="0.117" stroke-width="2.2"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1552,540)" fill="none" stroke="#cc5766" stroke-opacity="0.081" stroke-width="2.1"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1618,540)" fill="none" stroke="#c84252" stroke-opacity="0.052" stroke-width="1.9"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1684,540)" fill="none" stroke="#c42d3e" stroke-opacity="0.031" stroke-width="1.8"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1750,540)" fill="none" stroke="#c0182b" stroke-opacity="0.020" stroke-width="1.6"/>
+<path d="M-96,-230 H0 A230,230 0 0 1 0,230 H-96 Z" transform="translate(1090,540)" fill="#e9eaf0" fill-opacity="0.045"/>
+<circle cx="1090" cy="478" r="120" fill="url(#eye)"/>
+<circle cx="1090" cy="478" r="6.5" fill="#ff3048"/>
+<rect width="1920" height="1080" fill="url(#vig)"/>
+</svg>

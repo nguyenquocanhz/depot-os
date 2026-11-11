@@ -1,0 +1,25 @@
+#!/bin/sh
+# Depot OS — menu boot tự động vào hệ sau 3 giây (v0.16: trước là 8 giây BIOS / 10 giây UEFI — chờ không để làm gì).
+# live-build để `timeout 0` (syslinux: chờ VÔ HẠN) — người dùng tưởng "treo".
+# Hook tìm đúng cây binary/ bất kể CWD, và in bằng chứng vào build.log.
+set -e
+
+echo ">> bootmenu hook: CWD=$(pwd)"
+for f in binary/isolinux/isolinux.cfg isolinux/isolinux.cfg; do
+    if [ -f "$f" ]; then
+        sed -i 's/^timeout .*$/timeout 30/' "$f"
+        grep -q '^timeout ' "$f" || echo 'timeout 30' >> "$f"
+        echo ">> bootmenu: đã patch $f ($(grep '^timeout' "$f"))"
+    fi
+done
+
+for f in binary/boot/grub/config.cfg boot/grub/config.cfg; do
+    if [ -f "$f" ]; then
+        if grep -q '^set timeout=' "$f"; then
+            sed -i 's/^set timeout=.*$/set timeout=3/' "$f"
+        else
+            echo 'set timeout=3' >> "$f"
+        fi
+        echo ">> bootmenu: đã patch $f ($(grep '^set timeout' "$f"))"
+    fi
+done

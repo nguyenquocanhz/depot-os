@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Thông báo
+Name[en]=Notifications
+Comment=Mở khung Thông báo bên cạnh: xem lại, xoá, bật Không làm phiền (Super+N)
+Comment[en]=Open the notification sidebar: review, clear, Do Not Disturb (Super+N)
+Exec=depot-notify show
+Icon=preferences-system-notifications
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-PersonalSettings;DesktopSettings;
+Keywords=thông báo;notification;không làm phiền;dnd;

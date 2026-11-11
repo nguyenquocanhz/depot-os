@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Depot OS Live Setup
+Comment=Đặt icon cài đặt lên desktop khi chạy live
+Exec=/bin/sh /usr/bin/depot-live-setup
+Terminal=false
+NoDisplay=true

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Depot OS Wallpaper
+Comment=Đặt hình nền Depot cho màn hình chưa có hình nền (xfdesktop 4.20 lưu theo tên màn hình)
+Exec=/bin/sh /usr/bin/depot-wallpaper-init
+OnlyShowIn=XFCE;
+Terminal=false
+NoDisplay=true

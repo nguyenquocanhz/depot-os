@@ -1,0 +1,6 @@
+/* Depot OS — chỉnh nhỏ cho app GTK3 (theme WhiteSur-Dark vẫn là gốc) */
+
+/* Terminal (xfce4-terminal và app VTE khác): lề quanh khung chữ cho thoáng, như terminal macOS */
+vte-terminal {
+    padding: 10px 14px 8px 14px;
+}

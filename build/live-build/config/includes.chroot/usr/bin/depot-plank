@@ -1,0 +1,46 @@
+#!/bin/sh
+# Depot OS — chạy Plank với cấu hình Depot
+# Plank đọc cấu hình từ gsettings, KHÔNG đọc file ~/.config/plank/dock1/settings.
+# Lần đầu mỗi user: ghi mặc định Depot vào gsettings + tạo launcher.
+# Sau đó user tự chỉnh (chuột phải dock > Preferences) thì giữ nguyên, không ghi đè.
+#   depot-plank          chạy dock
+#   depot-plank --reset  ghi lại mặc định Depot rồi chạy lại dock
+P=net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/
+MARK="$HOME/.config/depot/plank-v1"
+L="$HOME/.config/plank/dock1/launchers"
+APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop zalo discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
+
+# bố cục Windows 10/11 (depot-layout) dùng taskbar, không có dock
+case "$(cat "$HOME/.config/depot/layout" 2>/dev/null)" in windows*) exit 0 ;; esac
+
+if [ "${1:-}" = --reset ]; then
+    rm -f "$MARK"
+    pkill -x plank 2>/dev/null
+    sleep 0.3
+fi
+
+if [ ! -e "$MARK" ]; then
+    mkdir -p "$L" "$(dirname "$MARK")"
+    rm -f "$L"/*.dockitem
+    items=""
+    for app in $APPS; do
+        f=/usr/share/applications/$app.desktop
+        [ -f "$f" ] || continue
+        printf '[PlankDockItemPreferences]\nLauncher=file://%s\n' "$f" > "$L/$app.dockitem"
+        items="$items${items:+, }'$app.dockitem'"
+    done
+    gsettings set $P dock-items "[$items]"
+    # auto: luôn ẩn, đưa chuột xuống mép dưới thì hiện
+    gsettings set $P hide-mode auto
+    gsettings set $P hide-delay 200
+    gsettings set $P unhide-delay 0
+    gsettings set $P position bottom
+    gsettings set $P alignment center
+    gsettings set $P icon-size 46
+    gsettings set $P theme Transparent
+    gsettings set $P zoom-enabled true
+    gsettings set $P zoom-percent 130
+    touch "$MARK"
+fi
+
+exec plank

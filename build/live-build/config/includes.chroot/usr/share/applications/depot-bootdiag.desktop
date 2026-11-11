@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Chẩn đoán main (Boot Diag)
+GenericName=Motherboard / CPU upgrade check
+Comment=Main, chipset, BIOS, khe RAM — nâng cấp được lên CPU đời nào (socket LGA1155)
+Exec=depot-bootdiag --pause
+Icon=computer
+Terminal=true
+Categories=System;
+Keywords=bootdiag;main;mainboard;bo mạch chủ;chipset;bios;cpu;nâng cấp;socket;1155;ivy;sandy;dmidecode;ram;
+Actions=luu;
+
+[Desktop Action luu]
+Name=Chẩn đoán và lưu báo cáo ra USB
+Exec=depot-bootdiag --save --pause

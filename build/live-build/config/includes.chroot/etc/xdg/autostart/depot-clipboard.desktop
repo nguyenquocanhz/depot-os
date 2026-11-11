@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Bộ nhớ tạm Depot OS
+Comment=Lịch sử sao chép (Clipman): Win+V để chọn lại và dán
+Exec=depot-clipboard start
+TryExec=depot-clipboard
+OnlyShowIn=XFCE;
+Terminal=false
+NoDisplay=true

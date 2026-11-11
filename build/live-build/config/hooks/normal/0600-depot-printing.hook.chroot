@@ -1,0 +1,8 @@
+#!/bin/sh
+# Depot OS — avahi dò máy in / thiết bị mạng. CUPS không còn trong ISO (v0.16): cài lúc cài đặt bằng
+# depot-install-apps, cũng bật chế độ socket như dưới. Hai lệnh cups ở đây không còn tác dụng trong ISO.
+# Tiết kiệm vài giây boot, không mất tính năng. Avahi vẫn chạy (dò máy in mạng).
+set -e
+systemctl enable cups.socket >/dev/null 2>&1 || true
+systemctl disable cups.service >/dev/null 2>&1 || true
+systemctl enable avahi-daemon.service >/dev/null 2>&1 || true

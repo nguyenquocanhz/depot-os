@@ -1,0 +1,265 @@
+#!/bin/sh
+# Depot OS — phần cần quyền root của "Lưu dữ liệu trên USB" (depot-persist). Gọi qua pkexec; polkit
+# (tech.wrenevil.depot.persist + rules.d/50-depot-persist.rules) cho user nhóm sudo đang ngồi máy chạy không hỏi mật khẩu.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Vùng lưu = một phân vùng thêm vào chỗ trống phía sau Depot OS trên chính USB đang boot (như Persistent Storage
+# của Tails): ext4 nhãn "persistence", mặc định nằm trong LUKS2 nhãn "persistence" (mã hoá bằng mật khẩu).
+# Lần boot sau, live-boot (tham số kernel "persistence persistence-encryption=none,lukslabel") hỏi mật khẩu ngay
+# trên màn boot rồi phủ vùng lưu lên các thư mục ghi trong persistence.conf.
+#
+#   depot-persist-helper status
+#       in KHOÁ=giá trị: LIVE DISK MODEL DISK_MB FREE_MB REASON PART ENCRYPTED ACTIVE OPEN SIZE_MB USED_MB MODE
+#   depot-persist-helper create [size=max|SỐ_MB] [mode=home|system] [encrypt=1|0]
+#       encrypt=1: đọc mật khẩu ở dòng đầu của stdin (ít nhất 8 ký tự)
+#   depot-persist-helper passwd       stdin: dòng 1 mật khẩu cũ, dòng 2 mật khẩu mới
+#   depot-persist-helper delete confirm=yes      xoá vùng lưu (không xoá được khi đang dùng)
+#
+# An toàn: chỉ làm trên ổ đang boot Depot OS; chỉ THÊM phân vùng vào chỗ trống sau phân vùng cuối, không sửa
+# phân vùng sẵn có; trước khi định dạng kiểm lại vị trí phân vùng vừa tạo; tạo hỏng thì gỡ phân vùng đó.
+# Thử trên ổ giả: DEPOT_PERSIST_DISK=/dev/loopN (bỏ qua bước tìm ổ đang boot).
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+[ "$(id -u)" = 0 ] || { echo "depot-persist-helper: cần quyền root" >&2; exit 1; }
+
+LABEL=persistence
+MAPPER=depot-persist-setup
+MNT=/run/depot-persist-setup
+MIN_MB=512
+PBKDF="--pbkdf argon2id --pbkdf-memory 262144"   # 256 MB: mở được cả trên máy 1 GB RAM
+
+die() { echo "$*" >&2; exit 2; }
+
+part_path() {   # ổ + số phân vùng → đường dẫn (sdb3, mmcblk0p3, loop0p3)
+    case $1 in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac
+}
+
+# ------------------------------------------------------------------ dò ổ, chỗ trống, vùng lưu sẵn có
+detect() {
+    LIVE=0 DISK='' MODEL='' DISK_MB=0 FREE_MB=0 REASON='' PART='' PARTN='' ENCRYPTED=0 ACTIVE=0 OPEN=0
+    SIZE_MB=0 USED_MB=0 MODE='' START=0 AVAIL=0 NEXT=''
+    if [ -n "${DEPOT_PERSIST_DISK:-}" ]; then
+        LIVE=1; DISK=$DEPOT_PERSIST_DISK
+    else
+        [ -d /run/live/medium ] || { REASON=notlive; return 0; }
+        LIVE=1
+        src=$(findmnt -no SOURCE /run/live/medium 2>/dev/null | head -n1)
+        case $src in /dev/*) ;; *) REASON=toram; return 0 ;; esac          # toram: nội dung USB đã chép vào RAM
+        case $(lsblk -ndo TYPE "$src" 2>/dev/null) in
+            part) DISK=/dev/$(lsblk -ndo PKNAME "$src") ;;
+            disk) DISK=$src ;;
+            rom) REASON=optical; return 0 ;;
+            *) REASON=isofile; return 0 ;;                                  # loop / dm: Ventoy, findiso
+        esac
+        # boot từ file .iso nằm trên USB (GRUB loopback): ổ chứa file không có bố cục của Depot
+        [ -e /run/live/findiso ] && grep -q ' /run/live/findiso ' /proc/mounts && { REASON=isofile; return 0; }
+    fi
+    [ -b "$DISK" ] || { REASON=nodisk; return 0; }
+    base=$(basename "$DISK")
+    MODEL=$(lsblk -ndo VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//')
+    total=$(blockdev --getsz "$DISK" 2>/dev/null || echo 0)
+    DISK_MB=$((total / 2048))
+    [ "$(cat "/sys/block/$base/ro" 2>/dev/null)" = 1 ] && { REASON=readonly; return 0; }
+
+    dump=$(sfdisk -d "$DISK" 2>/dev/null) || { REASON=layout; return 0; }
+    ltype=$(printf '%s\n' "$dump" | sed -n 's/^label: *//p')
+    case $ltype in dos | gpt) ;; *) REASON=layout; return 0 ;; esac
+    # cuối phân vùng xa nhất + các số phân vùng đang dùng
+    info=$(printf '%s\n' "$dump" | awk '
+        / : / { n = $1; sub(/.*[^0-9]/, "", n); s = 0; z = 0
+                for (i = 1; i <= NF; i++) { if ($i == "start=") { v = $(i + 1); sub(/,/, "", v); s = v }
+                                            if ($i == "size=")  { v = $(i + 1); sub(/,/, "", v); z = v } }
+                if (s + z > end) end = s + z; used = used " " n }
+        END { print end + 0; print used }')
+    end=$(printf '%s\n' "$info" | sed -n 1p)
+    used=$(printf '%s\n' "$info" | sed -n 2p)
+    [ "${end:-0}" -gt 0 ] || { REASON=layout; return 0; }     # ổ chưa có phân vùng nào: không phải USB Depot
+    START=$(( (end + 2047) / 2048 * 2048 ))
+    tail=2048; [ "$ltype" = gpt ] && tail=4096       # chừa cuối ổ (GPT dự phòng nằm ở đó)
+    AVAIL=$((total - START - tail)); [ "$AVAIL" -gt 0 ] || AVAIL=0
+    FREE_MB=$((AVAIL / 2048))
+    max=4; [ "$ltype" = gpt ] && max=128
+    n=1; while [ "$n" -le "$max" ]; do
+        case " $used " in *" $n "*) ;; *) NEXT=$n; break ;; esac
+        n=$((n + 1))
+    done
+
+    # vùng lưu sẵn có: phân vùng trên ổ này có nhãn "persistence" (LUKS2 hoặc ext4)
+    for p in $(lsblk -nrpo NAME,TYPE "$DISK" | awk '$2 == "part" { print $1 }'); do
+        t=$(blkid -p -o value -s TYPE "$p" 2>/dev/null)
+        l=$(blkid -p -o value -s LABEL "$p" 2>/dev/null)
+        [ "$l" = "$LABEL" ] || continue
+        case $t in
+            crypto_LUKS) PART=$p; ENCRYPTED=1 ;;
+            ext4) PART=$p; ENCRYPTED=0 ;;
+            *) continue ;;
+        esac
+        break
+    done
+    if [ -n "$PART" ]; then
+        PARTN=$(cat "/sys/class/block/$(basename "$PART")/partition" 2>/dev/null)
+        SIZE_MB=$(( $(blockdev --getsz "$PART") / 2048 ))
+        dev=$PART
+        if [ "$ENCRYPTED" = 1 ]; then
+            dev=''
+            for m in /dev/mapper/*; do
+                [ -b "$m" ] || continue
+                [ "$(cryptsetup status "$m" 2>/dev/null | awk '$1 == "device:" { print $2 }')" = "$PART" ] && { dev=$m; OPEN=1; break; }
+            done
+        fi
+        if [ -n "$dev" ]; then
+            mp=$(findmnt -rno TARGET -S "$dev" 2>/dev/null | grep '^/run/live/persistence/' | head -n1)
+            if [ -n "$mp" ]; then
+                ACTIVE=1
+                USED_MB=$(df -Pm "$mp" 2>/dev/null | awk 'NR == 2 { print $3 }')
+                if grep -q '^/[[:space:]]' "$mp/persistence.conf" 2>/dev/null; then MODE=system; else MODE=home; fi
+            fi
+        fi
+        return 0
+    fi
+    [ -n "$NEXT" ] || { REASON=layout; return 0; }
+    [ "$FREE_MB" -ge "$MIN_MB" ] || REASON=nospace
+    return 0
+}
+
+do_status() {
+    detect
+    for k in LIVE DISK MODEL DISK_MB FREE_MB REASON PART ENCRYPTED ACTIVE OPEN SIZE_MB USED_MB MODE; do
+        eval "echo $k=\$$k"
+    done
+}
+
+# ------------------------------------------------------------------ tạo
+CREATED=''
+cleanup() {
+    mountpoint -q "$MNT" 2>/dev/null && umount "$MNT" 2>/dev/null
+    [ -e "/dev/mapper/$MAPPER" ] && cryptsetup close "$MAPPER" 2>/dev/null
+    rmdir "$MNT" 2>/dev/null
+    rm -rf "${KEYDIR:-/nonexistent}" 2>/dev/null
+}
+rollback() {    # tạo dở dang: gỡ phân vùng vừa thêm để lần sau làm lại được
+    cleanup
+    if [ -n "$CREATED" ]; then
+        wipefs -a "$(part_path "$DISK" "$CREATED")" >/dev/null 2>&1
+        partx -d --nr "$CREATED" "$DISK" >/dev/null 2>&1
+        sfdisk --delete --force --no-reread --no-tell-kernel "$DISK" "$CREATED" >/dev/null 2>&1
+        echo "(đã gỡ phân vùng tạo dở)" >&2
+    fi
+}
+fail() { echo "$*" >&2; rollback; exit 2; }
+
+do_create() {
+    size=max mode=home encrypt=1
+    for a in "$@"; do
+        case $a in
+            size=*) size=${a#size=} ;;
+            mode=home | mode=system) mode=${a#mode=} ;;
+            encrypt=0 | encrypt=1) encrypt=${a#encrypt=} ;;
+            *) die "không hiểu \"$a\"" ;;
+        esac
+    done
+    detect
+    [ "$LIVE" = 1 ] || die "Chỉ tạo được vùng lưu khi đang chạy Depot OS từ USB."
+    [ -z "$PART" ] || die "USB này đã có vùng lưu ($PART)."
+    [ -z "$REASON" ] || die "Không tạo được vùng lưu trên USB này ($REASON)."
+    PASS=''
+    if [ "$encrypt" = 1 ]; then
+        IFS= read -r PASS || true
+        [ "${#PASS}" -ge 8 ] || die "Mật khẩu phải có ít nhất 8 ký tự."
+        command -v cryptsetup >/dev/null || die "Thiếu cryptsetup."
+    fi
+    case $size in
+        max) sectors=$AVAIL ;;
+        *[!0-9]* | '') die "size= phải là số MB hoặc max" ;;
+        *) sectors=$((size * 2048)); [ "$sectors" -le "$AVAIL" ] || die "USB chỉ còn trống $FREE_MB MB." ;;
+    esac
+    [ "$sectors" -ge $((MIN_MB * 2048)) ] || die "Vùng lưu phải từ $MIN_MB MB trở lên."
+
+    trap 'rollback; exit 130' INT TERM
+    echo "# Thêm phân vùng $NEXT vào $DISK (bắt đầu ở sector $START, $((sectors / 2048)) MB)"
+    printf 'start=%s, size=%s, type=L\n' "$START" "$sectors" |
+        sfdisk -N "$NEXT" --force --no-reread --no-tell-kernel "$DISK" >/dev/null 2>&1 ||
+        die "Không ghi được bảng phân vùng của $DISK."
+    CREATED=$NEXT
+    partx -a --nr "$NEXT" "$DISK" >/dev/null 2>&1 || partx -u --nr "$NEXT" "$DISK" >/dev/null 2>&1
+    udevadm settle 2>/dev/null
+    P=$(part_path "$DISK" "$NEXT")
+    i=0; while [ ! -b "$P" ] && [ $i -lt 20 ]; do sleep 0.3; i=$((i + 1)); done
+    [ -b "$P" ] || fail "Hệ thống chưa nhận phân vùng mới ($P). Rút USB cắm lại rồi thử lần nữa."
+    # kiểm lại trước khi định dạng: đúng là phân vùng vừa thêm, không phải phân vùng nào khác
+    ps=$(cat "/sys/class/block/$(basename "$P")/start" 2>/dev/null)
+    pz=$(cat "/sys/class/block/$(basename "$P")/size" 2>/dev/null)
+    [ "$ps" = "$START" ] && [ "$pz" = "$sectors" ] || fail "Phân vùng $P không khớp vị trí vừa tạo — dừng, không định dạng."
+    wipefs -a "$P" >/dev/null 2>&1
+
+    DEV=$P
+    if [ "$encrypt" = 1 ]; then
+        echo "# Mã hoá vùng lưu (LUKS2)"
+        # --key-file=-: mật khẩu KHÔNG kèm dấu xuống dòng, đúng như plymouth đưa cho cryptsetup lúc boot
+        printf '%s' "$PASS" | cryptsetup luksFormat --batch-mode --type luks2 --label "$LABEL" $PBKDF \
+            --key-file=- "$P" || fail "Không mã hoá được $P."
+        printf '%s' "$PASS" | cryptsetup open --key-file=- "$P" "$MAPPER" || fail "Không mở được vùng vừa mã hoá."
+        DEV=/dev/mapper/$MAPPER
+    fi
+    echo "# Định dạng"
+    mkfs.ext4 -q -F -L "$LABEL" "$DEV" || fail "Không định dạng được vùng lưu."
+    mkdir -p "$MNT" && mount "$DEV" "$MNT" || fail "Không gắn được vùng lưu vừa tạo."
+    {
+        echo "# Depot OS — vùng lưu trên USB (depot-persist). Mỗi dòng: thư mục được giữ lại qua các lần boot."
+        if [ "$mode" = system ]; then
+            echo "/ union"
+        else
+            echo "/home union"
+            echo "/etc/NetworkManager/system-connections union"
+        fi
+    } > "$MNT/persistence.conf" || fail "Không ghi được persistence.conf."
+    sync
+    cleanup
+    trap - INT TERM
+    echo "OK $P"
+}
+
+# ------------------------------------------------------------------ đổi mật khẩu, xoá
+do_passwd() {
+    detect
+    [ -n "$PART" ] || die "USB này chưa có vùng lưu."
+    [ "$ENCRYPTED" = 1 ] || die "Vùng lưu này không mã hoá nên không có mật khẩu."
+    IFS= read -r OLD || true
+    IFS= read -r NEW || true
+    [ "${#NEW}" -ge 8 ] || die "Mật khẩu mới phải có ít nhất 8 ký tự."
+    KEYDIR=$(mktemp -d /run/depot-persist-key.XXXXXX) || die "Không tạo được thư mục tạm."
+    chmod 700 "$KEYDIR"
+    printf '%s' "$OLD" > "$KEYDIR/old"; printf '%s' "$NEW" > "$KEYDIR/new"
+    if cryptsetup luksChangeKey --batch-mode $PBKDF --key-file "$KEYDIR/old" "$PART" "$KEYDIR/new" 2>/dev/null; then
+        rm -rf "$KEYDIR"; echo "OK"
+    else
+        rm -rf "$KEYDIR"; die "Mật khẩu cũ không đúng."
+    fi
+}
+
+do_delete() {
+    [ "${1:-}" = confirm=yes ] || die "dùng: depot-persist-helper delete confirm=yes"
+    detect
+    [ -n "$PART" ] || die "USB này chưa có vùng lưu."
+    [ "$ACTIVE" = 0 ] || die "Vùng lưu đang được dùng. Khởi động lại, chọn mục \"không mở vùng lưu\" ở menu boot rồi xoá."
+    if [ "$OPEN" = 1 ]; then
+        for m in /dev/mapper/*; do
+            [ "$(cryptsetup status "$m" 2>/dev/null | awk '$1 == "device:" { print $2 }')" = "$PART" ] && cryptsetup close "$m"
+        done
+    fi
+    wipefs -a "$PART" >/dev/null 2>&1 || die "Không xoá được dữ liệu trên $PART."
+    partx -d --nr "$PARTN" "$DISK" >/dev/null 2>&1
+    sfdisk --delete --force --no-reread --no-tell-kernel "$DISK" "$PARTN" >/dev/null 2>&1 ||
+        die "Đã xoá dữ liệu nhưng chưa gỡ được phân vùng $PARTN khỏi bảng phân vùng."
+    udevadm settle 2>/dev/null
+    echo "OK"
+}
+
+case "${1:-}" in
+    status) do_status ;;
+    create) shift; do_create "$@" ;;
+    passwd) do_passwd ;;
+    delete) shift; do_delete "$@" ;;
+    *) echo "dùng: depot-persist-helper status | create [size=max|MB] [mode=home|system] [encrypt=1|0] | passwd | delete confirm=yes" >&2; exit 2 ;;
+esac

@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+# Depot OS — depot-about: "Giới thiệu máy này" kiểu macOS (tên máy, chip, đồ hoạ, RAM, ổ đĩa, desktop, hệ điều hành)
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Đọc /sys/class/dmi/id (không cần root), /proc, lspci, os-release. Nút "Cảm biến…" mở depot-hwmon,
+# "Thêm thông tin…" mở Boot Diag (main, khe RAM, nâng cấp CPU).
+# Thử: DEPOT_HW_ROOT=/gốc-giả (đọc /sys và /proc giả)
+
+import os
+import re
+import shutil
+import subprocess
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gio, GLib, Gtk, Pango  # noqa: E402
+
+ROOT = os.environ.get('DEPOT_HW_ROOT', '')
+LAPTOP = {8, 9, 10, 11, 14, 30, 31, 32}      # SMBIOS chassis: portable, laptop, notebook, sub/hand held, tablet, convertible
+JUNK = re.compile(r'^(to be filled|default string|system product name|system manufacturer|not applicable|none|o\.e\.m\.?|'
+                  r'x\.x|0+|123456789|type1productconfigid)', re.I)
+
+
+def rd(p):
+    try:
+        with open(ROOT + p, encoding='utf-8', errors='replace') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def dmi(k):
+    v = ' '.join(rd('/sys/class/dmi/id/' + k).split())
+    return '' if not v or JUNK.match(v) else v
+
+
+def machine():
+    vendor, name, ver = dmi('sys_vendor'), dmi('product_name'), dmi('product_version')
+    # Lenovo ghi mã máy vào product_name, tên bán hàng ("ThinkPad T420") vào product_version
+    if vendor.lower().startswith('lenovo') and ver and not ver.lower().startswith('lenovo'):
+        name = ver
+    if not name:
+        name = dmi('board_name') or 'Máy tính này'
+        vendor = vendor or dmi('board_vendor')
+    for suf in (' Corporation', ' Inc.', ' INC.', ' Co., Ltd.', ' CO., LTD', ' Computer'):
+        vendor = vendor.replace(suf, '')
+    vendor = vendor.strip().rstrip(',').strip()  # "VMware, Inc." → "VMware"
+    try:
+        chassis = int(rd('/sys/class/dmi/id/chassis_type') or 3)
+    except ValueError:
+        chassis = 3
+    laptop = chassis in LAPTOP or any(os.path.isdir(ROOT + '/sys/class/power_supply/' + b)
+                                      for b in ('BAT0', 'BAT1'))
+    return name, vendor.upper(), laptop
+
+
+def cpu():
+    txt = rd('/proc/cpuinfo')
+    m = re.search(r'^model name\s*:\s*(.+)$', txt, re.M)
+    name = m.group(1) if m else (os.uname().machine)
+    name = re.sub(r'\((R|TM)\)|\bCPU\b|\bProcessor\b|@.*|\d+-Core', '', name, flags=re.I)
+    name = ' '.join(name.split())
+    threads = len(re.findall(r'^processor\s*:', txt, re.M)) or os.cpu_count() or 1
+    cores = {(a, b) for a, b in re.findall(r'^physical id\s*:\s*(\d+)[\s\S]*?^core id\s*:\s*(\d+)', txt, re.M)}
+    n = len(cores) or threads
+    return '%s (%d nhân, %d luồng)' % (name, n, threads) if n != threads else '%s (%d nhân)' % (name, n)
+
+
+def gpus():
+    out = []
+    if not ROOT and shutil.which('lspci'):
+        try:
+            txt = subprocess.run(['lspci', '-mm'], capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            txt = ''
+        for l in txt.splitlines():
+            f = re.findall(r'"([^"]*)"', l)
+            if len(f) >= 3 and re.search(r'VGA|3D|Display', f[0]):
+                vendor, dev = f[1], f[2]
+                br = re.findall(r'\[([^\]]+)\]', dev)
+                dev = br[-1] if br else dev
+                vendor = {'Intel Corporation': 'Intel', 'NVIDIA Corporation': 'NVIDIA',
+                          'Advanced Micro Devices, Inc. [AMD/ATI]': 'AMD',
+                          'VMware': 'VMware', 'Red Hat, Inc.': 'Red Hat'}.get(vendor, vendor.split(' ')[0])
+                if not dev.lower().startswith(vendor.lower()):
+                    dev = vendor + ' ' + dev
+                out.append(dev)
+    else:
+        g = rd('/gpu')   # /sys giả: tên GPU ghi sẵn
+        out = [x for x in g.splitlines() if x]
+    return out
+
+
+def memory():
+    m = re.search(r'^MemTotal:\s*(\d+)', rd('/proc/meminfo'), re.M)
+    if not m:
+        return '—'
+    kb = int(m.group(1))
+    gb = kb / 1048576
+    # MemTotal thấp hơn RAM cắm vì kernel/iGPU giữ một phần — làm tròn lên như macOS
+    shown = int(gb) + (1 if gb - int(gb) > 0.05 else 0)
+    return '%d GB' % shown + ('' if abs(shown - gb) < 0.05 else (' (%s GB dùng được)' % ('%.1f' % gb).replace('.', ',')))
+
+
+def disk():
+    try:
+        s = os.statvfs(ROOT + '/' if ROOT else '/')
+    except OSError:
+        return '—'
+    tot, free = s.f_blocks * s.f_frsize, s.f_bavail * s.f_frsize
+    g = lambda b: ('%d GB' % round(b / 1e9)) if b >= 10e9 else ('%.1f GB' % (b / 1e9)).replace('.', ',')  # noqa: E731
+    live = os.path.exists('/run/live/medium') and not ROOT
+    return '%s, còn trống %s' % (g(tot), g(free)) + (' (phiên chạy thử — chưa cài)' if live else '')
+
+
+def desktop():
+    de = os.environ.get('XDG_CURRENT_DESKTOP', '')
+    if 'XFCE' in de.upper():
+        try:
+            v = subprocess.run(['xfce4-panel', '--version'], capture_output=True, text=True, timeout=2).stdout
+            m = re.search(r'Xfce (\d+\.\d+)', v)
+            return 'XFCE %s' % m.group(1) if m else 'XFCE'
+        except (OSError, subprocess.SubprocessError):
+            return 'XFCE'
+    if os.environ.get('I3SOCK') or 'i3' in de.lower():
+        return 'i3'
+    return de or '—'
+
+
+def osname():
+    rel = rd('/etc/os-release')
+    pretty = re.search(r'^PRETTY_NAME="?([^"\n]*)', rel, re.M)
+    base = pretty.group(1) if pretty else 'Debian'
+    if 'depot' in base.lower():
+        return base
+    ver = rd('/etc/depot-release')
+    return '%s%s (dựa trên %s)' % (edition(), ' ' + ver if ver else '', base)
+
+
+EDITION_NAMES = {'home': 'Depot OS Home', 'pro': 'Depot OS Pro', 'workstation': 'Depot OS for Workstation'}
+
+
+def edition():
+    """Tên phiên bản: /etc/depot-edition (depot-edition ghi lúc cài). Phiên chạy thử: bản hợp với máy này."""
+    m = re.search(r'^NAME="?([^"\n]*)', rd('/etc/depot-edition'), re.M)
+    if m:
+        return m.group(1)
+    if os.path.exists('/run/live/medium') and shutil.which('depot-edition'):
+        try:
+            env = dict(os.environ, DEPOT_HW_ROOT=ROOT) if ROOT else None
+            e = subprocess.run(['depot-edition', 'detect'], capture_output=True, text=True, timeout=5,
+                               env=env).stdout.strip()
+            if e in EDITION_NAMES:
+                return 'Depot OS — chạy thử, máy hợp bản %s' % EDITION_NAMES[e].replace('Depot OS ', '')
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 'Depot OS'
+
+
+def kernel():
+    return os.uname().release
+
+
+class About(Gtk.Window):
+    def __init__(self):
+        super().__init__(title='Giới thiệu máy này')
+        self.set_resizable(False)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_icon_name('depot-logo')
+        name, vendor, laptop = machine()
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_border_width(24)
+        self.add(box)
+
+        img = device_image(laptop)
+        img.set_margin_bottom(14)
+        box.pack_start(img, False, False, 0)
+
+        t = Gtk.Label()
+        t.set_markup('<span size="x-large" weight="bold">%s</span>' % _e(name))
+        t.set_ellipsize(Pango.EllipsizeMode.END)
+        t.set_max_width_chars(28)
+        box.pack_start(t, False, False, 0)
+        if vendor:
+            v = Gtk.Label()
+            v.set_markup('<small>%s</small>' % _e(vendor))
+            v.get_style_context().add_class('dim-label')
+            box.pack_start(v, False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+        grid.set_margin_top(18)
+        grid.set_halign(Gtk.Align.CENTER)
+        rows = [('Chip', cpu())]
+        for i, g in enumerate(gpus()):
+            rows.append(('Đồ hoạ' if i == 0 else '', g))
+        rows += [('Bộ nhớ', memory()), ('Ổ đĩa', disk()), ('Desktop', desktop()), ('Hệ điều hành', osname()),
+                 ('Kernel', kernel())]
+        for r, (k, val) in enumerate(rows):
+            a = Gtk.Label(xalign=1)
+            a.set_markup('<b>%s</b>' % _e(k))
+            b = Gtk.Label(label=val, xalign=0)
+            b.set_selectable(True)
+            b.set_can_focus(False)   # vẫn bôi chọn bằng chuột được, nhưng không tự bôi đen dòng đầu khi mở
+            b.set_line_wrap(True)
+            b.set_max_width_chars(34)
+            b.get_style_context().add_class('dim-label')
+            grid.attach(a, 0, r, 1, 1)
+            grid.attach(b, 1, r, 1, 1)
+        box.pack_start(grid, False, False, 0)
+
+        btns = Gtk.Box(spacing=8)
+        btns.set_halign(Gtk.Align.CENTER)
+        btns.set_margin_top(20)
+        self.first = None
+        if shutil.which('depot-hwmon'):
+            self.button(btns, 'Cảm biến…', lambda *_: subprocess.Popen(['depot-hwmon'], start_new_session=True))
+        try:
+            diag = Gio.DesktopAppInfo.new('depot-bootdiag.desktop')
+        except TypeError:
+            diag = None
+        if diag:   # Boot Diag chạy trong terminal (Terminal=true) — mở qua file .desktop giống menu
+            self.button(btns, 'Thêm thông tin…', lambda *_: diag.launch([], None))
+        if shutil.which('depot-edition'):
+            self.button(btns, 'Phiên bản…', lambda *_: subprocess.Popen(['depot-edition'], start_new_session=True))
+        box.pack_start(btns, False, False, 0)
+
+        foot = Gtk.Label()
+        foot.set_markup('<small>By WrenEvil.tech &amp; nguyenquocanhz (nqatech)</small>')
+        foot.get_style_context().add_class('dim-label')
+        foot.set_margin_top(14)
+        box.pack_start(foot, False, False, 0)
+        self.connect('destroy', Gtk.main_quit)
+        self.connect('key-press-event', lambda _w, e: e.keyval == 0xff1b and self.destroy())  # Esc
+        # focus vào nút đầu, không thì GTK bôi đen nhãn chọn được đầu tiên (dòng Chip)
+        self.connect('show', lambda *_: self.first and self.first.grab_focus())
+
+    def button(self, box, label, cb):
+        b = Gtk.Button(label=label)
+        b.connect('clicked', cb)
+        box.pack_start(b, False, False, 0)
+        self.first = self.first or b
+
+
+LOGO = '/usr/share/pixmaps/depot-logo.svg'
+
+
+def device_image(laptop):
+    """Laptop: icon computer-laptop của theme (WhiteSur: laptop màn xanh, không logo).
+    Máy bàn: logo Depot — icon máy bàn của WhiteSur là iMac in logo Apple."""
+    if not laptop:
+        try:
+            from gi.repository import GdkPixbuf
+            return Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_size(LOGO, 120, 120))
+        except (GLib.Error, ImportError, ValueError):
+            pass
+    img = Gtk.Image.new_from_icon_name('computer-laptop' if laptop else 'computer', Gtk.IconSize.DIALOG)
+    img.set_pixel_size(128)
+    return img
+
+
+def _e(s):
+    return GLib.markup_escape_text(s)
+
+
+if __name__ == '__main__':
+    w = About()
+    w.show_all()
+    Gtk.main()

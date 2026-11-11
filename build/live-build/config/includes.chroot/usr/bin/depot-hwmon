@@ -1,0 +1,700 @@
+#!/usr/bin/env python3
+# Depot OS — depot-hwmon: "Cảm biến phần cứng" kiểu HWMonitor + kiểm tra nhiệt sau khi vệ sinh / tra keo tản nhiệt
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Bảng: mỗi cảm biến hiện tại · min · max (từ lúc mở app). Đọc thẳng /sys (hwmon, cpufreq, power_supply, drm),
+# không cần root; nhóm không có cảm biến tự ẩn (máy ảo thường chỉ còn xung nhịp).
+# Kiểm tra: nghỉ 30 s -> tải 100% mọi luồng N phút -> hạ nhiệt 60 s, rồi chấm điểm theo khoảng cách tới TjMax,
+# số lần CPU bóp xung vì nóng (thermal_throttle) và tốc độ hạ nhiệt; lưu kết quả để so trước/sau khi tra keo.
+#
+#   depot-hwmon                 mở bảng cảm biến
+#   depot-hwmon --kiem-tra [N]  mở và chạy kiểm tra ngay (N phút tải, mặc định 5)
+# Thử: DEPOT_HW_ROOT=/gốc-giả (đọc /sys giả), DEPOT_HWMON_FAST=1 (rút ngắn các pha kiểm tra)
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import GLib, Gtk  # noqa: E402
+
+ROOT = os.environ.get('DEPOT_HW_ROOT', '')
+FAST = os.environ.get('DEPOT_HWMON_FAST') == '1'
+LOG = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'),
+                   'depot', 'kiem-tra-nhiet.log')
+RESCAN = 30          # giây giữa hai lần dò lại cảm biến
+DISK_EVERY = 10      # ổ cứng đọc thưa (SMART liên tục có thể giữ HDD không nghỉ)
+NV_EVERY = 3         # nvidia-smi là lệnh ngoài
+WARM, HOT = 70, 85
+
+C_WARM, C_HOT = '#d08a2a', '#e05252'
+
+
+# ------------------------------------------------------------------ đọc /sys
+def rd(p):
+    try:
+        with open(ROOT + p, encoding='utf-8', errors='replace') as f:
+            return f.readline().strip()
+    except OSError:
+        return None
+
+
+def num(p):
+    s = rd(p)
+    if s is None:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def natural(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
+
+
+def ls(p):
+    try:
+        return sorted(os.listdir(ROOT + p), key=natural)
+    except OSError:
+        return []
+
+
+def idx(files, pat):
+    r = re.compile(pat)
+    return sorted(int(m.group(1)) for m in map(r.match, files) if m)
+
+
+def vn(s):
+    return s.replace('.', ',')
+
+
+FMT = {
+    'temp': lambda v: '%d °C' % round(v),
+    'fan':  lambda v: '%d rpm' % round(v),
+    'volt': lambda v: vn('%.3f V' % v),
+    'ghz':  lambda v: vn('%.2f GHz' % v),
+    'mhz':  lambda v: '%d MHz' % round(v),
+    'watt': lambda v: vn('%.1f W' % v),
+    'pct':  lambda v: '%d %%' % round(v),
+}
+
+CPU_CHIPS = {'coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'via_cputemp'}
+GPU_CHIPS = {'amdgpu', 'radeon', 'nouveau', 'i915', 'xe'}
+DISK_CHIPS = {'nvme', 'drivetemp'}
+PRETTY = {'acpitz': 'ACPI', 'thinkpad': 'ThinkPad', 'dell_smm': 'Dell', 'asus': 'ASUS', 'hp': 'HP'}
+
+GROUPS = [('cpu', 'CPU'), ('gpu', 'GPU'), ('disk', 'Ổ cứng'), ('board', 'Bo mạch · khác'),
+          ('fan', 'Quạt'), ('volt', 'Điện áp'), ('bat', 'Pin')]
+
+
+class Row:
+    def __init__(self, grp, rid, label, kind, reader, every=0, pkg=False):
+        self.grp, self.id, self.label, self.kind, self.read, self.every = grp, rid, label, kind, reader, every
+        self.pkg = pkg   # nhiệt "gói CPU" dùng cho kiểm tra
+
+
+def temp_reader(p):
+    def f():
+        v = num(p)
+        if v is None:
+            return None
+        v /= 1000
+        return v if -40 < v < 150 else None
+    return f
+
+
+def file_reader(p, scale):
+    def f():
+        v = num(p)
+        return None if v is None else v * scale
+    return f
+
+
+def cpu_label(chip, lab, i):
+    if not lab:
+        return 'Nhiệt CPU %d' % i if chip == 'coretemp' else 'Nhiệt CPU'
+    m = re.match(r'Package id (\d+)', lab)
+    if m:
+        return 'Gói CPU' + ('' if m.group(1) == '0' else ' ' + m.group(1))
+    m = re.match(r'Core (\d+)', lab)
+    if m:
+        return 'Nhân ' + m.group(1)
+    if lab in ('Tctl', 'Tdie'):
+        return 'Gói CPU (%s)' % lab
+    return 'CPU ' + lab
+
+
+class Sensors:
+    def __init__(self):
+        self.rows, self.cpus, self.tjmax, self.nv = [], [], None, None
+        self.nv_cache, self.nv_t = [], -1e9
+        self.cpu_name = self.cpu_model()
+        self.scan()
+
+    @staticmethod
+    def cpu_model():
+        try:
+            with open(ROOT + '/proc/cpuinfo', encoding='utf-8', errors='replace') as f:
+                for l in f:
+                    if l.startswith('model name'):
+                        s = l.split(':', 1)[1]
+                        s = re.sub(r'\((R|TM)\)|CPU|@.*', '', s, flags=re.I)
+                        return ' '.join(s.split())
+        except OSError:
+            pass
+        return ''
+
+    def cpu_freq(self):
+        """GHz trung bình mọi luồng (cpufreq; máy ảo: /proc/cpuinfo)."""
+        if self.cpus:
+            v = [x for x in (num(p) for p in self.cpus) if x]
+            return sum(v) / len(v) / 1e6 if v else None
+        try:
+            with open(ROOT + '/proc/cpuinfo', encoding='utf-8', errors='replace') as f:
+                v = [float(l.split(':')[1]) for l in f if l.startswith('cpu MHz')]
+            return sum(v) / len(v) / 1000 if v else None
+        except (OSError, ValueError):
+            return None
+
+    def throttle(self):
+        """Tổng số lần CPU bóp xung vì nhiệt (Intel); None nếu không có."""
+        tot, found = 0, False
+        for c in ls('/sys/devices/system/cpu'):
+            if not re.fullmatch(r'cpu\d+', c):
+                continue
+            for k in ('core_throttle_count', 'package_throttle_count'):
+                v = num('/sys/devices/system/cpu/%s/thermal_throttle/%s' % (c, k))
+                if v is not None:
+                    tot += v
+                    found = True
+        return tot if found else None
+
+    def max_freq(self):
+        v = num('/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq')
+        return v / 1e6 if v else None
+
+    def nv_value(self, i):
+        def f():
+            now = time.monotonic()
+            if now - self.nv_t >= NV_EVERY:
+                self.nv_t = now
+                try:
+                    out = subprocess.run([self.nv, '--query-gpu=temperature.gpu,fan.speed,power.draw,clocks.gr',
+                                          '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                                         timeout=3).stdout.splitlines()
+                    self.nv_cache = [self._float(x) for x in (out[0].split(',') if out else [])]
+                except (OSError, subprocess.SubprocessError):
+                    self.nv_cache = []
+            return self.nv_cache[i] if i < len(self.nv_cache) else None
+        return f
+
+    @staticmethod
+    def _float(s):
+        try:
+            return float(s.strip())
+        except ValueError:
+            return None   # "[N/A]"
+
+    def scan(self):
+        rows, volt_n = [], 0
+        add = lambda *a, **k: rows.append(Row(*a, **k))  # noqa: E731
+        pkg_done = False
+        for h in ls('/sys/class/hwmon'):
+            base = '/sys/class/hwmon/' + h
+            files = ls(base)
+            chip = rd(base + '/name') or h
+            if chip in CPU_CHIPS:
+                grp = 'cpu'
+            elif chip in GPU_CHIPS:
+                grp = 'gpu'
+            elif chip in DISK_CHIPS:
+                grp = 'disk'
+            elif re.match(r'(BAT|AC|ADP)', chip):
+                continue
+            else:
+                grp = 'board'
+
+            if grp == 'disk':
+                model = ' '.join((rd(base + '/device/model') or h).split())
+                tag = 'NVMe' if chip == 'nvme' else 'SATA'
+                if 'temp1_input' in files:
+                    add('disk', base + '/temp1', '%s %s' % (tag, model), 'temp',
+                        temp_reader(base + '/temp1_input'), DISK_EVERY)
+                continue
+
+            for i in idx(files, r'temp(\d+)_input$'):
+                lab = rd('%s/temp%d_label' % (base, i))
+                if grp == 'cpu':
+                    label = cpu_label(chip, lab, i)
+                elif grp == 'gpu':
+                    label = 'GPU' + (' ' + lab if lab else '')
+                else:
+                    nice = PRETTY.get(chip) or ('PCH' if chip.startswith('pch_') else
+                                                'Wi-Fi' if chip.startswith('iwlwifi') else chip)
+                    label = '%s %s' % (nice, lab) if lab else (nice if i == 1 else '%s %d' % (nice, i))
+                is_pkg = grp == 'cpu' and not pkg_done and (label.startswith('Gói CPU') or chip != 'coretemp')
+                if is_pkg:
+                    pkg_done = True
+                    crit = num('%s/temp%d_crit' % (base, i)) or num('%s/temp%d_max' % (base, i))
+                    self.tjmax = crit / 1000 if crit else (95 if chip in ('k10temp', 'zenpower') else 100)
+                add(grp, '%s/temp%d' % (base, i), label, 'temp', temp_reader('%s/temp%d_input' % (base, i)),
+                    pkg=is_pkg)
+            for i in idx(files, r'fan(\d+)_input$'):
+                lab = rd('%s/fan%d_label' % (base, i))
+                if grp == 'gpu':
+                    label = 'Quạt GPU'
+                elif lab:
+                    label = lab
+                elif chip in ('thinkpad', 'dell_smm'):
+                    label = 'Quạt %d' % i
+                else:
+                    label = 'Quạt %d (%s)' % (i, chip)
+                add('gpu' if grp == 'gpu' else 'fan', '%s/fan%d' % (base, i), label, 'fan',
+                    file_reader('%s/fan%d_input' % (base, i), 1))
+            for i in idx(files, r'in(\d+)_input$'):
+                if grp == 'gpu':
+                    add('gpu', '%s/in%d' % (base, i), 'Điện áp GPU' + (' %d' % i if i else ''), 'volt',
+                        file_reader('%s/in%d_input' % (base, i), 1e-3))
+                else:
+                    volt_n += 1
+                    lab = rd('%s/in%d_label' % (base, i)) or 'in%d' % i
+                    add('volt', '%s/in%d' % (base, i), '%s (%s)' % (lab, chip), 'volt',
+                        file_reader('%s/in%d_input' % (base, i), 1e-3))
+            if grp == 'gpu':
+                for f in ('power1_average', 'power1_input'):
+                    if f in files:
+                        add('gpu', base + '/power1', 'Công suất GPU', 'watt', file_reader(base + '/' + f, 1e-6))
+                        break
+                if 'freq1_input' in files:
+                    add('gpu', base + '/freq1', 'Xung GPU', 'mhz', file_reader(base + '/freq1_input', 1e-6))
+
+        # iGPU Intel: xung nhịp (HD 3000 không có cảm biến nhiệt riêng — nằm chung "Gói CPU")
+        for c in ls('/sys/class/drm'):
+            if not re.fullmatch(r'card\d+', c):
+                continue
+            for rel in ('/gt_act_freq_mhz', '/gt_cur_freq_mhz', '/device/tile0/gt0/freq0/act_freq'):
+                p = '/sys/class/drm/' + c + rel
+                if num(p) is not None:
+                    add('gpu', p, 'Xung iGPU' + ('' if c == 'card0' else ' ' + c), 'mhz', file_reader(p, 1))
+                    break
+
+        self.nv = shutil.which('nvidia-smi') if not ROOT or os.environ.get('DEPOT_HWMON_NV') else None
+        if self.nv:
+            add('gpu', 'nv/temp', 'GPU NVIDIA', 'temp', self.nv_value(0))
+            add('gpu', 'nv/fan', 'Quạt GPU NVIDIA', 'pct', self.nv_value(1))
+            add('gpu', 'nv/pw', 'Công suất GPU NVIDIA', 'watt', self.nv_value(2))
+            add('gpu', 'nv/clk', 'Xung GPU NVIDIA', 'mhz', self.nv_value(3))
+
+        self.cpus = [p for p in ('/sys/devices/system/cpu/%s/cpufreq/scaling_cur_freq' % c
+                                 for c in ls('/sys/devices/system/cpu') if re.fullmatch(r'cpu\d+', c))
+                     if num(p) is not None]
+        add('cpu', 'cpufreq', 'Xung nhịp (TB)', 'ghz', self.cpu_freq)
+
+        for b in ls('/sys/class/power_supply'):
+            base = '/sys/class/power_supply/' + b
+            if rd(base + '/type') != 'Battery' or rd(base + '/scope') == 'Device':
+                continue
+            pre = '' if b in ('BAT0', 'BAT1') else b + ' '
+
+            def cap(base=base):
+                c = num(base + '/capacity')
+                if c is not None:
+                    return c
+                n, f = num(base + '/energy_now'), num(base + '/energy_full')
+                if n is None:
+                    n, f = num(base + '/charge_now'), num(base + '/charge_full')
+                return n * 100 / f if n is not None and f else None
+
+            def power(base=base):
+                p = num(base + '/power_now')
+                if p is not None:
+                    return abs(p) * 1e-6
+                i, v = num(base + '/current_now'), num(base + '/voltage_now')
+                return abs(i * v) * 1e-12 if i is not None and v is not None else None
+
+            def wear(base=base):
+                f = num(base + '/energy_full') or num(base + '/charge_full')
+                d = num(base + '/energy_full_design') or num(base + '/charge_full_design')
+                return max(0.0, 100 - f * 100 / d) if f and d else None
+
+            st = rd(base + '/status')
+            st = {'Charging': ' (đang sạc)', 'Discharging': ' (dùng pin)', 'Full': ' (đầy)'}.get(st, '')
+            add('bat', base + '/cap', pre + 'Mức pin' + st, 'pct', cap)
+            if num(base + '/voltage_now') is not None:
+                add('bat', base + '/volt', pre + 'Điện áp pin', 'volt', file_reader(base + '/voltage_now', 1e-6))
+            if num(base + '/power_now') is not None or num(base + '/current_now') is not None:
+                add('bat', base + '/pw', pre + 'Công suất pin', 'watt', power)
+            if wear() is not None:
+                add('bat', base + '/wear', pre + 'Độ chai pin', 'pct', wear, 600)
+        self.rows = rows
+
+    def pkg_temp(self, stat):
+        """Nhiệt gói CPU hiện tại (hoặc nhân nóng nhất) từ bảng stat."""
+        best = None
+        for r in self.rows:
+            if r.grp == 'cpu' and r.kind == 'temp':
+                v = stat.get(r.id, {}).get('cur')
+                if r.pkg and v is not None:
+                    return v
+                if v is not None and (best is None or v > best):
+                    best = v
+        return best
+
+
+# ------------------------------------------------------------------ tải CPU
+BURN = '''
+import os, sys, time
+try: os.nice(10)
+except OSError: pass
+end = time.time() + float(sys.argv[1]); x = 1.0001
+while time.time() < end:
+    for _ in range(300000):
+        x = x * 1.0000001 + 1e-7
+        if x > 1e6: x = 1.0001
+'''
+
+
+class Load:
+    def __init__(self):
+        self.procs = []
+        self.tool = 'stress-ng' if shutil.which('stress-ng') else 'python'
+
+    def start(self, secs):
+        n = os.cpu_count() or 1
+        if self.tool == 'stress-ng':
+            self.procs = [subprocess.Popen(['stress-ng', '--cpu', str(n), '--cpu-method', 'matrixprod',
+                                            '--timeout', '%ds' % (secs + 5), '--quiet'],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
+        else:
+            self.procs = [subprocess.Popen([sys.executable, '-c', BURN, str(secs + 5)],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                          for _ in range(n)]
+
+    def stop(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.terminate()
+        for p in self.procs:
+            try:
+                p.wait(2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self.procs = []
+
+
+# ------------------------------------------------------------------ giao diện
+def esc(s):
+    return GLib.markup_escape_text(s)
+
+
+class App(Gtk.Window):
+    def __init__(self, auto_test=None):
+        super().__init__(title='Cảm biến phần cứng — Depot')
+        self.set_default_size(620, 700)
+        self.set_icon_name('utilities-system-monitor')
+        self.sensors = Sensors()
+        self.stat = {}
+        self.iters = {}
+        self.last_scan = time.monotonic()
+        self.load = Load()
+        self.test = None
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_border_width(10)
+        self.add(box)
+
+        # --- bảng cảm biến
+        self.store = Gtk.TreeStore(str, str, str, str, str, bool)   # nhãn(markup), hiện tại, min, max, màu, có màu
+        tv = Gtk.TreeView(model=self.store)
+        tv.set_enable_search(False)
+        tv.get_selection().set_mode(Gtk.SelectionMode.NONE)
+        cols = [('Cảm biến', 0), ('Hiện tại', 1), ('Min', 2), ('Max', 3)]
+        for title, i in cols:
+            cell = Gtk.CellRendererText()
+            if i == 0:
+                col = Gtk.TreeViewColumn(title, cell, markup=0)
+                col.set_expand(True)
+            else:
+                cell.set_property('xalign', 1.0)
+                col = Gtk.TreeViewColumn(title, cell, text=i)
+                col.set_alignment(1.0)
+                col.set_min_width(100)
+                if i == 1:
+                    col.add_attribute(cell, 'foreground', 4)
+                    col.add_attribute(cell, 'foreground-set', 5)
+            tv.append_column(col)
+        self.tv = tv
+        sw = Gtk.ScrolledWindow()
+        sw.set_vexpand(True)
+        sw.set_shadow_type(Gtk.ShadowType.IN)
+        sw.add(tv)
+        box.pack_start(sw, True, True, 0)
+
+        # --- kiểm tra sau khi vệ sinh / tra keo
+        frame = Gtk.Frame(label=' Kiểm tra nhiệt sau khi vệ sinh / tra keo tản nhiệt ')
+        fb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fb.set_border_width(8)
+        frame.add(fb)
+        hb = Gtk.Box(spacing=6)
+        hb.pack_start(Gtk.Label(label='Tải CPU trong'), False, False, 0)
+        self.minutes = Gtk.ComboBoxText()
+        for m in ('3', '5', '10', '15'):
+            self.minutes.append(m, m + ' phút')
+        self.minutes.set_active_id('5')
+        hb.pack_start(self.minutes, False, False, 0)
+        self.btn = Gtk.Button(label='Bắt đầu kiểm tra')
+        self.btn.get_style_context().add_class('suggested-action')
+        self.btn.connect('clicked', self.on_test)
+        hb.pack_start(self.btn, False, False, 0)
+        reset = Gtk.Button(label='Xoá min/max')
+        reset.connect('clicked', lambda *_: self.stat.clear())
+        hb.pack_end(reset, False, False, 0)
+        fb.pack_start(hb, False, False, 0)
+        self.bar = Gtk.ProgressBar(show_text=True)
+        self.bar.set_text('Nghỉ 30 s → tải 100% mọi luồng → hạ nhiệt 60 s. Đóng app nặng, cắm sạc nếu là laptop.')
+        fb.pack_start(self.bar, False, False, 0)
+        self.result = Gtk.Label(xalign=0)
+        self.result.set_line_wrap(True)
+        self.result.set_selectable(True)
+        self.result.set_markup(self.last_result_text())
+        fb.pack_start(self.result, False, False, 0)
+        box.pack_start(frame, False, False, 0)
+
+        foot = Gtk.Label(xalign=0)
+        foot.set_markup('<small>Cập nhật mỗi giây · min/max tính từ lúc mở · '
+                        'By WrenEvil.tech &amp; nguyenquocanhz (nqatech)</small>')
+        foot.get_style_context().add_class('dim-label')
+        box.pack_start(foot, False, False, 0)
+
+        self.connect('destroy', self.on_quit)
+        self.tick()
+        GLib.timeout_add_seconds(1, self.tick)
+        if auto_test:
+            self.minutes.set_active_id(str(auto_test)) or self.minutes.set_active_id('5')
+            GLib.idle_add(self.on_test, None)
+
+    # --- cập nhật bảng
+    def tick(self):
+        now = time.monotonic()
+        if now - self.last_scan >= RESCAN and not self.test:
+            self.last_scan = now
+            self.sensors.scan()
+        for r in self.sensors.rows:
+            s = self.stat.setdefault(r.id, {'t': -1e9})
+            if now - s['t'] < r.every:
+                continue
+            s['t'] = now
+            try:
+                v = r.read()
+            except (OSError, ValueError, ZeroDivisionError, TypeError):
+                v = None
+            if v is not None:
+                s['cur'] = v
+                s['mn'] = v if s.get('mn') is None else min(s['mn'], v)
+                s['mx'] = v if s.get('mx') is None else max(s['mx'], v)
+            elif r.every == 0:
+                s['cur'] = None
+        self.render()
+        if self.test:
+            self.test_step()
+        return True
+
+    def visible(self, r):
+        s = self.stat.get(r.id) or {}
+        return s.get('mx') is not None and not (r.kind == 'fan' and s['mx'] <= 0)
+
+    def render(self):
+        shape = [(g, [r.id for r in self.sensors.rows if r.grp == g and self.visible(r)]) for g, _ in GROUPS]
+        if shape != getattr(self, 'shape', None):
+            self.shape = shape
+            self.store.clear()
+            self.iters = {}
+            names = dict(GROUPS)
+            byid = {r.id: r for r in self.sensors.rows}
+            for g, ids in shape:
+                if not ids:
+                    continue
+                title = names[g]
+                if g == 'cpu' and self.sensors.cpu_name:
+                    title += ' — ' + self.sensors.cpu_name
+                parent = self.store.append(None, ['<b>%s</b>' % esc(title), '', '', '', None, False])
+                for i in ids:
+                    self.iters[i] = self.store.append(parent, [esc(byid[i].label), '', '', '', None, False])
+            self.tv.expand_all()
+        byid = {r.id: r for r in self.sensors.rows}
+        for i, it in self.iters.items():
+            r, s = byid[i], self.stat[i]
+            f = FMT[r.kind]
+            cur = s.get('cur')
+            color = None
+            if r.kind == 'temp' and cur is not None:
+                color = C_HOT if cur >= HOT else C_WARM if cur >= WARM else None
+            self.store.set(it, 1, f(cur) if cur is not None else '—', 2, f(s['mn']), 3, f(s['mx']),
+                           4, color, 5, color is not None)
+
+    # --- kiểm tra
+    def phases(self):
+        load = int(self.minutes.get_active_id() or 5) * 60
+        if FAST:
+            return [('nghỉ', 3), ('tải', 8), ('hạ nhiệt', 4)]
+        return [('nghỉ', 30), ('tải', load), ('hạ nhiệt', 60)]
+
+    def on_test(self, _btn):
+        if self.test:
+            self.stop_test('Đã dừng kiểm tra.')
+            return False
+        ph = self.phases()
+        self.test = {'phases': ph, 'i': 0, 't0': time.monotonic(), 'start': time.monotonic(),
+                     'total': sum(d for _, d in ph), 'samples': {p: [] for p, _ in ph},
+                     'freq': [], 'thr0': self.sensors.throttle(), 'load_s': ph[1][1]}
+        self.btn.set_label('Dừng')
+        self.minutes.set_sensitive(False)
+        self.result.set_markup('<i>Đang kiểm tra… để máy yên, không chạy app khác.</i>')
+        return False
+
+    def stop_test(self, msg):
+        self.load.stop()
+        self.test = None
+        self.btn.set_label('Bắt đầu kiểm tra')
+        self.minutes.set_sensitive(True)
+        self.bar.set_fraction(0)
+        self.bar.set_text(msg)
+
+    def test_step(self):
+        t = self.test
+        now = time.monotonic()
+        name, dur = t['phases'][t['i']]
+        el = now - t['t0']
+        temp = self.sensors.pkg_temp(self.stat)
+        if temp is not None:
+            t['samples'][name].append(temp)
+        if name == 'tải':
+            if not self.load.procs:
+                self.load.start(dur)
+            f = self.sensors.cpu_freq()
+            if f:
+                t['freq'].append(f)
+        if el >= dur:
+            if name == 'tải':
+                self.load.stop()
+                t['thr1'] = self.sensors.throttle()
+            t['i'] += 1
+            t['t0'] = now
+            if t['i'] >= len(t['phases']):
+                self.finish_test()
+                return
+            name, dur = t['phases'][t['i']]
+            el = 0
+        done = now - t['start']
+        self.bar.set_fraction(min(1.0, done / t['total']))
+        left = max(0, int(t['total'] - done))
+        tt = '' if temp is None else ' · CPU %d °C' % round(temp)
+        self.bar.set_text('Pha %s: %d/%d s%s · còn %d:%02d' % (name, int(el), dur, tt, left // 60, left % 60))
+
+    def finish_test(self):
+        t = self.test
+        idle, load, cool = t['samples']['nghỉ'], t['samples']['tải'], t['samples']['hạ nhiệt']
+        tj = self.sensors.tjmax or 100
+        thr = None
+        if t.get('thr0') is not None and t.get('thr1') is not None:
+            thr = int(t['thr1'] - t['thr0'])
+        freq = sum(t['freq']) / len(t['freq']) if t['freq'] else None
+        fmax = self.sensors.max_freq()
+        tool = self.load.tool
+        self.stop_test('Xong. Kết quả ở dưới (đã lưu để so lần sau).')
+
+        lines = []
+        if not load:
+            lines.append('<b>Không đọc được nhiệt CPU</b> (máy ảo hoặc thiếu driver cảm biến) — không đánh giá được keo.')
+            if freq:
+                lines.append('Xung nhịp khi tải: %s' % vn('%.2f GHz' % freq))
+            self.result.set_markup('\n'.join(lines))
+            return
+        i_avg = sum(idle[-10:]) / len(idle[-10:]) if idle else load[0]
+        l_max = max(load)
+        steady = load[-30:] if len(load) >= 30 else load
+        l_avg = sum(steady) / len(steady)
+        c_end = cool[-1] if cool else l_avg
+        drop = l_avg - c_end
+        head = tj - l_max
+
+        if (thr and thr > 0) or head < 5:
+            verdict = '<span foreground="%s"><b>NÓNG</b></span> — CPU đã hoặc sắp bóp xung vì nhiệt. Xem lại: keo đủ và ' \
+                      'phủ kín mặt chip, ốc tản nhiệt siết chéo đều, quạt quay, khe gió/lá tản nhiệt sạch bụi.' % C_HOT
+        elif head < 15:
+            verdict = '<span foreground="%s"><b>TẠM ỔN</b></span> — dùng được nhưng hơi nóng; nên xem lại keo/quạt ' \
+                      'hoặc thử lại khi phòng mát.' % C_WARM
+        else:
+            verdict = '<span foreground="#3fa46a"><b>TỐT</b></span> — tản nhiệt làm việc ổn.'
+        lines.append(verdict)
+        lines.append('Nghỉ <b>%d °C</b> · tải: cao nhất <b>%d °C</b>, ổn định %d °C (TjMax %d °C, còn cách %d °C) · '
+                     'hạ nhiệt %d s: còn %d °C (giảm %d °C)'
+                     % (i_avg, l_max, l_avg, tj, head, t['phases'][2][1], c_end, drop))
+        extra = []
+        if freq:
+            extra.append('xung khi tải %s' % vn('%.2f GHz' % freq) + (' / tối đa %s' % vn('%.2f GHz' % fmax) if fmax else ''))
+        extra.append('bóp xung vì nhiệt: ' + ('không đọc được' if thr is None else 'không' if thr == 0 else '%d lần' % thr))
+        if drop < 10 and cool:
+            extra.append('hạ nhiệt chậm — quạt/khe gió có thể còn bụi')
+        lines.append(' · '.join(extra))
+
+        prev = self.read_log()
+        if prev:
+            d = l_max - prev['max']
+            lines.append('So với lần trước (%s): cao nhất %d → %d °C (%s%d °C)'
+                         % (prev['when'], prev['max'], l_max, '+' if d >= 0 else '−', abs(d)))
+        lines.append('<small>Nhiệt phụ thuộc nhiệt độ phòng — so trước/sau trong cùng điều kiện, cùng thời gian tải. '
+                     'Tải bằng %s, %s.</small>' % (tool, '%d phút' % (t['load_s'] // 60) if t['load_s'] >= 60
+                                                     else '%d s' % t['load_s']))
+        self.result.set_markup('\n'.join(lines))
+        try:
+            os.makedirs(os.path.dirname(LOG), exist_ok=True)
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n' % (
+                    time.strftime('%Y-%m-%d %H:%M'), tool, t['load_s'], i_avg, l_max, l_avg, c_end,
+                    '' if thr is None else thr, '' if freq is None else '%.2f' % freq))
+        except OSError:
+            pass
+
+    @staticmethod
+    def read_log():
+        try:
+            with open(LOG, encoding='utf-8') as f:
+                last = [l for l in f if l.strip()][-1].rstrip('\n').split('\t')
+            y, mo, d = last[0][:10].split('-')
+            return {'when': '%s/%s/%s %s' % (d, mo, y, last[0][11:]), 'idle': float(last[3]), 'max': float(last[4])}
+        except (OSError, IndexError, ValueError):
+            return None
+
+    def last_result_text(self):
+        p = self.read_log()
+        if not p:
+            return '<small>Chạy kiểm tra trước và sau khi vệ sinh / tra keo để so sánh. Kết quả lưu ở ' \
+                   '~/.local/share/depot/kiem-tra-nhiet.log</small>'
+        return '<small>Lần kiểm tra trước (%s): nghỉ %d °C, tải cao nhất %d °C.</small>' % (p['when'], p['idle'], p['max'])
+
+    def on_quit(self, *_):
+        self.load.stop()
+        Gtk.main_quit()
+
+
+def main():
+    auto = None
+    a = sys.argv[1:]
+    if a and a[0] in ('--kiem-tra', '--test'):
+        auto = int(a[1]) if len(a) > 1 and a[1].isdigit() else 5
+    elif a and a[0] in ('-h', '--help'):
+        print('depot-hwmon [--kiem-tra [phút]] — Cảm biến phần cứng kiểu HWMonitor + kiểm tra nhiệt sau khi tra keo')
+        return
+    win = App(auto)
+    win.show_all()
+    Gtk.main()
+
+
+if __name__ == '__main__':
+    main()

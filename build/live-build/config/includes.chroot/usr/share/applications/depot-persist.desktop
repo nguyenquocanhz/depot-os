@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lưu dữ liệu trên USB
+Name[en]=Save data on the USB stick
+Comment=Tạo vùng lưu mã hoá trên USB đang boot: tệp, cài đặt, Wi-Fi còn nguyên ở lần boot sau (như Tails)
+Comment[en]=Create an encrypted persistent storage on the boot USB stick (like Tails)
+Exec=depot-persist
+Icon=drive-removable-media
+Terminal=false
+NoDisplay=true
+Categories=Settings;System;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;
+Keywords=usb;persistence;persistent;tails;lưu;vùng lưu;mã hoá;

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Depot OS — chép /var/lib/plymouth/boot-duration vào initramfs.
+# Plymouth bắt đầu trong initramfs, lúc / thật chưa mount: hook plymouth của Debian không chép file này
+# nên Plymouth luôn đoán boot mất 60 giây (thanh tiến trình kẹt ~25% rồi nhảy lên 100%).
+# ISO live mang sẵn file đo trên máy thật (depot-results); máy đã cài thì là lần boot trước đó.
+PREREQ="plymouth"
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+F=/var/lib/plymouth/boot-duration
+if [ -s "$F" ]; then
+    mkdir -p "${DESTDIR}/var/lib/plymouth"
+    cp "$F" "${DESTDIR}$F"
+fi
+exit 0

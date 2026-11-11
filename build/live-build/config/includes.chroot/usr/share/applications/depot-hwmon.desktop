@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Cảm biến phần cứng
+GenericName=Hardware Monitor
+Comment=Nhiệt độ CPU/GPU/ổ cứng, quạt, điện áp, pin (hiện tại · min · max) và kiểm tra nhiệt sau khi vệ sinh, tra keo
+Exec=depot-hwmon
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=hwmonitor;cảm biến;nhiệt độ;keo tản nhiệt;tra keo;vệ sinh;quạt;điện áp;pin;sensors;temperature;stress;
+Actions=kiem-tra;
+
+[Desktop Action kiem-tra]
+Name=Kiểm tra nhiệt sau khi tra keo (5 phút)
+Exec=depot-hwmon --kiem-tra 5

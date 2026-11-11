@@ -1,0 +1,6 @@
+#!/bin/sh
+# Depot OS — sinh locale tiếng Việt + tiếng Anh ngay lúc build
+# (không dùng tuỳ chọn --locales của live-build vì phiên bản mới đã bỏ)
+# Ngôn ngữ mặc định đặt ở hook 1025 (phải chạy SAU hook 1020 của live-build).
+set -e
+locale-gen

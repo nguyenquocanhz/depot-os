@@ -1,0 +1,62 @@
+#!/bin/sh
+# Depot OS — thêm mục boot "Cài tự động" (tham số kernel depot.autoinstall) ngay dưới mục Live, cả GRUB (UEFI,
+# và loopback.cfg cho Ventoy/findiso) lẫn isolinux (BIOS). Chọn mục này: depot-autoinstall tìm
+# depot-autoinstall.conf ở gốc mọi phân vùng rồi cài, kể cả khi file không bật AUTO_START.
+# Mặc định vẫn là mục Live: không chọn gì thì không xoá ổ nào.
+# isolinux không có font tiếng Việt nên nhãn không dấu.
+set -e
+
+TITLE_GRUB='Cài tự động Depot OS (XOÁ Ổ theo depot-autoinstall.conf)'
+TITLE_SYSLINUX='Cai ^tu dong Depot OS (XOA O theo depot-autoinstall.conf)'
+
+patch_grub() {   # chép khối menuentry "Live system (amd64)" đầu tiên, thêm depot.autoinstall
+    f=$1
+    grep -q 'depot.autoinstall' "$f" && return 0
+    grep -q '^menuentry "Live system (amd64)"' "$f" || { echo "!! $f không có mục Live system (amd64)"; return 1; }
+    awk -v t="$TITLE_GRUB" '
+        !done && /^menuentry "Live system \(amd64\)"/ { inb = 1 }
+        inb && /^[ \t]*linux/  { lin = $0 }
+        inb && /^[ \t]*initrd/ { ini = $0 }
+        { print }
+        inb && /^}/ {
+            inb = 0; done = 1
+            print ""
+            print "menuentry \"" t "\" --hotkey=t {"
+            print lin " depot.autoinstall"
+            print ini
+            print "}"
+        }' "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> autoinstall menu: đã thêm vào $f"
+}
+
+patch_syslinux() {
+    f=$1
+    grep -q 'depot.autoinstall' "$f" && return 0
+    grep -q '^label live-amd64$' "$f" || { echo "!! $f không có label live-amd64"; return 1; }
+    awk -v t="$TITLE_SYSLINUX" '
+        /^label live-amd64$/ { inb = 1 }
+        inb && /^[ \t]*linux /  { lin = $0 }
+        inb && /^[ \t]*initrd / { ini = $0 }
+        inb && /^[ \t]*append / { app = $0 }
+        { print }
+        inb && /^[ \t]*append / {
+            inb = 0
+            print ""
+            print "label autoinstall-amd64"
+            print "\tmenu label " t
+            print lin
+            print ini
+            print app " depot.autoinstall"
+        }' "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> autoinstall menu: đã thêm vào $f"
+}
+
+for f in binary/boot/grub/grub.cfg boot/grub/grub.cfg binary/boot/grub/loopback.cfg boot/grub/loopback.cfg; do
+    [ -f "$f" ] && grep -q '^menuentry "Live system (amd64)"' "$f" && patch_grub "$f"
+done
+for f in binary/isolinux/live.cfg isolinux/live.cfg; do
+    [ -f "$f" ] && patch_syslinux "$f"
+done
+exit 0

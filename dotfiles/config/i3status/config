@@ -1,0 +1,61 @@
+# Depot OS — i3status cho i3bar (palette đồng bộ theme)
+general {
+    colors = true
+    interval = 5
+    color_good = "#8bd6a8"
+    color_degraded = "#e0b97d"
+    color_bad = "#d9534f"
+}
+
+order += "disk /"
+order += "memory"
+order += "cpu_usage"
+order += "ethernet _first_"
+order += "wireless _first_"
+order += "battery all"
+order += "volume master"
+order += "tztime local"
+
+wireless _first_ {
+    format_up = "WIFI %ip"
+    format_down = ""
+}
+
+ethernet _first_ {
+    format_up = "ETH %ip"
+    format_down = ""
+}
+
+# Máy bàn không có pin — module tự ẩn
+battery all {
+    format = "BAT %status%percentage"
+    format_down = ""
+    status_chr = "⚡ "
+    status_bat = ""
+    status_full = "✔ "
+    status_unk = "? "
+}
+
+disk "/" {
+    format = "DISK %avail"
+}
+
+memory {
+    format = "RAM %used"
+}
+
+cpu_usage {
+    format = "CPU %usage"
+}
+
+volume master {
+    format = "VOL %volume"
+    format_muted = "VOL muted"
+    device = "default"
+    mixer = "Master"
+    mixer_idx = 0
+}
+
+tztime local {
+    format = "%a %d/%m %H:%M"
+}

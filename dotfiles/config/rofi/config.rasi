@@ -1,0 +1,56 @@
+// Depot OS — rofi launcher (mod+d), palette đồng bộ theme
+configuration {
+    modi: "drun,run";
+    show-icons: true;
+    font: "Inter 10";
+    display-drun: "App";
+    display-run: "Run";
+}
+
+* {
+    bg: #16203aee;
+    bg2: #0f1420ee;
+    fg: #e8eefb;
+    dim: #8fa7cf;
+    accent: #3d6db5;
+
+    background-color: transparent;
+    text-color: @fg;
+}
+
+window {
+    location: center;
+    width: 640px;
+    background-color: @bg;
+    border: 2px;
+    border-color: @accent;
+    border-radius: 10px;
+}
+
+inputbar {
+    padding: 12px;
+    background-color: @bg2;
+    border-radius: 10px 10px 0 0;
+    children: [ prompt, entry ];
+}
+
+prompt {
+    text-color: @accent;
+    margin: 0px 8px 0px 0px;
+}
+
+entry {
+    placeholder: "Tìm app...";
+    placeholder-color: @dim;
+}
+
+listview {
+    lines: 8;
+    padding: 8px;
+}
+
+element selected {
+    background-color: @accent;
+    text-color: #ffffff;
+    border-radius: 6px;
+}

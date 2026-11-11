@@ -1,0 +1,21 @@
+# Depot OS — fcitx5: phím bật/tắt tiếng Việt, giống Unikey trên Windows
+[Hotkey]
+# phím bật/tắt chỉ chuyển giữa tiếng Anh và Unikey, không lần lượt qua bộ gõ khác
+EnumerateWithTriggerKeys=True
+# TẮT phím tắt mặc định của fcitx5 "chạm Shift trái một mình = đổi bộ gõ" (AltTriggerKeys=Shift_L). Tới v0.23 còn bật:
+# gõ @ mà lỡ nhả Shift trước khi bấm 2, hay chạm Shift rồi thôi, là bộ gõ lặng lẽ sang tiếng Anh — chữ gõ tiếp ra
+# nguyên phím (Vie65t), nhìn như mất dấu / mất chữ, nhất là trong Terminal. Để rỗng = không có phím tắt này.
+AltTriggerKeys=
+
+[Hotkey/TriggerKeys]
+0=Control+space
+# Ctrl+Shift như Unikey: nhấn rồi thả cả hai phím
+1=Control+Shift+Shift_L
+
+[Behavior]
+# Mặc định TẮT tiếng Việt: gõ lệnh trong terminal không bị biến "dd" thành "đ"
+ActiveByDefault=False
+# Bật một lần là áp dụng cho mọi cửa sổ, giống Unikey (mặc định fcitx5 là mỗi cửa sổ một trạng thái)
+ShareInputState=All
+# hiện thông báo nhỏ khi chuyển tiếng Việt/tiếng Anh
+ShowInputMethodInformation=True

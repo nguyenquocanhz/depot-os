@@ -1,0 +1,184 @@
+#!/bin/sh
+# Depot OS — Chế độ pin (Battery Mode): Tự động / Tắt / Low / Medium / High / Ultra + "Ngủ sâu" app không dùng
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-power                 cửa sổ chọn chế độ
+#   depot-power set CHẾ_ĐỘ      auto | off | low | medium | high | ultra (lưu + áp dụng)
+#   depot-power status          chế độ đã chọn, mức đang chạy, pin, app đang ngủ
+#   depot-power apply-level MỨC (depot-powerd gọi) áp một mức: phần người dùng + depot-power-helper (root, qua pkexec)
+#
+#            Low            Medium              High                    Ultra
+#   CPU      cân bằng       nghiêng tiết kiệm   tiết kiệm, tắt turbo,   như High, tối đa 60%
+#                                               tối đa 80%
+#   Đèn nền  giữ            ≤ 80%               ≤ 60%                   ≤ 40%
+#   Thiết bị âm thanh ngủ   + Wi-Fi, USB, PCIe, + máy ngủ kiểu S3        + tiết kiệm mạnh nhất,
+#                           ổ SATA tiết kiệm                            tắt Bluetooth
+#   Màn hình tối 120 s/tắt 10'/ngủ 30'  60 s/5'/20'  30 s/3'/10'         15 s/2'/5'
+#   Hiệu ứng giữ            giữ                 tắt widget              như "Nhanh nhất"
+#   Ngủ sâu  —              —                   app không dùng 5 phút   app không dùng 2 phút
+# Tự động: cắm sạc = Tắt; pin > 50% Low, 31–50% Medium, 16–30% High, ≤ 15% Ultra.
+# Ngủ sâu: depot-powerd cho app lâu không được bấm vào "ngủ" (SIGSTOP, không tốn CPU), bấm lại cửa sổ là chạy tiếp.
+# Không bao giờ cho ngủ: app hệ thống (panel, dock, cửa sổ, mạng, âm thanh, bộ gõ, Depot…), app đang phát tiếng,
+# và danh sách "chừa ra" (mặc định: app nhắn tin, terminal, trình phát nhạc — sửa được trong cửa sổ).
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/depot/power
+ORIGF=${XDG_CONFIG_HOME:-$HOME/.config}/depot/power-orig
+RUN=${XDG_RUNTIME_DIR:-/tmp}
+LEVELF=$RUN/depot-power.level
+FROZEN=$RUN/depot-powerd.frozen
+OVR=$RUN/depot-effects.override
+HELPER=/usr/libexec/depot-power-helper
+DEFAULT_EXCEPT="telegram discord zalo signal localsend xfce4-terminal x-terminal-emulator gnome-terminal tilix kitty alacritty vlc mpv rhythmbox spotify obs"
+
+load() {
+    MODE=auto DEEPSLEEP=1 EXCEPT=$DEFAULT_EXCEPT
+    # shellcheck disable=SC1090
+    [ -r "$CONF" ] && . "$CONF"
+    case $MODE in auto | off | low | medium | high | ultra) ;; *) MODE=auto ;; esac
+}
+
+save() {
+    mkdir -p "$(dirname "$CONF")"
+    {
+        echo "# Depot OS — Chế độ pin (depot-power). MODE: auto | off | low | medium | high | ultra"
+        echo "MODE=$MODE"
+        echo "DEEPSLEEP=$DEEPSLEEP"
+        echo "EXCEPT=\"$EXCEPT\""
+    } > "$CONF"
+}
+
+name() {
+    case $1 in
+        auto) echo "Tự động (theo % pin)" ;;
+        off) echo "Tắt — hiệu năng đầy đủ" ;;
+        low) echo "Low — tiết kiệm nhẹ" ;;
+        medium) echo "Medium — cân bằng" ;;
+        high) echo "High — tiết kiệm nhiều" ;;
+        ultra) echo "Ultra — kéo dài pin tối đa" ;;
+    esac
+}
+
+battery() {   # in "PHẦN_TRĂM TRẠNG_THÁI" hoặc rỗng khi không có pin
+    for b in /sys/class/power_supply/*; do
+        [ "$(cat "$b/type" 2>/dev/null)" = Battery ] || continue
+        [ "$(cat "$b/scope" 2>/dev/null)" = Device ] && continue
+        echo "$(cat "$b/capacity" 2>/dev/null) $(cat "$b/status" 2>/dev/null)"
+        return
+    done
+}
+
+# ---- phần theo người dùng: hẹn giờ tối/tắt màn hình, ngủ máy (xfce4-power-manager), hiệu ứng
+XFPM_KEYS="brightness-on-battery dpms-on-battery-sleep dpms-on-battery-off inactivity-on-battery"
+xfpm_set() {
+    command -v xfconf-query >/dev/null || return 0
+    if [ ! -e "$ORIGF" ]; then
+        mkdir -p "$(dirname "$ORIGF")"
+        for k in $XFPM_KEYS; do
+            echo "$k=$(xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/$k 2>/dev/null)"
+        done > "$ORIGF"
+    fi
+    # $1 giây làm tối, $2 phút màn hình chờ, $3 phút tắt màn hình, $4 phút ngủ máy
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/brightness-on-battery -n -t uint -s "$1" 2>/dev/null
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-sleep -n -t uint -s "$2" 2>/dev/null
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-off -n -t uint -s "$3" 2>/dev/null
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-battery -n -t uint -s "$4" 2>/dev/null
+}
+xfpm_restore() {
+    [ -r "$ORIGF" ] || return 0
+    while IFS='=' read -r k v; do
+        if [ -n "$v" ]; then
+            xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/"$k" -n -t uint -s "$v" 2>/dev/null
+        else
+            xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/"$k" -r 2>/dev/null
+        fi
+    done < "$ORIGF"
+    rm -f "$ORIGF"
+}
+
+effects() {  # effects none|high|ultra — chỉ đè tạm (file trong /run), không đổi lựa chọn đã lưu của Hiệu ứng hình ảnh
+    old=$(cat "$OVR" 2>/dev/null)
+    if [ "$1" = none ]; then rm -f "$OVR"; else echo "$1" > "$OVR"; fi
+    [ "$old" = "$(cat "$OVR" 2>/dev/null)" ] && return 0
+    command -v depot-effects >/dev/null && (depot-effects apply >/dev/null 2>&1 &)
+}
+
+apply_level() {
+    l=$1
+    case $l in
+        off)    xfpm_restore; effects none ;;
+        low)    xfpm_set 120 10 10 30; effects none ;;
+        medium) xfpm_set 60 5 5 20;    effects none ;;
+        high)   xfpm_set 30 3 3 10;    effects high ;;
+        ultra)  xfpm_set 15 2 2 5;     effects ultra ;;
+        *) echo "!! mức '$l'" >&2; return 2 ;;
+    esac
+    if [ "$(id -u)" = 0 ]; then "$HELPER" "$l"; else pkexec "$HELPER" "$l"; fi
+    echo "$l" > "$LEVELF"
+}
+
+notify_daemon() {   # báo depot-powerd đọc lại cấu hình; không có daemon thì tự áp
+    if pkill -HUP -f 'bin/depot-powerd( |$)' 2>/dev/null; then return 0; fi
+    load
+    l=$MODE
+    [ "$MODE" = auto ] && l=$(auto_level)
+    apply_level "$l"
+}
+
+auto_level() {
+    set -- $(battery)
+    pct=${1:-}; st=${2:-}
+    if [ -z "$pct" ] || [ "$st" = Charging ] || [ "$st" = Full ] || [ "$st" = "Not charging" ]; then echo off; return; fi
+    if [ "$pct" -gt 50 ]; then echo low; elif [ "$pct" -gt 30 ]; then echo medium
+    elif [ "$pct" -gt 15 ]; then echo high; else echo ultra; fi
+}
+
+status() {
+    load
+    set -- $(battery)
+    echo "Chế độ:   $(name "$MODE")"
+    echo "Đang chạy: $(cat "$LEVELF" 2>/dev/null || echo "?")"
+    if [ -n "${1:-}" ]; then echo "Pin:      $1% (${2:-?})"; else echo "Pin:      không có (máy bàn)"; fi
+    echo "Ngủ sâu:  $([ "$DEEPSLEEP" = 1 ] && echo bật || echo tắt) — chừa ra: $EXCEPT"
+    if [ -s "$FROZEN" ]; then echo "App đang ngủ:"; sed 's/^/  /' "$FROZEN"; fi
+}
+
+gui() {
+    load
+    set -- $(battery)
+    if [ -n "${1:-}" ]; then bat="Pin: <b>$1%</b> (${2:-?})"; else bat="Máy không có pin: chế độ áp dụng luôn (tiết kiệm điện)"; fi
+    cur=$(cat "$LEVELF" 2>/dev/null || echo off)
+    cb=""
+    for m in auto off low medium high ultra; do
+        n=$(name $m); [ $m = "$MODE" ] && n="^$n"; cb="$cb${cb:+!}$n"
+    done
+    sleeping=""; [ -s "$FROZEN" ] && sleeping="\nĐang ngủ: $(cut -f2 "$FROZEN" | tr '\n' ' ')"
+    out=$(yad --form --title="Chế độ pin" --window-icon=battery --image=battery --width=560 --borders=16 \
+        --separator='|' --text="$bat · đang chạy mức <b>$(name "$cur" | cut -d' ' -f1)</b>$sleeping
+
+<small><b>Low</b>: CPU cân bằng, tối màn hình sau 2 phút.
+<b>Medium</b>: CPU nghiêng tiết kiệm, Wi-Fi/USB/âm thanh/ổ đĩa tiết kiệm, đèn ≤ 80%.
+<b>High</b>: tắt turbo, CPU ≤ 80%, đèn ≤ 60%, tắt widget, ngủ sâu app không dùng 5 phút.
+<b>Ultra</b>: CPU ≤ 60%, đèn ≤ 40%, tắt Bluetooth, hiệu ứng tối thiểu, ngủ sâu app sau 2 phút.
+<b>Tự động</b>: cắm sạc thì tắt; pin &gt; 50% Low · 31–50% Medium · 16–30% High · ≤ 15% Ultra.</small>" \
+        --field="Chế độ:CB" "$cb" \
+        --field="Ngủ sâu app không dùng (High, Ultra):CHK" "$([ "$DEEPSLEEP" = 1 ] && echo TRUE || echo FALSE)" \
+        --field="Không bao giờ cho ngủ (tên app, cách nhau dấu cách)" "$EXCEPT" \
+        --button="Huỷ:1" --button="OK:0") || exit 0
+    chosen=$(echo "$out" | cut -d'|' -f1)
+    for m in auto off low medium high ultra; do [ "$(name $m)" = "$chosen" ] && MODE=$m; done
+    [ "$(echo "$out" | cut -d'|' -f2)" = TRUE ] && DEEPSLEEP=1 || DEEPSLEEP=0
+    EXCEPT=$(echo "$out" | cut -d'|' -f3 | tr -s ' ')
+    save
+    notify_daemon
+}
+
+case "${1:-}" in
+    set)
+        load; MODE=${2:?dùng: depot-power set auto|off|low|medium|high|ultra}
+        case $MODE in auto | off | low | medium | high | ultra) ;; *) echo "!! chế độ '$MODE'" >&2; exit 2 ;; esac
+        save; notify_daemon; status ;;
+    apply-level) apply_level "${2:?}" ;;
+    auto-level) auto_level ;;
+    status) status ;;
+    '') gui ;;
+    *) sed -n '4,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

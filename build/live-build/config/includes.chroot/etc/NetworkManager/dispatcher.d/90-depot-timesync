@@ -1,0 +1,26 @@
+#!/bin/sh
+# Depot OS — có mạng thì đồng bộ giờ lại từ máy chủ ĐẦU danh sách (mặc định time.windows.com).
+# systemd-timesyncd khởi động trước khi có mạng: hỏi máy chủ đầu không được thì xoay sang máy kế, và khi mạng lên
+# nó dùng luôn máy đang tới lượt — boot thử ISO v0.20 trên VMware: đồng bộ với 0.debian.pool.ntp.org dù
+# time.windows.com trả lời bình thường. Khởi động lại timesyncd khi mạng đã lên = bắt đầu lại từ máy chủ đầu;
+# máy đó không trả lời thì timesyncd tự chuyển sang máy dự phòng như cũ.
+# Phải CHỜ sau sự kiện "up" (đã thử trên máy ảo): khởi động lại ngay lúc đó thì lần hỏi đầu tiên vẫn hỏng và 30 giây
+# sau timesyncd lại nhảy sang máy kế; kiểm sau 8 giây thì nó còn đang "thử máy chủ đầu" nên chưa biết kết quả.
+# 45 giây: timesyncd đã chốt máy chủ, mạng đã thông hẳn.
+#   NetworkManager gọi: $1 = card mạng, $2 = sự kiện → hẹn 45 giây nữa chạy "check"
+#   90-depot-timesync - check   so máy chủ đang dùng với máy chủ đầu danh sách, khác thì khởi động lại timesyncd
+# File phải thuộc root, quyền 755 (hook 0961 đặt) — NetworkManager bỏ qua script người khác ghi được.
+SELF=/etc/NetworkManager/dispatcher.d/90-depot-timesync
+case "${2:-}" in
+    up)
+        systemd-run --quiet --no-block --collect --on-active=45 --unit=depot-timesync-first "$SELF" - check 2>/dev/null
+        exit 0 ;;
+    check) ;;
+    *) exit 0 ;;
+esac
+want=$(timedatectl show-timesync -p SystemNTPServers --value 2>/dev/null | cut -d' ' -f1)
+cur=$(timedatectl show-timesync -p ServerName --value 2>/dev/null)
+[ -n "$want" ] || exit 0
+[ "$cur" = "$want" ] && exit 0
+systemctl try-restart systemd-timesyncd.service
+exit 0

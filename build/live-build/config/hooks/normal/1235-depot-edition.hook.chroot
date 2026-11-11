@@ -1,0 +1,13 @@
+#!/bin/sh
+# Depot OS — phiên bản (depot-edition): chèn bước shellprocess@depotedition vào Calamares NGAY SAU
+# shellprocess@depotapps (hook 1230 chèn bước đó) — lúc này nguồn apt của hệ mới đã trỏ ra mạng.
+set -e
+S=/etc/calamares/settings.conf
+if ! grep -q 'shellprocess@depotedition' "$S"; then
+    grep -q '^  - shellprocess@depotapps$' "$S" || { echo "!! $S chưa có bước depotapps (hook 1230)"; exit 1; }
+    sed -i 's/^  - shellprocess@depotapps$/  - shellprocess@depotapps\n  - shellprocess@depotedition/' "$S"
+    sed -i '/^instances:/a - id: depotedition\n  module: shellprocess\n  config: shellprocess-depotedition.conf' "$S"
+fi
+# service tinh chỉnh chỉ bật khi depot-edition đặt bản Workstation
+systemctl disable depot-edition-tune.service >/dev/null 2>&1 || true
+echo ">> Depot edition: Calamares $(grep -A1 '^  - shellprocess@depotapps$' "$S" | tr -d ' \n')"

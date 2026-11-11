@@ -1,0 +1,6 @@
+# Depot OS — cắm thiết bị USB: 10 giây sau máy tự dò và cài driver (depot-drivers auto).
+# Hẹn bằng systemd-run với tên unit cố định: cắm nhiều thứ liền nhau (hub, dongle đổi chế độ) chỉ ra MỘT lượt —
+# lần hẹn thứ hai trùng tên nên bị từ chối. udev không được chạy việc dài trong RUN, systemd-run trả về ngay.
+# Bỏ qua hub (class 09). Lúc khởi động udev cũng phát "add" cho mọi USB: depot-drivers auto tự thoát khi máy chưa
+# boot xong, việc lúc khởi động do depot-drivers-auto.service làm. Tắt: depot-drivers auto-set off.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{bDeviceClass}!="09", RUN+="/usr/bin/systemd-run --quiet --no-block --collect --on-active=10 --timer-property=AccuracySec=1s --unit=depot-drivers-auto-plug /usr/bin/depot-drivers auto"

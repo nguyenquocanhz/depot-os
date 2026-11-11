@@ -1,0 +1,41 @@
+#!/bin/sh
+# Depot OS — chỉ chạy trong phiên live (USB): đặt icon "Cài Depot OS" và "Lưu dữ liệu trên USB" lên desktop,
+# đưa "Lưu dữ liệu trên USB" vào menu / Cài đặt, báo khi vùng lưu đang mở.
+# Trên hệ đã cài (không có /run/live/medium) thì tự thoát, không làm gì.
+test -d /run/live/medium || exit 0
+[ -n "$HOME" ] || exit 0
+# Thư mục desktop theo ngôn ngữ (tiếng Việt: "Màn hình nền"), không mặc định ~/Desktop.
+# Autostart xdg-user-dirs có thể chạy sau script này → tự tạo trước cho chắc.
+[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs" ] || xdg-user-dirs-update 2>/dev/null
+desk=$(xdg-user-dir DESKTOP 2>/dev/null)
+[ -n "$desk" ] && [ "$desk" != "$HOME" ] || desk="$HOME/Desktop"
+mkdir -p "$desk"
+
+put() {     # chép một launcher lên desktop và đánh dấu tin cậy
+    dst="$desk/$(basename "$1")"
+    cp "$1" "$dst" 2>/dev/null || return 0
+    chmod +x "$dst" 2>/dev/null
+    # xfdesktop 4.20 chỉ chạy launcher "tin cậy": đánh dấu checksum để không hỏi lại
+    if command -v gio >/dev/null; then
+        gio set -t string "$dst" metadata::trusted true 2>/dev/null
+        gio set -t string "$dst" metadata::xfce-exe-checksum "$(sha256sum "$dst" | cut -d' ' -f1)" 2>/dev/null
+    fi
+}
+
+put /usr/share/applications/depot-install.desktop
+
+# "Lưu dữ liệu trên USB" (depot-persist): bản trong /usr/share có NoDisplay=true để máy đã cài không thấy mục này;
+# phiên USB đặt bản hiện ra ở thư mục của user (đè bản hệ thống cùng tên) → có trong menu và Cài đặt > Hệ thống.
+if [ -f /usr/share/applications/depot-persist.desktop ]; then
+    apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$apps"
+    sed '/^NoDisplay=/d' /usr/share/applications/depot-persist.desktop > "$apps/depot-persist.desktop"
+    put "$apps/depot-persist.desktop"
+fi
+
+# vùng lưu đang mở (live-boot gắn ở /run/live/persistence/…): báo một câu để người dùng biết phiên này được giữ lại
+if grep -q ' /run/live/persistence/' /proc/mounts 2>/dev/null && command -v notify-send >/dev/null; then
+    (sleep 8; notify-send -a "Depot OS" -i drive-removable-media "Vùng lưu trên USB đang mở" \
+        "Tệp và cài đặt của phiên này được giữ lại cho lần boot sau." 2>/dev/null) &
+fi
+exit 0

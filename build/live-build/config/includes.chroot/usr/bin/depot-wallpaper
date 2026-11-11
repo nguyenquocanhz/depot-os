@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+# Depot OS — depot-wallpaper: "Hình nền" — album 5 hình nền Depot + ảnh của bạn, bấm là đổi ngay
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-wallpaper               mở album
+#   depot-wallpaper --set FILE    đặt hình nền (tên trong album cũng được: depot-bong-ma)
+#   depot-wallpaper --next        tấm kế tiếp trong album (gắn phím tắt được)
+#   depot-wallpaper --restore     đặt lại hình đã chọn — phiên i3 gọi lúc đăng nhập
+#   depot-wallpaper --list        in album
+#
+# XFCE:  ghi xfconf /backdrop/screen0/monitor<tên xrandr>/workspaceN (xfdesktop 4.20 lưu theo tên màn hình),
+#        mọi màn hình + mọi workspace; "Tự đổi hình" dùng chế độ đổi hình có sẵn của xfdesktop (đổi trong thư mục
+#        chứa hình đang chọn).
+# i3 / phiên khác: vẽ hình (kể cả SVG) ra PNG đúng độ phân giải màn hình ở ~/.cache/depot rồi gọi feh.
+# Album hệ thống: /usr/share/backgrounds/depot-os/album.list (scripts/gen-wallpapers.py sinh).
+# Ảnh của bạn: ~/.local/share/backgrounds/depot/ (nút "Thêm ảnh…" chép vào đây).
+# Lựa chọn lưu ở ~/.config/depot/wallpaper.conf. Thử: DEPOT_WP_DIR=/thư-mục-album
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+
+SYS_DIR = os.environ.get('DEPOT_WP_DIR', '/usr/share/backgrounds/depot-os')
+USER_DIR = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'backgrounds', 'depot')
+CONF = os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'), 'depot', 'wallpaper.conf')
+CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'depot')
+DEFAULT = 'wallpaper.svg'
+EXTS = ('.svg', '.png', '.jpg', '.jpeg', '.webp', '.bmp')
+TW, TH = 256, 144
+
+VI = (os.environ.get('LC_ALL') or os.environ.get('LC_MESSAGES') or os.environ.get('LANG') or 'vi').startswith('vi')
+
+
+def T(vi, en):
+    return vi if VI else en
+
+
+# ------------------------------------------------------------------ album + cấu hình
+def album():
+    """[(đường dẫn, tên hiển thị)] của album hệ thống, theo thứ tự album.list."""
+    out, seen = [], set()
+    try:
+        with open(os.path.join(SYS_DIR, 'album.list'), encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('|')
+                p = os.path.join(SYS_DIR, parts[0])
+                if os.path.isfile(p):
+                    name = parts[1] if len(parts) > 1 else parts[0]
+                    if not VI and len(parts) > 2:
+                        name = parts[2]
+                    out.append((p, name))
+                    seen.add(parts[0])
+    except OSError:
+        pass
+    # hình khác đặt thêm vào thư mục hệ thống (không có trong album.list) vẫn hiện
+    try:
+        for n in sorted(os.listdir(SYS_DIR)):
+            if n not in seen and n.lower().endswith(EXTS) and n != 'wallpaper.png':
+                out.append((os.path.join(SYS_DIR, n), os.path.splitext(n)[0]))
+    except OSError:
+        pass
+    return out
+
+
+def user_images():
+    try:
+        return [(os.path.join(USER_DIR, n), os.path.splitext(n)[0])
+                for n in sorted(os.listdir(USER_DIR)) if n.lower().endswith(EXTS)]
+    except OSError:
+        return []
+
+
+def load_conf():
+    c = {'image': '', 'cycle': '0', 'minutes': '30'}
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            for line in f:
+                k, s, v = line.strip().partition('=')
+                if s and k in c:
+                    c[k] = v
+    except OSError:
+        pass
+    return c
+
+
+def save_conf(c):
+    os.makedirs(os.path.dirname(CONF), exist_ok=True)
+    with open(CONF + '.tmp', 'w', encoding='utf-8') as f:
+        f.write('# do depot-wallpaper ghi — đổi bằng "Hình nền"\n')
+        for k in ('image', 'cycle', 'minutes'):
+            f.write('%s=%s\n' % (k, c[k]))
+    os.replace(CONF + '.tmp', CONF)
+
+
+def resolve(arg):
+    """Đường dẫn file, hoặc tên trong album (có/không đuôi)."""
+    if os.path.isfile(arg):
+        return os.path.abspath(arg)
+    for p, _ in album() + user_images():
+        base = os.path.basename(p)
+        if arg in (base, os.path.splitext(base)[0]):
+            return p
+    return None
+
+
+def current(conf=None):
+    conf = conf or load_conf()
+    if conf['image'] and os.path.isfile(conf['image']):
+        return conf['image']
+    p = os.path.join(SYS_DIR, DEFAULT)
+    return p if os.path.isfile(p) else (album() or [(None, '')])[0][0]
+
+
+# ------------------------------------------------------------------ đặt hình nền
+def run(cmd, timeout=20):
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+        return r.returncode, r.stdout.decode('utf-8', 'replace')
+    except (OSError, subprocess.TimeoutExpired):
+        return 127, ''
+
+
+def is_xfce():
+    if 'XFCE' not in os.environ.get('XDG_CURRENT_DESKTOP', '').upper():
+        return False
+    return shutil.which('xfconf-query') is not None
+
+
+def monitors():
+    rc, out = run(['xrandr', '--listmonitors'])
+    names = [line.split()[-1] for line in out.splitlines()[1:] if line.split()]
+    if not names:                                     # không có xrandr: hỏi GDK (trên X11 "model" là tên cổng ra)
+        try:
+            import gi
+            gi.require_version('Gdk', '3.0')
+            from gi.repository import Gdk
+            if not Gdk.init_check([])[0]:             # Gdk.init() tự thoát chương trình khi không mở được màn hình
+                return []
+            d = Gdk.Display.get_default()
+            names = [m for m in (d.get_monitor(i).get_model() for i in range(d.get_n_monitors())) if m]
+        except Exception:                             # noqa: BLE001
+            names = []
+    return names
+
+
+def screen_size():
+    rc, out = run(['xrandr', '--current'])
+    for line in out.splitlines():
+        if ' current ' in line:                      # "Screen 0: minimum …, current 1920 x 1080, maximum …"
+            try:
+                seg = line.split(' current ')[1].split(',')[0].split()
+                return int(seg[0]), int(seg[2])
+            except (IndexError, ValueError):
+                break
+    return 1920, 1080
+
+
+def xf(prop, typ, val):
+    return run(['xfconf-query', '-c', 'xfce4-desktop', '-p', prop, '-n', '-t', typ, '-s', str(val)])[0]
+
+
+def apply_xfce(path, conf):
+    mons = set(monitors())
+    rc, out = run(['xfconf-query', '-c', 'xfce4-desktop', '-l'])
+    for line in out.splitlines():                     # màn hình xfdesktop đã từng thấy (đang rút cáp vẫn đổi theo)
+        parts = line.strip().split('/')
+        if len(parts) > 4 and parts[1] == 'backdrop' and parts[3].startswith('monitor') and parts[4].startswith('workspace'):
+            mons.add(parts[3][len('monitor'):])
+    if not mons:
+        return T('Không thấy màn hình nào (xrandr).', 'No monitor found (xrandr).')
+    rc, out = run(['xfconf-query', '-c', 'xfwm4', '-p', '/general/workspace_count'])
+    try:
+        nws = max(1, min(int(out.strip()), 12))
+    except ValueError:
+        nws = 4
+    cycle = conf['cycle'] == '1'
+    try:
+        minutes = max(1, min(int(conf['minutes']), 1440))
+    except ValueError:
+        minutes = 30
+    err = 0
+    for m in sorted(mons):
+        for ws in range(nws):
+            base = '/backdrop/screen0/monitor%s/workspace%d' % (m, ws)
+            err |= xf(base + '/last-image', 'string', path)
+            xf(base + '/image-style', 'int', 5)        # 5 = phóng vừa khít màn hình
+            xf(base + '/backdrop-cycle-enable', 'bool', 'true' if cycle else 'false')
+            if cycle:
+                xf(base + '/backdrop-cycle-period', 'int', 1)      # 1 = phút
+                xf(base + '/backdrop-cycle-timer', 'uint', minutes)
+                xf(base + '/backdrop-cycle-random-order', 'bool', 'false')
+    return T('Không ghi được cài đặt hình nền (xfconf).', 'Could not write wallpaper settings (xfconf).') if err else None
+
+
+def render_png(path):
+    """Hình bất kỳ → PNG phủ kín màn hình, lưu cache theo (file, mtime, độ phân giải)."""
+    w, h = screen_size()
+    st = os.stat(path)
+    key = hashlib.sha1(('%s|%d|%d|%dx%d' % (path, st.st_mtime_ns, st.st_size, w, h)).encode()).hexdigest()[:16]
+    out = os.path.join(CACHE, 'wallpaper-%s.png' % key)
+    if os.path.isfile(out):
+        return out
+    import gi
+    gi.require_version('GdkPixbuf', '2.0')
+    from gi.repository import GdkPixbuf
+    os.makedirs(CACHE, exist_ok=True)
+    for old in os.listdir(CACHE):                     # chỉ giữ bản mới nhất
+        if old.startswith('wallpaper-') and old.endswith('.png'):
+            try:
+                os.unlink(os.path.join(CACHE, old))
+            except OSError:
+                pass
+    cover(GdkPixbuf, path, w, h).savev(out, 'png', ['compression'], ['3'])
+    return out
+
+
+def cover(GdkPixbuf, path, w, h):
+    """Đọc hình, phóng cho phủ kín w×h rồi cắt giữa."""
+    info = GdkPixbuf.Pixbuf.get_file_info(path)
+    iw, ih = (info[1], info[2]) if info and info[0] else (w, h)
+    s = max(w / max(iw, 1), h / max(ih, 1))
+    sw, sh = max(w, int(iw * s + 0.999)), max(h, int(ih * s + 0.999))
+    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, sw, sh, False)
+    return pb.new_subpixbuf((pb.get_width() - w) // 2, (pb.get_height() - h) // 2, w, h)
+
+
+def apply_feh(path):
+    if not shutil.which('feh'):
+        return T('Thiếu feh để đặt hình nền ở phiên này.', 'feh is needed to set the wallpaper in this session.')
+    try:
+        png = render_png(path)
+    except Exception as e:                            # noqa: BLE001 — file hỏng, thiếu GdkPixbuf…
+        png = path
+        sys.stderr.write('depot-wallpaper: không vẽ lại được (%s), đưa thẳng cho feh\n' % e)
+    rc, _ = run(['feh', '--no-fehbg', '--bg-fill', png])
+    return None if rc == 0 else T('feh không đặt được hình nền.', 'feh could not set the wallpaper.')
+
+
+def apply(path, conf=None, save=True):
+    conf = conf or load_conf()
+    if not path or not os.path.isfile(path):
+        return T('Không thấy file hình: %s', 'Image not found: %s') % path
+    err = apply_xfce(path, conf) if is_xfce() else apply_feh(path)
+    if not err and save:
+        conf['image'] = path
+        save_conf(conf)
+    return err
+
+
+# ------------------------------------------------------------------ cửa sổ album
+def gui():
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('GdkPixbuf', '2.0')
+    from gi.repository import GdkPixbuf, GLib, Gtk, Pango
+
+    conf = load_conf()
+    xfce = is_xfce()
+
+    win = Gtk.Window(title=T('Hình nền', 'Wallpaper'))
+    win.set_default_size(900, 640)
+    win.set_icon_name('preferences-desktop-wallpaper')
+    win.connect('destroy', Gtk.main_quit)
+    root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    win.add(root)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    root.pack_start(scroll, True, True, 0)
+    inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    inner.set_border_width(18)
+    scroll.add(inner)
+
+    boxes = []
+    pending = []          # (Gtk.Image, đường dẫn) chờ vẽ ảnh thu nhỏ
+
+    def heading(text):
+        lb = Gtk.Label(xalign=0)
+        lb.set_markup('<b>%s</b>' % GLib.markup_escape_text(text))
+        lb.set_margin_top(6)
+        inner.pack_start(lb, False, False, 0)
+
+    def flow():
+        fb = Gtk.FlowBox()
+        fb.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        fb.set_activate_on_single_click(True)
+        fb.set_homogeneous(True)
+        fb.set_min_children_per_line(2)
+        fb.set_max_children_per_line(6)
+        fb.set_row_spacing(10)
+        fb.set_column_spacing(10)
+        fb.set_valign(Gtk.Align.START)
+        inner.pack_start(fb, False, False, 0)
+        boxes.append(fb)
+        return fb
+
+    def tile(fb, path, name):
+        img = Gtk.Image()
+        img.set_size_request(TW, TH)
+        lb = Gtk.Label(label=name)
+        lb.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        lb.set_max_width_chars(24)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        v.set_border_width(6)
+        v.pack_start(img, False, False, 0)
+        v.pack_start(lb, False, False, 0)
+        child = Gtk.FlowBoxChild()
+        child.add(v)
+        child.path = path
+        child.set_tooltip_text(path)
+        fb.add(child)
+        pending.append((img, path))
+        return child
+
+    def load_thumbs():
+        if not pending:
+            return False
+        img, path = pending.pop(0)
+        try:
+            img.set_from_pixbuf(cover(GdkPixbuf, path, TW, TH))
+        except Exception:                             # noqa: BLE001
+            img.set_from_icon_name('image-missing', Gtk.IconSize.DIALOG)
+        return True
+
+    def select_current():
+        cur = current(conf)
+        for fb in boxes:
+            fb.unselect_all()
+            for ch in fb.get_children():
+                if ch.path == cur:
+                    fb.select_child(ch)
+
+    def message(text):
+        d = Gtk.MessageDialog(transient_for=win, modal=True, message_type=Gtk.MessageType.ERROR,
+                              buttons=Gtk.ButtonsType.CLOSE, text=text)
+        d.run()
+        d.destroy()
+
+    def on_activate(fb, child):
+        for other in boxes:
+            if other is not fb:
+                other.unselect_all()
+        err = apply(child.path, conf)
+        if err:
+            message(err)
+            select_current()
+
+    heading(T('Album Depot', 'Depot album'))
+    sys_flow = flow()
+    for p, n in album():
+        tile(sys_flow, p, n)
+    sys_flow.connect('child-activated', on_activate)
+
+    heading(T('Ảnh của bạn', 'Your pictures'))
+    user_flow = flow()
+    empty = Gtk.Label(xalign=0)
+    empty.set_markup('<span alpha="60%%">%s</span>' % T('Chưa có ảnh nào. Bấm “Thêm ảnh…” để đưa ảnh của bạn vào album.',
+                                                      'Nothing here yet. Click “Add pictures…” to add your own.'))
+    inner.pack_start(empty, False, False, 0)
+    user_flow.connect('child-activated', on_activate)
+
+    def fill_user():
+        for ch in user_flow.get_children():
+            user_flow.remove(ch)
+        imgs = user_images()
+        for p, n in imgs:
+            tile(user_flow, p, n)
+        empty.set_visible(not imgs)
+        user_flow.show_all()
+        select_current()
+        GLib.idle_add(load_thumbs)
+
+    def on_add(_b):
+        dlg = Gtk.FileChooserDialog(title=T('Chọn ảnh làm hình nền', 'Choose pictures'), transient_for=win,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(T('Huỷ', 'Cancel'), Gtk.ResponseType.CANCEL, T('Thêm', 'Add'), Gtk.ResponseType.OK)
+        dlg.set_select_multiple(True)
+        flt = Gtk.FileFilter()
+        flt.set_name(T('Hình ảnh', 'Images'))
+        for e in EXTS:
+            flt.add_pattern('*' + e)
+            flt.add_pattern('*' + e.upper())
+        dlg.add_filter(flt)
+        rc, pics = run(['xdg-user-dir', 'PICTURES'])
+        if pics.strip() and os.path.isdir(pics.strip()):
+            dlg.set_current_folder(pics.strip())
+        files = dlg.get_filenames() if dlg.run() == Gtk.ResponseType.OK else []
+        dlg.destroy()
+        last = None
+        os.makedirs(USER_DIR, exist_ok=True)
+        for src in files:
+            dst = os.path.join(USER_DIR, os.path.basename(src))
+            try:
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    shutil.copyfile(src, dst)
+                last = dst
+            except OSError as e:
+                message(T('Không chép được %s: %s', 'Could not copy %s: %s') % (src, e))
+        if last:
+            err = apply(last, conf)
+            if err:
+                message(err)
+        fill_user()
+
+    def on_remove(_b):
+        sel = user_flow.get_selected_children()
+        if not sel:
+            return
+        path = sel[0].path
+        try:
+            os.unlink(path)
+        except OSError as e:
+            message(str(e))
+            return
+        if conf['image'] == path:                    # đang dùng tấm vừa xoá: về tấm mặc định
+            apply(os.path.join(SYS_DIR, DEFAULT), conf)
+        fill_user()
+
+    # ---- thanh dưới
+    bar = Gtk.Box(spacing=10)
+    bar.set_border_width(12)
+    root.pack_start(Gtk.Separator(), False, False, 0)
+    root.pack_start(bar, False, False, 0)
+    add = Gtk.Button(label=T('Thêm ảnh…', 'Add pictures…'))
+    add.connect('clicked', on_add)
+    bar.pack_start(add, False, False, 0)
+    rem = Gtk.Button(label=T('Xoá ảnh đang chọn', 'Remove selected'))
+    rem.set_tooltip_text(T('Chỉ xoá được ảnh ở mục “Ảnh của bạn”', 'Only pictures under “Your pictures” can be removed'))
+    rem.connect('clicked', on_remove)
+    rem.set_sensitive(False)
+    bar.pack_start(rem, False, False, 0)
+    user_flow.connect('selected-children-changed', lambda fb: rem.set_sensitive(bool(fb.get_selected_children())))
+
+    close = Gtk.Button(label=T('Đóng', 'Close'))
+    close.connect('clicked', lambda _b: win.destroy())
+    bar.pack_end(close, False, False, 0)
+    unit = Gtk.Label(label=T('phút', 'min'))
+    bar.pack_end(unit, False, False, 0)
+    try:
+        minutes = max(1, min(int(conf['minutes']), 1440))
+    except ValueError:
+        minutes = 30
+    spin = Gtk.SpinButton.new_with_range(1, 1440, 1)
+    spin.set_value(minutes)
+    bar.pack_end(spin, False, False, 0)
+    cyc = Gtk.CheckButton(label=T('Tự đổi hình sau mỗi', 'Change picture every'))
+    cyc.set_active(conf['cycle'] == '1')
+    bar.pack_end(cyc, False, False, 0)
+    if not xfce:
+        for wdg in (cyc, spin, unit):
+            wdg.set_sensitive(False)
+            wdg.set_tooltip_text(T('Tự đổi hình chỉ có ở phiên XFCE. Phiên i3: gắn phím cho “depot-wallpaper --next”.',
+                                   'Slideshow needs the XFCE session. In i3, bind a key to “depot-wallpaper --next”.'))
+    else:
+        cyc.set_tooltip_text(T('Lần lượt đổi qua các hình cùng thư mục với hình đang chọn',
+                               'Cycles through the pictures in the same folder as the selected one'))
+
+    def on_cycle(*_a):
+        conf['cycle'] = '1' if cyc.get_active() else '0'
+        conf['minutes'] = str(int(spin.get_value()))
+        spin.set_sensitive(cyc.get_active())
+        err = apply(current(conf), conf)
+        if err:
+            message(err)
+
+    spin.set_sensitive(xfce and cyc.get_active())
+    cyc.connect('toggled', on_cycle)
+    spin.connect('value-changed', lambda s: cyc.get_active() and on_cycle())
+
+    win.show_all()
+    fill_user()
+    Gtk.main()
+
+
+def main(argv):
+    if not argv:
+        return gui()
+    cmd = argv[0]
+    if cmd == '--list':
+        cur = current()
+        for p, n in album() + user_images():
+            print('%s %s\t%s' % ('*' if p == cur else ' ', n, p))
+        return 0
+    if cmd == '--restore':
+        err = apply(current(), save=False)
+        if err and not is_xfce() and shutil.which('xsetroot'):
+            run(['xsetroot', '-solid', '#0f1420'])    # không đặt được hình: ít nhất không để nền xám của X
+    elif cmd == '--next':
+        items = [p for p, _ in album() + user_images()]
+        if not items:
+            return 1
+        cur = current()
+        err = apply(items[(items.index(cur) + 1) % len(items)] if cur in items else items[0])
+    elif cmd == '--set' and len(argv) > 1:
+        p = resolve(argv[1])
+        err = apply(p) if p else T('Không thấy hình: %s', 'Image not found: %s') % argv[1]
+    else:
+        sys.stderr.write('dùng: depot-wallpaper [--set FILE|TÊN | --next | --restore | --list]\n')
+        return 2
+    if err:
+        sys.stderr.write('depot-wallpaper: %s\n' % err)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]) or 0)

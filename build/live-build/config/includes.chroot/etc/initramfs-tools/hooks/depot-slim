@@ -1,0 +1,50 @@
+#!/bin/sh
+# Depot OS — initramfs gọn: bỏ driver + firmware không cần để mở ổ đĩa và hiện màn boot.
+# MODULES=most và hook plymouth (chép mọi driver đồ hoạ) kéo theo firmware của chúng: initramfs v0.15 giải nén ra
+# ~300 MB (nén 134 MB), trong đó firmware card AMD đời mới 78 MB, NVIDIA 62 MB, card mạng máy chủ ~35 MB.
+# Máy cũ đọc USB 2.0 ~25 MB/s nên riêng việc nạp initrd đã mất vài giây.
+# Bỏ CẢ driver lẫn firmware (không bỏ mỗi firmware): driver không còn trong initramfs thì udev nạp nó
+# sau khi vào hệ thống thật, lúc đó firmware đầy đủ trong /usr/lib/firmware — máy vẫn chạy, chỉ mất splash sớm
+# (máy AMD/NVIDIA đời mới: màn boot hiện bằng simpledrm/efifb rồi mới đổi sang driver thật).
+# Giữ: i915 (máy đích Intel HD 3000 + Intel đời mới), radeon (card AMD cũ, firmware nhỏ), driver ổ đĩa/USB/mạng thường.
+PREREQ="plymouth"
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+K="${DESTDIR}/usr/lib/modules/${version}/kernel"
+FW="${DESTDIR}/usr/lib/firmware"
+[ -d "$K" ] || exit 0
+before=$(du -sk "$DESTDIR" | cut -f1)
+
+# driver đồ hoạ cần firmware lớn: AMD đời mới (amdgpu), NVIDIA (nouveau), Intel Xe2+ (xe).
+# Hook plymouth chỉ XẾP HÀNG chúng (manual_add_modules → file $__MODULES_TO_ADD); mkinitramfs chép hàng đợi
+# SAU khi mọi hook chạy xong, kèm firmware → phải gỡ khỏi hàng đợi, xoá file lúc này không đủ.
+# Hook live-boot xếp CẢ THƯ MỤC "=drivers/net/ethernet" (netboot) → thay bằng từng driver trong đó trừ nhóm máy chủ.
+# Còn lại firmware amdgpu/bonaire_*… là của radeon (card AMD cũ) — giữ có chủ đích.
+SERVER_NIC='/(netronome|cavium|chelsio|broadcom/bnx2x|broadcom/bnxt|qlogic|mellanox|sfc|intel/ice|intel/idpf)/'
+Q=${__MODULES_TO_ADD:-}
+if [ -n "$Q" ] && [ -f "$Q" ]; then
+    sed -i -E '/^(amdgpu|amdxcp|nouveau|xe)$/d' "$Q"
+    if grep -qx '=drivers/net/ethernet' "$Q"; then
+        sed -i '\|^=drivers/net/ethernet$|d' "$Q"
+        find "${MODULESDIR:-/usr/lib/modules/${version}}/kernel/drivers/net/ethernet" -name '*.ko*' |
+            grep -vE "$SERVER_NIC" | sed 's|.*/||; s|\.ko.*$||' >> "$Q"
+    fi
+fi
+for d in gpu/drm/amd gpu/drm/nouveau gpu/drm/xe; do rm -rf "$K/drivers/$d"; done
+rm -rf "$FW/amdgpu" "$FW/nvidia" "$FW/xe"
+
+# card mạng máy chủ / trung tâm dữ liệu (10–100 Gb): không có trên laptop, PC văn phòng
+for d in netronome cavium chelsio broadcom/bnx2x broadcom/bnxt qlogic mellanox sfc intel/ice intel/idpf; do
+    rm -rf "$K/drivers/net/ethernet/$d"
+done
+rm -rf "$K/drivers/infiniband"
+# iSCSI/FCoE offload chạy trên chính các card máy chủ đó (thiếu driver card thì nạp cũng hỏng)
+for d in cxgbi qedf qedi bnx2fc bnx2i; do rm -rf "$K/drivers/scsi/$d"; done
+rm -rf "$FW/netronome" "$FW/liquidio" "$FW/cxgb4" "$FW/bnx2x" "$FW/qed" "$FW/phanfw.bin" \
+       "$FW/intel/ice" "$FW/mellanox" "$FW/sfc" "$FW/bnxt"
+
+after=$(du -sk "$DESTDIR" | cut -f1)
+[ "${verbose}" = "y" ] && echo "depot-slim: initramfs $((before / 1024)) MB -> $((after / 1024)) MB (chưa nén)"
+exit 0

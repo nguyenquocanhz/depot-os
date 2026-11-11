@@ -1,0 +1,16 @@
+[Unit]
+Description=Depot OS: giờ phần cứng theo giờ địa phương khi máy có Windows
+Documentation=file:///usr/bin/depot-rtc
+DefaultDependencies=no
+# live-config đặt múi giờ (timezone=) và ghi /etc/adjtime trước; timesyncd phải đọc adjtime SAU khi đã đổi
+After=local-fs.target live-config.service
+Before=systemd-timesyncd.service time-sync.target basic.target
+# máy đã cài chỉ dò một lần (Calamares tạo sẵn dấu này); chạy tay `sudo depot-rtc` nếu cài Windows sau
+ConditionPathExists=!/var/lib/depot/rtc-checked
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-rtc
+
+[Install]
+WantedBy=basic.target

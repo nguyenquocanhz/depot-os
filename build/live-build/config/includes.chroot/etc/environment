@@ -1,0 +1,10 @@
+# Depot OS — bộ gõ tiếng Việt (fcitx5 + Unikey)
+# Ba biến này đặt sẵn cho MỌI phiên (XFCE, i3, app chạy từ systemd) để ứng dụng nói chuyện với fcitx5.
+# Hệ quả phải nhớ: im-config của Debian (Xsession.d/70im-config_launch + im-launch) thấy biến đã có thì coi là
+# "người dùng tự cấu hình", bỏ qua luôn bước KHỞI ĐỘNG fcitx5. Vì vậy Depot tự chạy fcitx5:
+#   XFCE: /etc/xdg/autostart/depot-fcitx5.desktop      i3: dòng "exec fcitx5" trong ~/.config/i3/config
+# (Tới ISO v0.23.1 thiếu mục autostart đó: đăng nhập xong bộ gõ không chạy, Ctrl+Space không có tác dụng cho tới khi
+# mở Unikey / chạy fcitx5 bằng tay — boot thử VMware 11/11/2026 mới thấy.)
+GTK_IM_MODULE=fcitx
+QT_IM_MODULE=fcitx
+XMODIFIERS=@im=fcitx

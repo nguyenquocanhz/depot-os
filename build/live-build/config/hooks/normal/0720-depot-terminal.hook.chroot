@@ -1,0 +1,15 @@
+#!/bin/sh
+# Depot OS — Terminal: xfce4-terminal là terminal mặc định (trước đó ISO chỉ có xterm: Ctrl+Alt+T và
+# Super+Enter gọi xfce4-terminal không có, dock rơi về lxterm/xterm). Cấu hình giao diện: dotfiles xfce4-terminal.xml.
+# ~/.bashrc của người dùng mới (skel) gọi /usr/share/depot-os/bash/depot.bashrc: dấu nhắc ❯ + lời chào fastfetch.
+set -e
+command -v xfce4-terminal >/dev/null || { echo "!! thiếu xfce4-terminal (package list)"; exit 1; }
+update-alternatives --set x-terminal-emulator /usr/bin/xfce4-terminal.wrapper
+if ! grep -q 'depot-os/bash/depot.bashrc' /etc/skel/.bashrc; then
+    cat >> /etc/skel/.bashrc <<'EOF'
+
+# Depot OS: dấu nhắc ❯ + lời chào fastfetch (tắt lời chào: touch ~/.config/depot/no-fetch)
+[ -r /usr/share/depot-os/bash/depot.bashrc ] && . /usr/share/depot-os/bash/depot.bashrc
+EOF
+fi
+echo ">> Depot terminal: $(readlink -f /etc/alternatives/x-terminal-emulator)"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Depot OS — Boot Diag (xem /usr/bin/depot-bootdiag): chẩn đoán main, CPU nâng cấp được.
+# Bật depot-bootdiag.service (chỉ chạy khi có tham số kernel depot.bootdiag — mục boot "Chẩn đoán phần cứng"
+# do hook 1321-depot-bootdiag-menu.hook.binary thêm).
+set -e
+
+chmod 755 /usr/bin/depot-bootdiag
+chmod 644 /usr/lib/systemd/system/depot-bootdiag.service /usr/share/applications/depot-bootdiag.desktop   # chép từ Windows hay mang bit exec
+systemctl enable depot-bootdiag.service
+
+for c in dmidecode lspci iconv less lsblk; do
+    command -v "$c" >/dev/null || { echo "!! Boot Diag: thiếu lệnh $c"; exit 1; }
+done
+echo ">> Depot bootdiag: service $(systemctl is-enabled depot-bootdiag.service), dmidecode $(dmidecode --version)"

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Depot OS — cài app lúc cài đặt + cập nhật kiểu Windows (xem /usr/bin/depot-install-apps, /usr/bin/depot-update):
+# 1) bật depot-update.timer (tải ngầm mỗi ngày) và depot-offline-update.service (system-update.target)
+#    — cả hai tự đứng yên trong phiên live (ConditionPathExists=!/run/live/medium / không có /system-update)
+# 2) chèn bước shellprocess@depotapps vào Calamares NGAY SAU sources-final: trước đó nguồn apt của hệ thống mới
+#    chỉ trỏ vào USB (sources-media), apt không tải được gì từ mạng
+set -e
+
+systemctl enable depot-update.timer depot-offline-update.service
+
+S=/etc/calamares/settings.conf
+if ! grep -q 'shellprocess@depotapps' "$S"; then
+    grep -q '^  - sources-final$' "$S" || { echo "!! $S không có bước sources-final: kiểm lại sau khi nâng Calamares"; exit 1; }
+    sed -i 's/^  - sources-final$/  - sources-final\n  - shellprocess@depotapps/' "$S"
+    if grep -q '^instances:' "$S"; then
+        sed -i '/^instances:/a - id: depotapps\n  module: shellprocess\n  config: shellprocess-depotapps.conf' "$S"
+    else
+        sed -i '/^sequence:/i instances:\n- id: depotapps\n  module: shellprocess\n  config: shellprocess-depotapps.conf\n' "$S"
+    fi
+fi
+
+echo ">> Depot update: timer $(systemctl is-enabled depot-update.timer), offline $(systemctl is-enabled depot-offline-update.service), Calamares: $(grep -A1 '^  - sources-final$' "$S" | tr -d ' \n')"

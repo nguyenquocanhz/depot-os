@@ -1,0 +1,6 @@
+[Desktop Entry]
+# Depot OS: ẩn khỏi menu — dùng Terminal (xfce4-terminal). Gói xterm vẫn còn (i3-wm kéo theo).
+Type=Application
+Name=XTerm
+Exec=xterm
+NoDisplay=true

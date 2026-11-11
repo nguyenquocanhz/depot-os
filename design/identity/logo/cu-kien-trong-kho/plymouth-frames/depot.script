@@ -1,0 +1,186 @@
+// =============================================================
+// Depot OS — boot animation từ video (plymouth script)
+// FILE SINH RA từ scripts/plymouth/depot.script.in bởi scripts/video-to-plymouth.sh — sửa file .in, đừng sửa bản sinh.
+// Chạy khung hình frame-000.png… một lượt, rồi lặp đoạn từ khung LOOP tới hết; dưới là thanh tiến trình mảnh
+// kiểu macOS (lúc boot), màn chờ cập nhật có % (chế độ updates), hộp nhập mật khẩu (ổ mã hoá LUKS), dòng thông báo.
+// LƯU Ý: ngôn ngữ script của Plymouth KHÔNG phải JS — tránh hex literal, ternary (?:) và escape \u.
+// =============================================================
+
+FRAMES = 85;     // số khung hình
+LOOP = 45;         // khung bắt đầu đoạn lặp (= FRAMES: dừng ở khung cuối)
+FPS = 25;           // khung hình/giây của video; script plugin gọi refresh 50 lần/giây
+BG_R = 14 / 255.0; BG_G = 18 / 255.0; BG_B = 31 / 255.0;   // = màu góc video, nền liền mạch
+
+Window.SetBackgroundTopColor(BG_R, BG_G, BG_B);
+Window.SetBackgroundBottomColor(BG_R, BG_G, BG_B);
+W = Window.GetWidth();     // GetMaxWidth() trả NULL ở Plymouth 24 (Debian 13)
+H = Window.GetHeight();
+
+fun pad3(n) {
+    if (n < 10) {
+        return "00" + n;
+    }
+    if (n < 100) {
+        return "0" + n;
+    }
+    return "" + n;
+}
+
+// ---- khung hình (nạp hết một lần: vài chục ảnh nhỏ, đổi ảnh mỗi khung chỉ là SetImage)
+for (i = 0; i < FRAMES; i++) {
+    frames[i] = Image("frame-" + pad3(i) + ".png");
+}
+AW = frames[0].GetWidth();
+AH = frames[0].GetHeight();
+anim.x = Math.Int(W / 2 - AW / 2);
+anim.y = Math.Int(H / 2 - AH / 2 - 20);
+anim.sprite = Sprite(frames[0]);
+anim.sprite.SetPosition(anim.x, anim.y, 1);
+anim.cur = 0;
+
+// ---- thanh tiến trình mảnh (bar.png là ô trắng, kéo giãn theo bề rộng)
+BAR_W = 200;
+BAR_H = 4;
+bar.y = anim.y + AH + 36;
+bar.x = Math.Int(W / 2 - BAR_W / 2);
+bar.white = Image("bar.png");
+bar.track = Sprite(bar.white.Scale(BAR_W, BAR_H));
+bar.track.SetPosition(bar.x, bar.y, 2);
+bar.track.SetOpacity(0.18);
+bar.fill = Sprite(bar.white.Scale(1, BAR_H));
+bar.fill.SetPosition(bar.x, bar.y, 3);
+bar.fill.SetOpacity(0.0);
+bar.target = 0.0;      // tiến trình Plymouth báo
+bar.shown = 0.0;       // tiến trình đang vẽ: đuổi theo target, không bao giờ lùi
+bar.px = 0;
+// boot: thanh theo tiến trình boot · updates/system-upgrade (depot-update cài bản cập nhật lúc khởi động lại):
+// thanh theo % cài + chữ "Đang cập nhật" · tắt máy / khởi động lại: chỉ chạy animation
+MODE = Plymouth.GetMode();
+UPDATING = 0;
+if (MODE == "updates" || MODE == "system-upgrade") {
+    UPDATING = 1;
+}
+if (MODE == "boot" || UPDATING) {
+    bar.visible = 1;
+} else {
+    bar.visible = 0;
+    bar.track.SetOpacity(0.0);
+}
+
+// ---- dòng thông báo (fsck, lỗi…) ở đáy màn hình
+msg.sprite = Sprite();
+msg.sprite.SetPosition(0, H - 80, 4);
+
+// ---- hộp hỏi mật khẩu / câu hỏi
+ask.prompt = Sprite();
+ask.entry = Sprite();
+ask.y = bar.y + 40;
+// gạch chân ô nhập: ô trống vẫn thấy chỗ gõ
+ask.line = Sprite(bar.white.Scale(180, 1));
+ask.line.SetPosition(Math.Int(W / 2 - 90), ask.y + 56, 5);
+ask.line.SetOpacity(0.0);
+
+fun center_text(sprite, text, y, r, g, b) {
+    img = Image.Text(text, r, g, b);
+    sprite.SetImage(img);
+    sprite.SetPosition(Math.Int(W / 2 - img.GetWidth() / 2), y, 5);
+    sprite.SetOpacity(1.0);
+}
+
+// ---- màn chờ cập nhật: tiêu đề + % + dặn đừng tắt máy (chỗ của hộp mật khẩu, lúc này không dùng)
+upd.title = Sprite();
+upd.pct = Sprite();
+upd.note = Sprite();
+upd.last = -1;
+if (UPDATING) {
+    center_text(upd.title, "Đang cập nhật Depot OS", ask.y, 0.92, 0.94, 0.98);
+    center_text(upd.pct, "0%", ask.y + 30, 0.66, 0.75, 0.9);
+    center_text(upd.note, "Đừng tắt máy. Xong máy sẽ tự khởi động lại.", ask.y + 60, 0.56, 0.64, 0.78);
+}
+
+tick = 0;
+Plymouth.SetRefreshFunction(fun() {
+    tick++;
+    f = Math.Int(tick * FPS / 50);
+    if (f >= FRAMES) {
+        if (LOOP < FRAMES) {
+            f = LOOP + (f - LOOP) % (FRAMES - LOOP);
+        } else {
+            f = FRAMES - 1;
+        }
+    }
+    if (f != anim.cur) {
+        anim.sprite.SetImage(frames[f]);
+        anim.cur = f;
+    }
+
+    if (bar.visible) {
+        if (bar.target > bar.shown) {
+            bar.shown = bar.shown + (bar.target - bar.shown) * 0.08;
+        }
+        px = Math.Int(BAR_W * bar.shown);
+        if (px != bar.px && px > 0) {
+            bar.px = px;
+            bar.fill.SetImage(bar.white.Scale(px, BAR_H));
+            bar.fill.SetOpacity(0.9);
+        }
+    }
+});
+
+Plymouth.SetBootProgressFunction(fun(duration, progress) {
+    if (!UPDATING) {
+        bar.target = progress;
+    }
+});
+
+// `plymouth system-update --progress=N` (0–100) từ depot-update lúc cài bản cập nhật
+Plymouth.SetSystemUpdateFunction(fun(progress) {
+    bar.target = progress / 100;
+    if (UPDATING && progress != upd.last) {
+        upd.last = progress;
+        center_text(upd.pct, progress + "%", ask.y + 30, 0.66, 0.75, 0.9);
+    }
+});
+
+Plymouth.SetDisplayMessageFunction(fun(text) {
+    center_text(msg.sprite, text, H - 80, 0.75, 0.8, 0.9);
+});
+
+Plymouth.SetHideMessageFunction(fun(text) {
+    msg.sprite.SetOpacity(0.0);
+});
+
+Plymouth.SetDisplayPasswordFunction(fun(prompt, bullets) {
+    center_text(ask.prompt, prompt, ask.y, 0.92, 0.94, 0.98);
+    dots = "";
+    for (i = 0; i < bullets; i++) {
+        dots = dots + "● ";
+    }
+    if (dots == "") {
+        dots = " ";
+    }
+    center_text(ask.entry, dots, ask.y + 30, 0.92, 0.94, 0.98);
+    ask.line.SetOpacity(0.45);
+});
+
+Plymouth.SetDisplayQuestionFunction(fun(prompt, entry) {
+    center_text(ask.prompt, prompt, ask.y, 0.92, 0.94, 0.98);
+    if (entry == "") {
+        entry = " ";
+    }
+    center_text(ask.entry, entry, ask.y + 30, 0.92, 0.94, 0.98);
+    ask.line.SetOpacity(0.45);
+});
+
+Plymouth.SetDisplayNormalFunction(fun() {
+    ask.prompt.SetOpacity(0.0);
+    ask.entry.SetOpacity(0.0);
+    ask.line.SetOpacity(0.0);
+});
+
+Plymouth.SetQuitFunction(fun() {
+    // đầy thanh trước khi nhường chỗ cho màn đăng nhập
+    if (bar.visible) {
+        bar.fill.SetImage(bar.white.Scale(BAR_W, BAR_H));
+    }
+});

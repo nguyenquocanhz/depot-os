@@ -1,0 +1,17 @@
+# Depot OS — danh sách bộ gõ: bàn phím tiếng Anh + Unikey (tiếng Việt)
+# Ctrl+Space hoặc Ctrl+Shift để chuyển qua lại (xem config)
+[Groups/0]
+Name=Mặc định
+Default Layout=us
+DefaultIM=unikey
+
+[Groups/0/Items/0]
+Name=keyboard-us
+Layout=
+
+[Groups/0/Items/1]
+Name=unikey
+Layout=
+
+[GroupOrder]
+0=Mặc định

@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Depot OS — bố cục kiểu Windows 11: nút Start + app ghim nằm GIỮA taskbar.
+     Panel XFCE không tự canh giữa khi bên phải còn khay, nên dùng 2 panel cùng cạnh dưới:
+       panel-1: chạy hết chiều ngang; vạch co giãn | Start + app ghim | vạch co giãn = đúng giữa màn hình
+       panel-2: góc dưới phải, co vừa khay/đồng hồ, nằm đè lên phần trống bên phải của panel-1
+     Không đặt docklike ở panel nằm đè: menu Start đóng xong, vùng docklike không được vẽ lại (thành dải đen).
+     Hai panel cùng nền đặc #202020 nên nhìn liền một thanh. Không để trong suốt: icon ghim cũng mất sau khi đóng menu.
+     App ghim (plugin-3, docklike) ở ~/.config/xfce4/panel/docklike-3.rc, do depot-layout ghi. -->
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <value type="int" value="2"/>
+    <property name="dark-mode" type="bool" value="true"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=8;x=0;y=0"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="44"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="icon-size" type="uint" value="0"/>
+      <property name="background-style" type="uint" value="1"/>
+      <property name="background-rgba" type="array">
+        <value type="double" value="0.125"/>
+        <value type="double" value="0.125"/>
+        <value type="double" value="0.125"/>
+        <value type="double" value="1"/>
+      </property>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="11"/>
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+      </property>
+    </property>
+    <property name="panel-2" type="empty">
+      <!-- p=4: góc dưới phải; length 1 + length-adjust = co vừa đủ nội dung -->
+      <property name="position" type="string" value="p=4;x=0;y=0"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="44"/>
+      <property name="length" type="uint" value="1"/>
+      <property name="length-adjust" type="bool" value="true"/>
+      <property name="icon-size" type="uint" value="0"/>
+      <!-- panel-1 đã giữ chỗ cạnh dưới; panel này nằm đè lên, không giữ thêm -->
+      <property name="disable-struts" type="bool" value="true"/>
+      <property name="background-style" type="uint" value="1"/>
+      <property name="background-rgba" type="array">
+        <value type="double" value="0.125"/>
+        <value type="double" value="0.125"/>
+        <value type="double" value="0.125"/>
+        <value type="double" value="1"/>
+      </property>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+        <value type="int" value="7"/>
+        <value type="int" value="8"/>
+        <value type="int" value="9"/>
+        <value type="int" value="10"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <!-- menu Start kiểu Windows 11: tìm kiếm trên, app ghim dạng lưới, tài khoản + nguồn dưới -->
+    <property name="plugin-1" type="string" value="whiskermenu">
+      <!-- start-here của WhiteSur là logo Apple: dùng lưới ô vuông -->
+      <property name="button-icon" type="string" value="/usr/share/pixmaps/depot-logo-menu.svg"/>
+      <property name="show-button-title" type="bool" value="false"/>
+      <property name="menu-width" type="int" value="620"/>
+      <property name="menu-height" type="int" value="600"/>
+      <property name="view-mode" type="int" value="0"/>
+      <property name="launcher-icon-size" type="int" value="5"/>
+      <property name="launcher-show-description" type="bool" value="false"/>
+      <property name="default-category" type="int" value="0"/>
+      <!-- danh mục thành hàng icon nằm ngang, không chữ -->
+      <property name="position-categories-horizontal" type="bool" value="true"/>
+      <property name="category-show-name" type="bool" value="false"/>
+      <property name="hover-switch-category" type="bool" value="true"/>
+      <property name="position-search-alternate" type="bool" value="false"/>
+      <property name="position-profile-alternate" type="bool" value="true"/>
+      <property name="position-commands-alternate" type="bool" value="false"/>
+      <property name="favorites" type="array">
+        <value type="string" value="thunar.desktop"/>
+        <value type="string" value="firefox-esr.desktop"/>
+        <value type="string" value="google-chrome.desktop"/>
+        <value type="string" value="com.anthropic.Claude.desktop"/>
+        <value type="string" value="org.telegram.desktop.desktop"/>
+        <value type="string" value="zalo.desktop"/>
+        <value type="string" value="discord.desktop"/>
+        <value type="string" value="antigravity.desktop"/>
+        <value type="string" value="xfce4-terminal-emulator.desktop"/>
+        <value type="string" value="org.xfce.mousepad.desktop"/>
+        <value type="string" value="vlc.desktop"/>
+        <value type="string" value="localsend_app.desktop"/>
+        <value type="string" value="org.gnome.Software.desktop"/>
+        <value type="string" value="xfce4-taskmanager.desktop"/>
+        <value type="string" value="xfce-settings-manager.desktop"/>
+        <value type="string" value="depot-effects.desktop"/>
+        <value type="string" value="depot-drivers.desktop"/>
+        <value type="string" value="depot-layout.desktop"/>
+        <value type="string" value="depot-dns-proxy.desktop"/>
+      </property>
+      <property name="show-command-settings" type="bool" value="true"/>
+      <property name="show-command-lockscreen" type="bool" value="true"/>
+      <property name="show-command-logout" type="bool" value="true"/>
+      <property name="show-command-restart" type="bool" value="true"/>
+      <property name="show-command-shutdown" type="bool" value="true"/>
+      <property name="show-command-switchuser" type="bool" value="false"/>
+      <property name="show-command-menueditor" type="bool" value="false"/>
+      <property name="show-command-profile" type="bool" value="false"/>
+    </property>
+    <property name="plugin-2" type="string" value="separator">
+      <property name="expand" type="bool" value="false"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-3" type="string" value="docklike"/>
+    <!-- vạch co giãn hai bên Start + app (plugin-11 trái, plugin-4 phải) -->
+    <property name="plugin-11" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <!-- panel-2: khay, âm lượng, pin, đồng hồ, thông báo, hiện desktop -->
+    <property name="plugin-5" type="string" value="systray"/>
+    <property name="plugin-6" type="string" value="pulseaudio"/>
+    <property name="plugin-7" type="string" value="power-manager-plugin"/>
+    <property name="plugin-8" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-layout" type="uint" value="1"/>
+      <property name="digital-time-format" type="string" value="%H:%M"/>
+      <property name="digital-date-format" type="string" value="%d/%m/%Y"/>
+    </property>
+    <!-- chuông thông báo: genmon chạy depot-notify-bell (genmon-9.rc do depot-layout ghi), bấm mở khung Thông báo bên cạnh -->
+    <property name="plugin-9" type="string" value="genmon"/>
+    <property name="plugin-10" type="string" value="showdesktop"/>
+  </property>
+</channel>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Depot OS: ghi lại firmware kernel không tìm thấy (cho depot-drivers)
+# chạy sau khi vào desktop, không làm chậm khởi động
+After=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-drivers firmware-scan
+
+[Install]
+WantedBy=graphical.target

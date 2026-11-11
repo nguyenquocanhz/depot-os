@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Phiên bản Depot
+GenericName=Depot Edition
+Comment=Home, Pro hay for Workstation — xem bản hợp với máy này và đổi bản
+Exec=depot-edition
+TryExec=yad
+Icon=depot-logo
+Terminal=false
+Categories=Settings;System;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;
+Keywords=edition;phiên bản;home;pro;workstation;nâng cấp;bản quyền;

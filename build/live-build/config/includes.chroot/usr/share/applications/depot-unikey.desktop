@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Unikey — Bộ gõ tiếng Việt
+Name[en]=Unikey — Vietnamese typing
+Comment=Bật tắt tiếng Việt, chọn kiểu gõ VNI (phím số) / Telex / VIQR, phím chuyển V–E (Ctrl+Shift+F5)
+Comment[en]=Turn Vietnamese typing on or off, choose VNI / Telex / VIQR and the switch key
+Exec=depot-unikey
+Icon=input-keyboard
+Terminal=false
+Categories=Settings;Utility;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;
+Keywords=unikey;tiếng việt;tieng viet;bộ gõ;bo go;telex;vni;gõ dấu;vietnamese;keyboard;

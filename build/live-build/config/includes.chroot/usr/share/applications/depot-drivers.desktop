@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Driver phần cứng
+Comment=Xem thiết bị đang chạy driver gì, cài driver còn thiếu (NVIDIA, Broadcom, firmware)
+Exec=depot-drivers
+TryExec=yad
+Icon=preferences-system
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-HardwareSettings;HardwareSettings;
+Keywords=driver;phần cứng;nvidia;broadcom;firmware;wifi;

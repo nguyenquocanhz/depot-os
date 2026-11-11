@@ -1,0 +1,5 @@
+# Depot OS — mặc định cả máy (user ghi đè ở ~/.config/mimeapps.list)
+# Nhấp đúp file .deb tải về: mở bằng GNOME Software để cài (xarchiver cũng nhận .deb nhưng chỉ giải nén)
+[Default Applications]
+application/vnd.debian.binary-package=gnome-software-local-file-packagekit.desktop
+application/x-deb=gnome-software-local-file-packagekit.desktop

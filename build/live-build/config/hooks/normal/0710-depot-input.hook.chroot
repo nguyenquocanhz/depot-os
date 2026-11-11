@@ -1,0 +1,15 @@
+#!/bin/sh
+# Depot OS — bộ gõ tiếng Việt: im-config chọn hẳn fcitx5 (thay vì "auto")
+# im-config chạy fcitx5 lúc đăng nhập qua /etc/X11/Xsession.d/70im-config_launch, cho cả XFCE lẫn i3.
+# fcitx5 không có autostart riêng trong /etc/xdg/autostart, nên thiếu bước này thì XFCE không có bộ gõ.
+# Cấu hình mặc định (Unikey, Ctrl+Space / Ctrl+Shift) nằm ở dotfiles/config/fcitx5.
+# LƯU Ý (11/11/2026): thực tế im-config KHÔNG khởi động fcitx5 trên Depot, vì /etc/environment đã đặt sẵn GTK_IM_MODULE…
+# (im-launch thấy biến có sẵn thì bỏ qua). Việc chạy fcitx5 lúc đăng nhập do /etc/xdg/autostart/depot-fcitx5.desktop lo;
+# hook này vẫn giữ để im-config không chọn bộ gõ khác (ibus) nếu sau này bỏ các biến trong /etc/environment.
+set -e
+F=/etc/default/im-config
+[ -f $F ] || { echo "!! thiếu $F (gói im-config)" >&2; exit 1; }
+sed -i 's/^IM_CONFIG_DEFAULT_MODE=.*/IM_CONFIG_DEFAULT_MODE=fcitx5/' $F
+grep -q '^IM_CONFIG_DEFAULT_MODE=fcitx5$' $F || { echo "!! không đặt được im-config = fcitx5" >&2; exit 1; }
+[ -f /etc/X11/Xsession.d/70im-config_launch ] || { echo "!! thiếu 70im-config_launch" >&2; exit 1; }
+echo ">> Depot input: im-config = fcitx5 (Unikey)"

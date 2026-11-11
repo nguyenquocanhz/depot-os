@@ -1,0 +1,253 @@
+#!/bin/sh
+# Depot OS — "Ngôn ngữ và ngày giờ": đổi ngôn ngữ hệ thống, múi giờ, tự đồng bộ giờ qua Internet
+# (XFCE không có chỗ nào chỉnh ba thứ này). Kiểu "Time & Language" của Windows.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+#   depot-region                           hộp thoại (yad)
+#   depot-region status                    in ngôn ngữ, múi giờ, đồng bộ giờ đang dùng
+#   depot-region lang vi_VN.UTF-8 [ĐỊNH_DẠNG]   đổi ngôn ngữ (định dạng ngày/số theo locale khác nếu ghi thêm)
+#   depot-region tz Asia/Ho_Chi_Minh       đổi múi giờ
+#   depot-region ntp on|off                bật/tắt tự đồng bộ giờ
+#   depot-region server time.windows.com   máy chủ giờ (default = về mặc định của Depot)
+#   depot-region sync                      đồng bộ giờ ngay
+#
+# Phần root: /usr/libexec/depot-region-helper (pkexec; polkit tech.wrenevil.depot.region — user nhóm sudo đang ngồi máy
+# không phải nhập mật khẩu). Ngôn ngữ mới có hiệu lực sau khi đăng xuất rồi đăng nhập lại.
+# Mặc định Depot đồng bộ giờ với time.windows.com (như Windows), dự phòng là máy chủ của Debian.
+set -u
+HELPER=/usr/libexec/depot-region-helper
+NTPF=/etc/systemd/timesyncd.conf.d/60-depot-server.conf
+NTPDEF=/etc/systemd/timesyncd.conf.d/50-depot.conf
+
+case "${LC_ALL:-${LC_MESSAGES:-${LANG:-vi}}}" in vi*) VI=1 ;; *) VI=0 ;; esac
+T() { if [ $VI = 1 ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
+TITLE=$(T "Ngôn ngữ và ngày giờ" "Language and date & time")
+
+langs() {
+    cat <<'E'
+vi_VN.UTF-8|Tiếng Việt
+en_US.UTF-8|English (United States)
+en_GB.UTF-8|English (United Kingdom)
+fr_FR.UTF-8|Français
+de_DE.UTF-8|Deutsch
+es_ES.UTF-8|Español
+pt_BR.UTF-8|Português (Brasil)
+ru_RU.UTF-8|Русский
+id_ID.UTF-8|Bahasa Indonesia
+th_TH.UTF-8|Thai
+ja_JP.UTF-8|Japanese
+ko_KR.UTF-8|Korean
+zh_CN.UTF-8|Chinese (Simplified)
+zh_TW.UTF-8|Chinese (Traditional)
+E
+}
+
+servers() { printf '%s\n' time.windows.com time.google.com time.cloudflare.com time.apple.com; }
+
+# ------------------------------------------------------------------ đang dùng gì
+sysvar() {   # biến trong file locale của hệ thống (không phải của phiên đang chạy)
+    for f in /etc/default/locale /etc/locale.conf; do
+        v=$(sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}\$/\1/p" "$f" 2>/dev/null | tail -1)
+        [ -n "$v" ] && { echo "$v"; return; }
+    done
+}
+norm() { printf '%s' "$1" | sed 's/\.[Uu][Tt][Ff]-\{0,1\}8$/.UTF-8/'; }
+lang_now() { v=$(sysvar LANG); norm "${v:-${LANG:-C.UTF-8}}"; }
+fmt_now() { norm "$(sysvar LC_TIME)"; }
+tz_now() {
+    z=$(timedatectl show -p Timezone --value 2>/dev/null)
+    [ -n "$z" ] || z=$(cat /etc/timezone 2>/dev/null)
+    [ -n "$z" ] || z=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')
+    echo "${z:-UTC}"
+}
+ntp_now() { [ "$(timedatectl show -p NTP --value 2>/dev/null)" = yes ] && echo on || echo off; }
+synced_now() { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; }
+server_now() {
+    for f in "$NTPF" "$NTPDEF"; do
+        s=$(sed -n 's/^NTP=\([^ ]*\).*/\1/p' "$f" 2>/dev/null | head -1)
+        [ -n "$s" ] && { echo "$s"; return; }
+    done
+    echo debian.pool.ntp.org
+}
+zones() {
+    timedatectl list-timezones 2>/dev/null | grep . ||
+        awk '!/^#/ { print $3 }' /usr/share/zoneinfo/zone1970.tab 2>/dev/null | sort
+}
+
+status() {
+    echo "$(T 'Ngôn ngữ' 'Language'): $(lang_now)$( f=$(fmt_now); [ -n "$f" ] && [ "$f" != "$(lang_now)" ] && echo " ($(T 'định dạng' 'formats') $f)")"
+    echo "$(T 'Múi giờ' 'Time zone'): $(tz_now) ($(date '+%H:%M %d/%m/%Y, UTC%:z'))"
+    # máy chủ đang THẬT SỰ dùng có thể là máy dự phòng (máy chủ chính không trả lời, hoặc mạng vừa lên chưa tới 1 phút)
+    real=$(timedatectl show-timesync -p ServerName --value 2>/dev/null)
+    using=
+    [ -n "$real" ] && [ "$real" != "$(server_now)" ] && using=" ($(T 'đang dùng máy dự phòng' 'currently using backup') $real)"
+    echo "$(T 'Tự đồng bộ giờ' 'Automatic time sync'): $(ntp_now), $(T 'máy chủ' 'server') $(server_now)$using$(synced_now && echo ", $(T 'đã đồng bộ' 'synchronized')")"
+}
+
+# ------------------------------------------------------------------ áp dụng
+GUI=false
+fail() {
+    if $GUI; then
+        yad --title="$TITLE" --window-icon=preferences-desktop-locale --image=dialog-error --text="$1" \
+            --button="$(T Đóng Close):0" --center --fixed --borders=14 >/dev/null 2>&1
+    else
+        echo "depot-region: $1" >&2
+    fi
+    exit 1
+}
+
+root() {   # chạy helper bằng root; in kết quả, lỗi thì dừng kèm lời của helper
+    command -v pkexec >/dev/null || fail "$(T 'Thiếu pkexec (gói pkexec) nên không xin được quyền quản trị. Mở Terminal chạy: sudo apt install pkexec' 'pkexec is missing, cannot get administrator rights. Run in a terminal: sudo apt install pkexec')"
+    out=$(pkexec "$HELPER" "$@" 2>&1)
+    rc=$?
+    case $rc in
+        0) [ -n "$out" ] && printf '%s\n' "$out" ;;
+        126 | 127) fail "$(T 'Chưa được cấp quyền quản trị.' 'Administrator rights were not granted.')" ;;
+        *) fail "$(printf '%s' "$out" | sed 's/^depot-region-helper: //' | tail -3)" ;;
+    esac
+}
+
+user_locale() {   # LightDM lấy ngôn ngữ phiên từ AccountsService: đặt cho tài khoản đang dùng (không cần root)
+    p=/org/freedesktop/Accounts/User$(id -u)
+    gdbus call --system --dest org.freedesktop.Accounts --object-path "$p" \
+        --method org.freedesktop.Accounts.User.SetLanguage "$1" >/dev/null 2>&1
+    gdbus call --system --dest org.freedesktop.Accounts --object-path "$p" \
+        --method org.freedesktop.Accounts.User.SetFormatsLocale "${2:-$1}" >/dev/null 2>&1
+    :
+}
+
+after_tz() {   # đồng hồ trên panel giữ múi giờ cũ tới khi nạp lại
+    [ -n "${DISPLAY:-}" ] && pgrep -u "$(id -u)" -x xfce4-panel >/dev/null 2>&1 && xfce4-panel -r >/dev/null 2>&1 &
+}
+
+case "${1:-}" in
+    status) status; exit 0 ;;
+    lang)
+        [ -n "${2:-}" ] || fail "$(T 'thiếu mã ngôn ngữ, ví dụ: depot-region lang en_US.UTF-8' 'missing locale, e.g. depot-region lang en_US.UTF-8')"
+        l=$(norm "$2"); f=$(norm "${3:-}")
+        root apply "locale=$l" "formats=${f:-same}"
+        user_locale "$l" "$f"
+        T "Đăng xuất rồi đăng nhập lại để dùng ngôn ngữ mới." "Log out and back in to use the new language."; echo
+        exit 0 ;;
+    tz) root apply "timezone=${2:-}"; after_tz; exit 0 ;;
+    ntp) root apply "ntp=${2:-}"; exit 0 ;;
+    server) root apply "server=${2:-}"; exit 0 ;;
+    sync) root sync; exit 0 ;;
+    '') ;;
+    *) echo "$(T 'cách dùng' 'usage'): $0 [status | lang LOCALE [FORMATS] | tz ZONE | ntp on|off | server HOST|default | sync]" >&2; exit 2 ;;
+esac
+
+# ------------------------------------------------------------------ hộp thoại
+GUI=true
+command -v yad >/dev/null || { echo "thiếu yad" >&2; exit 1; }
+
+while :; do
+    cl=$(lang_now); cf=$(fmt_now); [ -n "$cf" ] || cf=$cl
+    ctz=$(tz_now); cntp=$(ntp_now); csrv=$(server_now)
+
+    # danh sách ngôn ngữ: locale đang dùng mà không có trong bảng thì thêm vào đầu
+    list=$(langs)
+    printf '%s\n' "$list" | grep -q "^$cl|" || list="$cl|$cl
+$list"
+    SAME=$(T "Theo ngôn ngữ" "Same as language")
+    litems=$(printf '%s\n' "$list" | awk -F'|' -v c="$cl" '{ printf "%s%s%s", (NR > 1 ? "!" : ""), ($1 == c ? "^" : ""), $2 }')
+    fitems=$(printf '%s\n' "$list" | awk -F'|' -v c="$cf" -v l="$cl" -v same="$SAME" '
+        BEGIN { printf "%s%s", (c == l ? "^" : ""), same } { printf "!%s%s", ($1 == c && c != l ? "^" : ""), $2 }')
+    zitems=$(zones | awk -v c="$ctz" '{ printf "%s%s%s", (NR > 1 ? "!" : ""), ($0 == c ? "^" : ""), $0 }')
+    sitems=$( { echo "$csrv"; servers | grep -vx "$csrv"; } | awk '{ printf "%s%s", (NR > 1 ? "!" : ""), $0 }')
+    if synced_now; then sy=$(T "đã đồng bộ" "synchronized"); else sy=$(T "chưa đồng bộ" "not synchronized"); fi
+    now="$(date '+%H:%M · %A %d/%m/%Y') · UTC$(date +%:z) · $sy"
+
+    out=$(yad --form --title="$TITLE" --window-icon=preferences-desktop-locale --center --width=600 --borders=16 \
+        --separator='|' --item-separator='!' \
+        --field="<b>$(T 'Ngôn ngữ' 'Language')</b>:LBL" "" \
+        --field="$(T 'Ngôn ngữ hiển thị' 'Display language'):CB" "$litems" \
+        --field="$(T 'Mã khác (ví dụ fr__CA.UTF-8)' 'Other code (e.g. fr__CA.UTF-8)')" "" \
+        --field="$(T 'Định dạng ngày, số, tiền' 'Date, number, currency formats'):CB" "$fitems" \
+        --field="$(T 'Ngôn ngữ mới có hiệu lực sau khi đăng xuất. Tiếng Trung, Nhật, Hàn cần mạng để tải font.' 'A new language takes effect after you log out. Chinese, Japanese and Korean need a network connection to download fonts.'):LBL" "" \
+        --field=" :LBL" "" \
+        --field="<b>$(T 'Ngày giờ' 'Date and time')</b>:LBL" "" \
+        --field="$(T 'Bây giờ' 'Now'): $now:LBL" "" \
+        --field="$(T 'Múi giờ' 'Time zone'):CBE" "$zitems" \
+        --field="$(T 'Tự đồng bộ giờ qua Internet' 'Set time automatically from the Internet'):CHK" "$([ "$cntp" = on ] && echo TRUE || echo FALSE)" \
+        --field="$(T 'Máy chủ giờ' 'Time server'):CBE" "$sitems" \
+        --button="$(T 'Đồng bộ giờ ngay' 'Sync now'):2" --button="$(T Huỷ Cancel):1" --button="$(T 'Áp dụng' Apply):0")
+    rc=$?
+    [ $rc = 0 ] || [ $rc = 2 ] || exit 0
+
+    IFS='|' read -r _ llabel lcustom flabel _ _ _ _ ntz nntp nsrv _ <<E
+$out
+E
+    nl=$(printf '%s\n' "$list" | awk -F'|' -v l="$llabel" '$2 == l { print $1; exit }')
+    lcustom=$(printf '%s' "$lcustom" | tr -d ' ')
+    [ -z "$lcustom" ] || nl=$(norm "$lcustom")
+    [ -n "$nl" ] || nl=$cl
+    if [ "$flabel" = "$SAME" ]; then nf=$nl; else nf=$(printf '%s\n' "$list" | awk -F'|' -v l="$flabel" '$2 == l { print $1; exit }'); fi
+    [ -n "$nf" ] || nf=$nl
+    ntz=$(printf '%s' "$ntz" | tr -d ' ')
+    nsrv=$(printf '%s' "$nsrv" | tr -d ' ')
+    [ "$nntp" = TRUE ] && nntp=on || nntp=off
+
+    set --
+    [ -z "$ntz" ] || [ "$ntz" = "$ctz" ] || set -- "$@" "timezone=$ntz"
+    [ -z "$nsrv" ] || [ "$nsrv" = "$csrv" ] || set -- "$@" "server=$nsrv"
+    [ "$nntp" = "$cntp" ] || set -- "$@" "ntp=$nntp"
+    relogin=false
+    if [ "$nl" != "$cl" ] || [ "$nf" != "$cf" ]; then
+        set -- "$@" "locale=$nl" "formats=$nf"
+        relogin=true
+    fi
+
+    msg=
+    if [ $# -gt 0 ]; then
+        # sinh locale / tải font có thể mất vài chục giây: hiện thanh chờ
+        yad --progress --pulsate --no-buttons --center --borders=16 --width=380 --title="$TITLE" \
+            --window-icon=preferences-desktop-locale --text="$(T 'Đang áp dụng…' 'Applying…')" </dev/null >/dev/null 2>&1 &
+        wait_pid=$!
+        res=$(root apply "$@" 2>&1); arc=$?
+        kill $wait_pid 2>/dev/null
+        if [ $arc != 0 ]; then
+            # root() đã hiện hộp lỗi trong subshell; mở lại hộp thoại chính
+            continue
+        fi
+        msg=$res
+        case " $* " in *" timezone="*) after_tz ;; esac
+        $relogin && user_locale "$nl" "$nf"
+    fi
+
+    if [ $rc = 2 ]; then
+        yad --progress --pulsate --no-buttons --center --borders=16 --width=380 --title="$TITLE" \
+            --window-icon=preferences-desktop-locale --text="$(T 'Đang đồng bộ giờ…' 'Synchronizing time…')" </dev/null >/dev/null 2>&1 &
+        wait_pid=$!
+        res=$(pkexec "$HELPER" sync 2>&1); src=$?
+        kill $wait_pid 2>/dev/null
+        yad --title="$TITLE" --window-icon=preferences-desktop-locale --center --borders=16 --fixed \
+            --image="$([ $src = 0 ] && echo appointment-soon || echo dialog-warning)" \
+            --text="$(printf '%s' "$res" | sed 's/^depot-region-helper: //; s/&/\&amp;/g; s/</\&lt;/g')" \
+            --button="$(T Đóng Close):0" >/dev/null 2>&1
+        continue
+    fi
+
+    if $relogin; then
+        note=$(printf '%s\n' "$msg" | grep '^LƯU Ý' | sed 's/&/\&amp;/g; s/</\&lt;/g')
+        # phiên chạy thử từ USB tự đăng nhập lúc boot nên người dùng không biết tài khoản: đăng xuất là kẹt ở màn hình
+        # đăng nhập (gặp khi boot thử v0.20)
+        live=
+        [ -d /run/live/medium ] && live="\n\n$(T 'Đang chạy thử từ USB: ở màn hình đăng nhập gõ tên <b>depot</b>, mật khẩu <b>live</b>.' 'Live session: at the login screen enter user <b>depot</b>, password <b>live</b>.')"
+        yad --title="$TITLE" --window-icon=preferences-desktop-locale --center --borders=16 --fixed --image=preferences-desktop-locale \
+            --text="$(T 'Đã đổi ngôn ngữ. Đăng xuất rồi đăng nhập lại để mọi ứng dụng dùng ngôn ngữ mới.' 'Language changed. Log out and back in so every app uses it.')$live${note:+\n\n$note}" \
+            --button="$(T 'Để sau' Later):1" --button="$(T 'Đăng xuất ngay' 'Log out now'):0" >/dev/null 2>&1
+        if [ $? = 0 ]; then
+            if command -v xfce4-session-logout >/dev/null && pgrep -u "$(id -u)" -x xfce4-session >/dev/null 2>&1; then
+                xfce4-session-logout --logout --fast
+            elif command -v i3-msg >/dev/null && pgrep -u "$(id -u)" -x i3 >/dev/null 2>&1; then
+                i3-msg exit >/dev/null
+            else
+                loginctl terminate-session "${XDG_SESSION_ID:-}" 2>/dev/null
+            fi
+        fi
+    elif [ -n "$msg" ]; then
+        notify-send -i preferences-system-time "$TITLE" "$(status | sed -n '2,3p')" 2>/dev/null || true
+    fi
+    exit 0
+done

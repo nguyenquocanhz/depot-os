@@ -1,0 +1,8 @@
+// Depot OS — user nhóm sudo đang ngồi máy tạo / đổi mật khẩu / xoá vùng lưu trên USB (depot-persist) mà không phải
+// nhập mật khẩu quản trị (user "depot" của phiên USB không có mật khẩu để nhập). Helper chỉ làm trên USB đang boot.
+polkit.addRule(function(action, subject) {
+    if (action.id == "tech.wrenevil.depot.persist" &&
+        subject.local && subject.active && subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});

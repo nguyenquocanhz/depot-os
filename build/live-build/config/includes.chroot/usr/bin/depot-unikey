@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+# Depot OS — depot-unikey: "Unikey" cho Depot OS — bảng điều khiển bộ gõ tiếng Việt dễ dùng
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Phần gõ chữ là Unikey thật (engine của Phạm Kim Long, gói fcitx5-unikey chạy trong fcitx5). File này là phần
+# "dễ dùng" mà fcitx5 thiếu, làm theo thói quen dùng UniKey trên Windows:
+#   Khay hệ thống: chữ "vi" = đang gõ tiếng Việt, "en" = tiếng Anh; bấm vào là đổi. Đó là biểu tượng của chính
+#     fcitx5, Depot chỉ bảo nó hiện chữ thay cho hình khó hiểu (conf/classicui.conf PreferTextIcon + nhãn "vi" cho
+#     Unikey do hook 0727 đặt). Không thêm biểu tượng thứ hai: fcitx5 không cho tắt biểu tượng của nó.
+#   Bảng điều khiển (Ctrl+Shift+F5, hoặc mục "Unikey" trong menu / Cài đặt): công tắc tiếng Việt, kiểu gõ,
+#     bảng mã, phím chuyển V/E (Ctrl+Shift, Ctrl+Space, Alt+Z), vài tuỳ chọn hay dùng, ô gõ thử. Đổi là áp dụng ngay.
+#   Kiểu gõ mặc định của Depot: VNI (gõ dấu bằng phím số 0–9), bảng mã Unicode.
+# Cấu hình đọc / ghi qua D-Bus của fcitx5 (org.fcitx.Fcitx.Controller1: GetConfig / SetConfig) nên có hiệu lực
+# ngay và fcitx5 tự lưu vào ~/.config/fcitx5 — không sửa file tay, không phải khởi động lại bộ gõ.
+# Những thứ ít dùng (bảng gõ tắt, biên tập bàn phím, thêm bộ gõ ngôn ngữ khác): nút "Nâng cao…" mở fcitx5-configtool.
+#
+#   depot-unikey                 mở bảng điều khiển
+#   depot-unikey toggle|on|off   đổi / bật / tắt tiếng Việt
+#   depot-unikey telex|vni|viqr  đổi kiểu gõ
+#   depot-unikey status          in trạng thái
+
+import subprocess
+import sys
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('PangoCairo', '1.0')
+gi.require_foreign('cairo')
+import cairo  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+
+APP_ID = 'tech.wrenevil.DepotUnikey'
+BUS = ('org.fcitx.Fcitx5', '/controller', 'org.fcitx.Fcitx.Controller1')
+URI_UNIKEY = 'fcitx://config/inputmethod/unikey'
+URI_GLOBAL = 'fcitx://config/global'
+
+METHODS = [     # (giá trị fcitx5-unikey, tên hiện, cách gõ, ví dụ)
+    ('VNI', 'VNI', 'Gõ dấu bằng phím số:  1 sắc · 2 huyền · 3 hỏi · 4 ngã · 5 nặng · 6 â ê ô · 7 ơ ư · 8 ă · 9 đ · 0 xoá dấu',
+     'tie61ng Vie65t  →  tiếng Việt'),
+    ('Telex', 'Telex', 'Gõ dấu bằng chữ:  s sắc · f huyền · r hỏi · x ngã · j nặng · aa â · aw ă · ee ê · oo ô · ow ơ · uw ư · dd đ · z xoá dấu',
+     'tieengs Vieetj  →  tiếng Việt'),
+    ('VIQR', 'VIQR', "Gõ dấu bằng ký hiệu:  ' sắc · ` huyền · ? hỏi · ~ ngã · . nặng · ^ mũ · + móc · ( trăng · dd đ",
+     "tie^'ng Vie^.t  →  tiếng Việt"),
+]
+CHARSETS = ['Unicode', 'TCVN3', 'VNI Win', 'VIQR', 'BK HCM 2', 'CString', 'NCR Decimal', 'NCR Hex']
+TRIGGERS = [('Control+Shift+Shift_L', 'Ctrl + Shift'), ('Control+space', 'Ctrl + Space'), ('Alt+z', 'Alt + Z')]
+OPTIONS = [     # (khoá, nơi lưu, nhãn)
+    ('SpellCheck', 'unikey', 'Kiểm tra chính tả'),
+    ('AutoNonVnRestore', 'unikey', 'Tự trả lại chữ gốc khi từ gõ ra không phải tiếng Việt (window, file…)'),
+    ('ModernStyle', 'unikey', 'Đặt dấu kiểu mới: oà, uý (bỏ chọn: òa, úy)'),
+    ('FreeMarking', 'unikey', 'Cho phép gõ dấu ở cuối từ (gõ tự do)'),
+    ('ActiveByDefault', 'global', 'Bật tiếng Việt ngay khi mở máy'),
+]
+DEFAULTS_UNIKEY = {'InputMethod': 'VNI', 'OutputCharset': 'Unicode', 'SpellCheck': 'True', 'AutoNonVnRestore': 'True',
+                   'ModernStyle': 'True', 'FreeMarking': 'True'}
+DEFAULT_TRIGGERS = ['Control+space', 'Control+Shift+Shift_L']
+RED = (1.0, 0.18, 0.24)
+GREY = (0.72, 0.76, 0.86)
+
+
+def raw(d):
+    """dict lồng nhau → biến thể a{sv} mà fcitx5 hiểu (lá là chuỗi)."""
+    return GLib.Variant('a{sv}', {k: (raw(v) if isinstance(v, dict) else GLib.Variant('s', str(v)))
+                                  for k, v in d.items()})
+
+
+class Fcitx:
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+    def call(self, method, args=None, timeout=1500):
+        try:
+            r = self.bus.call_sync(BUS[0], BUS[1], BUS[2], method, args, None, Gio.DBusCallFlags.NONE, timeout, None)
+            return r.unpack() if r is not None else ()
+        except GLib.Error:
+            return None
+
+    def running(self):
+        return self.call('State') is not None
+
+    def ensure(self):
+        """fcitx5 chưa chạy (vd phiên không qua im-config): chạy nó lên."""
+        if self.running():
+            return True
+        try:
+            subprocess.Popen(['fcitx5', '-d'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError:
+            return False
+        for _ in range(20):
+            GLib.usleep(150000)
+            if self.running():
+                return True
+        return False
+
+    def active(self):
+        r = self.call('State')
+        return None if r is None else r[0] == 2
+
+    def set_active(self, on):
+        self.call('Activate' if on else 'Deactivate')
+
+    def config(self, uri):
+        r = self.call('GetConfig', GLib.Variant('(s)', (uri,)))
+        return r[0] if r else {}
+
+    def set_config(self, uri, d):
+        return self.call('SetConfig', GLib.Variant('(sv)', (uri, raw(d)))) is not None
+
+    def unikey(self):
+        return self.config(URI_UNIKEY)
+
+    def triggers(self):
+        t = self.config(URI_GLOBAL).get('Hotkey', {}).get('TriggerKeys', {})
+        return [t[k] for k in sorted(t)] if isinstance(t, dict) else []
+
+    def set_triggers(self, keys):
+        # AltTriggerKeys rỗng: bỏ luôn phím tắt mặc định của fcitx5 "chạm Shift trái một mình = đổi bộ gõ"
+        return self.set_config(URI_GLOBAL, {'Hotkey': {'TriggerKeys': {str(i): k for i, k in enumerate(keys)},
+                                                       'AltTriggerKeys': ''}})
+
+    def behavior(self, key, default=''):
+        return self.config(URI_GLOBAL).get('Behavior', {}).get(key, default)
+
+
+def letter_pixbuf(letter, color, size):
+    """Huy hiệu trạng thái trong bảng điều khiển: một chữ đậm (V / E) trên nền trong suốt."""
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surf)
+    lay = PangoCairo.create_layout(cr)
+    lay.set_font_description(Pango.FontDescription('Inter Bold %d' % max(8, int(size * 0.62))))
+    lay.set_text(letter, -1)
+    w, h = lay.get_pixel_size()
+    cr.set_source_rgba(*color, 1.0)
+    cr.move_to((size - w) / 2, (size - h) / 2)
+    PangoCairo.show_layout(cr, lay)
+    return Gdk.pixbuf_get_from_surface(surf, 0, 0, size, size)
+
+
+class Panel(Gtk.Window):
+    """Bảng điều khiển: mọi thay đổi áp dụng ngay."""
+
+    def __init__(self, app):
+        super().__init__(title='Unikey — Bộ gõ tiếng Việt')
+        self.app, self.fx = app, app.fx
+        self.loading = True
+        self.set_resizable(False)
+        self.set_icon_name('input-keyboard')
+        self.set_border_width(18)
+        self.connect('key-press-event', lambda _w, e: e.keyval == Gdk.KEY_Escape and (self.close() or True))
+        self.shown = None
+        GLib.timeout_add(500, self.poll)        # đổi V/E bằng phím tắt hay bấm khay: cửa sổ theo kịp
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.add(root)
+
+        # công tắc tiếng Việt
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.badge = Gtk.Image()
+        top.pack_start(self.badge, False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.state_label = Gtk.Label(xalign=0)
+        self.state_hint = self.dim('')
+        col.pack_start(self.state_label, False, False, 0)
+        col.pack_start(self.state_hint, False, False, 0)
+        top.pack_start(col, True, True, 0)
+        self.switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.switch.connect('notify::active', self.on_switch)
+        top.pack_start(self.switch, False, False, 0)
+        root.pack_start(top, False, False, 0)
+        root.pack_start(Gtk.Separator(), False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=14, row_spacing=10)
+        root.pack_start(grid, False, False, 0)
+
+        # kiểu gõ
+        grid.attach(self.head('Kiểu gõ'), 0, 0, 1, 1)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        self.method = {}
+        first = None
+        for value, name, _how, _ex in METHODS:
+            rb = Gtk.RadioButton.new_with_label_from_widget(first, name)
+            first = first or rb
+            rb.connect('toggled', self.on_method, value)
+            self.method[value] = rb
+            row.pack_start(rb, False, False, 0)
+        self.method_other = Gtk.RadioButton.new_with_label_from_widget(first, 'Khác')
+        self.method_other.set_no_show_all(True)
+        row.pack_start(self.method_other, False, False, 0)
+        grid.attach(row, 1, 0, 1, 1)
+        self.how = self.dim('', wrap=True)
+        self.example = self.dim('')
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.pack_start(self.how, False, False, 0)
+        box.pack_start(self.example, False, False, 0)
+        grid.attach(box, 1, 1, 1, 1)
+
+        # bảng mã
+        grid.attach(self.head('Bảng mã'), 0, 2, 1, 1)
+        self.charset = Gtk.ComboBoxText()
+        for c in CHARSETS:
+            self.charset.append(c, c + ('  (dùng cho mọi ứng dụng ngày nay)' if c == 'Unicode' else ''))
+        self.charset.connect('changed', self.on_charset)
+        self.charset.set_halign(Gtk.Align.START)
+        grid.attach(self.charset, 1, 2, 1, 1)
+
+        # phím chuyển
+        grid.attach(self.head('Phím chuyển V / E'), 0, 3, 1, 1)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        self.trigger = {}
+        for key, name in TRIGGERS:
+            cb = Gtk.CheckButton(label=name)
+            cb.connect('toggled', self.on_trigger)
+            self.trigger[key] = cb
+            row.pack_start(cb, False, False, 0)
+        grid.attach(row, 1, 3, 1, 1)
+
+        # tuỳ chọn
+        grid.attach(self.head('Tuỳ chọn', top=True), 0, 4, 1, 1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.option = {}
+        for key, where, label in OPTIONS:
+            cb = Gtk.CheckButton(label=label)
+            cb.connect('toggled', self.on_option, key, where)
+            self.option[key] = cb
+            box.pack_start(cb, False, False, 0)
+        grid.attach(box, 1, 4, 1, 1)
+
+        # gõ thử
+        grid.attach(self.head('Gõ thử'), 0, 5, 1, 1)
+        self.entry = Gtk.Entry()
+        self.entry.set_placeholder_text('Gõ vào đây để thử kiểu gõ đang chọn')
+        self.entry.set_width_chars(46)
+        grid.attach(self.entry, 1, 5, 1, 1)
+
+        root.pack_start(Gtk.Separator(), False, False, 0)
+        foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        adv = Gtk.Button(label='Nâng cao…')
+        adv.set_tooltip_text('Bảng gõ tắt, biên tập bàn phím, thêm bộ gõ ngôn ngữ khác (fcitx5)')
+        adv.connect('clicked', lambda _b: self.spawn(['fcitx5-configtool']))
+        reset = Gtk.Button(label='Mặc định')
+        reset.set_tooltip_text('Về cài đặt gốc của Depot OS: VNI, Unicode, Ctrl+Shift / Ctrl+Space')
+        reset.connect('clicked', self.on_reset)
+        self.saved = self.dim('')
+        close = Gtk.Button(label='Đóng')
+        close.connect('clicked', lambda _b: self.close())
+        foot.pack_start(adv, False, False, 0)
+        foot.pack_start(reset, False, False, 0)
+        foot.pack_start(self.saved, True, True, 6)
+        foot.pack_end(close, False, False, 0)
+        root.pack_start(foot, False, False, 0)
+        root.show_all()
+        self.loading = False
+
+    @staticmethod
+    def head(text, top=False):
+        l = Gtk.Label(xalign=0)
+        l.set_markup('<b>%s</b>' % GLib.markup_escape_text(text))
+        if top:
+            l.set_valign(Gtk.Align.START)
+        return l
+
+    @staticmethod
+    def dim(text, wrap=False):
+        l = Gtk.Label(label=text, xalign=0)
+        l.get_style_context().add_class('dim-label')
+        if wrap:
+            l.set_line_wrap(True)
+            l.set_max_width_chars(58)
+        return l
+
+    @staticmethod
+    def spawn(argv):
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            pass
+
+    def note(self, ok=True):
+        self.saved.set_text('Đã áp dụng' if ok else 'Chưa áp dụng được — bộ gõ (fcitx5) không trả lời')
+        GLib.timeout_add(2500, lambda: (self.saved.set_text(''), False)[1])
+
+    def poll(self):
+        if not self.get_realized():
+            return False
+        on = self.fx.active()
+        if on != self.shown:
+            self.show_state(on)
+        return True
+
+    # --- đọc trạng thái lên cửa sổ
+    def refresh(self):
+        self.loading = True
+        u = self.fx.unikey()
+        cur = u.get('InputMethod', 'Telex')
+        if cur in self.method:
+            self.method[cur].set_active(True)
+            self.method_other.hide()
+        else:
+            self.method_other.set_label('Khác (%s)' % cur)
+            self.method_other.show()
+            self.method_other.set_active(True)
+        self.show_method(cur)
+        self.charset.set_active_id(u.get('OutputCharset', 'Unicode'))
+        trig = self.fx.triggers()
+        for key, cb in self.trigger.items():
+            cb.set_active(key in trig)
+        for key, where, _l in OPTIONS:
+            v = u.get(key) if where == 'unikey' else self.fx.behavior(key)
+            self.option[key].set_active(v == 'True')
+        self.option['AutoNonVnRestore'].set_sensitive(self.option['SpellCheck'].get_active())
+        self.loading = False
+        self.show_state(self.fx.active())
+
+    def show_method(self, cur):
+        for value, _n, how, ex in METHODS:
+            if value == cur:
+                self.how.set_text(how)
+                self.example.set_text('Ví dụ:  ' + ex)
+                return
+        self.how.set_text('Kiểu gõ này chỉnh ở "Nâng cao…".')
+        self.example.set_text('')
+
+    def show_state(self, on):
+        self.shown = on
+        self.loading = True
+        self.switch.set_active(bool(on))
+        self.loading = False
+        self.badge.set_from_pixbuf(letter_pixbuf('V' if on else 'E', RED if on else GREY, 40))
+        self.state_label.set_markup('<span size="large"><b>%s</b></span>' %
+                                    ('Đang gõ tiếng Việt' if on else 'Đang gõ tiếng Anh (English)'))
+        trig = ' hoặc '.join(n for k, n in TRIGGERS if self.trigger[k].get_active()) or 'biểu tượng ở khay'
+        self.state_hint.set_text('Đổi nhanh: %s, hoặc bấm chữ "%s" ở khay hệ thống' % (trig, 'vi' if on else 'en'))
+
+    # --- người dùng đổi
+    def on_switch(self, sw, _p):
+        if not self.loading:
+            self.fx.ensure()
+            self.fx.set_active(sw.get_active())
+            self.show_state(sw.get_active())
+
+    def on_method(self, rb, value):
+        if self.loading or not rb.get_active():
+            return
+        self.note(self.fx.set_config(URI_UNIKEY, {'InputMethod': value}))
+        self.show_method(value)
+        self.method_other.hide()
+
+    def on_charset(self, combo):
+        if not self.loading and combo.get_active_id():
+            self.note(self.fx.set_config(URI_UNIKEY, {'OutputCharset': combo.get_active_id()}))
+
+    def on_trigger(self, cb):
+        if self.loading:
+            return
+        keys = [k for k, _n in TRIGGERS if self.trigger[k].get_active()]
+        if not keys:                    # không để mất hết phím chuyển
+            self.loading = True
+            cb.set_active(True)
+            self.loading = False
+            self.saved.set_text('Phải giữ ít nhất một phím chuyển')
+            return
+        self.note(self.fx.set_triggers(keys))
+        self.show_state(self.switch.get_active())
+
+    def on_option(self, cb, key, where):
+        if self.loading:
+            return
+        v = 'True' if cb.get_active() else 'False'
+        if where == 'unikey':
+            ok = self.fx.set_config(URI_UNIKEY, {key: v})
+        else:
+            ok = self.fx.set_config(URI_GLOBAL, {'Behavior': {key: v}})
+        self.note(ok)
+        self.option['AutoNonVnRestore'].set_sensitive(self.option['SpellCheck'].get_active())
+
+    def on_reset(self, _b):
+        ok = self.fx.set_config(URI_UNIKEY, DEFAULTS_UNIKEY)
+        ok = self.fx.set_triggers(DEFAULT_TRIGGERS) and ok
+        ok = self.fx.set_config(URI_GLOBAL, {'Behavior': {'ActiveByDefault': 'False'}}) and ok
+        self.refresh()
+        self.note(ok)
+
+
+class Unikey(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.fx = None
+        self.panel = None
+
+    def show_panel(self):
+        if not self.panel:
+            self.panel = Panel(self)
+            self.panel.connect('destroy', self.on_closed)
+            self.add_window(self.panel)
+        self.fx.ensure()
+        self.panel.refresh()
+        self.panel.present()
+
+    def on_closed(self, _w):
+        self.panel = None
+
+    def do_command_line(self, cl):
+        args = cl.get_arguments()[1:]
+        cmd = args[0] if args else ''
+        names = {'telex': 'Telex', 'vni': 'VNI', 'viqr': 'VIQR'}
+        if cmd in ('-h', '--help', 'help'):
+            cl.print_literal('dùng: depot-unikey [toggle|on|off|telex|vni|viqr|status]\n')
+            return 0
+        if cmd not in ('', 'toggle', 'on', 'off', 'status') and cmd not in names:
+            cl.printerr_literal('depot-unikey: không hiểu "%s" (thử: depot-unikey help)\n' % cmd)
+            return 2
+        self.fx = self.fx or Fcitx()
+        if cmd == '':
+            self.show_panel()
+            return 0
+        self.fx.ensure()
+        if cmd == 'toggle':
+            self.fx.set_active(not self.fx.active())
+        elif cmd in ('on', 'off'):
+            self.fx.set_active(cmd == 'on')
+        elif cmd in names:
+            self.fx.set_config(URI_UNIKEY, {'InputMethod': names[cmd]})
+        elif cmd == 'status':
+            on = self.fx.active()
+            u = self.fx.unikey()
+            cl.print_literal('Bộ gõ: %s\nKiểu gõ: %s\nBảng mã: %s\nPhím chuyển: %s\n' % (
+                'chưa chạy' if on is None else 'tiếng Việt' if on else 'English',
+                u.get('InputMethod', '?'), u.get('OutputCharset', '?'), ', '.join(self.fx.triggers()) or '?'))
+        if self.panel:
+            self.panel.refresh()
+        return 0
+
+
+def main():
+    GLib.set_prgname('depot-unikey')
+    Gdk.set_program_class('Depot-unikey')
+    sys.exit(Unikey().run(sys.argv))
+
+
+if __name__ == '__main__':
+    main()

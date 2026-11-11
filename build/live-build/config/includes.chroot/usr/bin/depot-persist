@@ -1,0 +1,222 @@
+#!/bin/sh
+# Depot OS — Lưu dữ liệu trên USB (vùng lưu kiểu Persistent Storage của Tails)
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Chạy Depot OS từ USB thì mặc định tắt máy là mất hết. Công cụ này dùng chỗ còn trống trên chính USB đó làm
+# "vùng lưu": tệp cá nhân, cài đặt, Wi-Fi đã lưu (hoặc mọi thứ, kể cả ứng dụng cài thêm) còn nguyên ở lần boot sau.
+# Vùng lưu mặc định được mã hoá bằng mật khẩu: mất USB thì người nhặt được không đọc được dữ liệu.
+# Mỗi lần boot, màn khởi động hỏi mật khẩu; bấm sai rồi chọn N (hoặc chọn mục "không mở vùng lưu" ở menu boot)
+# thì chạy như USB trắng, không đụng tới vùng lưu.
+#
+#   depot-persist              mở cửa sổ (tạo vùng lưu / xem tình trạng / đổi mật khẩu / xoá)
+#   depot-persist status       in tình trạng ra terminal
+# Phần root: /usr/libexec/depot-persist-helper (pkexec, polkit tech.wrenevil.depot.persist).
+# USB phải được ghi kiểu "DD" / ảnh đĩa (Rufus: chế độ DD, balenaEtcher, dd): ghi kiểu chép file hoặc Ventoy
+# thì không có chỗ trống đúng kiểu để thêm vùng lưu.
+TITLE="Lưu dữ liệu trên USB"
+ICON=drive-removable-media
+HELPER=/usr/libexec/depot-persist-helper
+# ngăn cách các ô của yad bằng ký tự điều khiển US (0x1f): mật khẩu có dấu | hay dấu cách vẫn tách đúng
+SEP=$(printf '\037')
+
+root() {
+    if [ "$(id -u)" = 0 ]; then "$HELPER" "$@"; else pkexec "$HELPER" "$@"; fi
+}
+
+load() {    # đọc KHOÁ=giá trị của helper vào biến P_KHOÁ
+    P_LIVE=0 P_DISK= P_MODEL= P_DISK_MB=0 P_FREE_MB=0 P_REASON= P_PART= P_ENCRYPTED=0 P_ACTIVE=0 P_OPEN=0
+    P_SIZE_MB=0 P_USED_MB=0 P_MODE=
+    out=$(root status 2>&1) || { ERR=$out; return 1; }
+    while IFS='=' read -r k v; do
+        case $k in
+            LIVE | DISK | MODEL | DISK_MB | FREE_MB | REASON | PART | ENCRYPTED | ACTIVE | OPEN | SIZE_MB | USED_MB | MODE)
+                eval "P_$k=\$v" ;;
+        esac
+    done <<EOF
+$out
+EOF
+}
+
+gb() { awk -v m="$1" 'BEGIN { if (m >= 1024) printf "%.1f GB", m / 1024; else printf "%d MB", m }' | sed 's/\.0 GB/ GB/; s/\./,/'; }
+
+reason_text() {
+    case $1 in
+        notlive) echo "Máy này đang chạy Depot OS đã cài vào ổ cứng: dữ liệu vốn đã được lưu, không cần vùng lưu.\n\nVùng lưu chỉ dành cho lúc chạy Depot OS từ USB (phiên dùng thử)." ;;
+        toram) echo "Depot OS đang chạy hoàn toàn trong RAM (toram) nên không biết USB nào là USB boot.\n\nKhởi động lại không dùng tham số toram." ;;
+        optical) echo "Depot OS đang chạy từ đĩa CD/DVD — không ghi thêm được.\n\nGhi Depot OS ra USB rồi boot từ USB." ;;
+        isofile) echo "Depot OS đang chạy từ một file .iso nằm trên USB (Ventoy hoặc kiểu tương tự), nên không thêm vùng lưu theo cách này được.\n\nGhi thẳng ISO ra USB kiểu ảnh đĩa: Rufus chọn <b>chế độ DD</b>, hoặc balenaEtcher." ;;
+        readonly) echo "USB đang ở chế độ chỉ đọc (có lẫy khoá ghi?).\n\nGạt lẫy khoá trên USB / thẻ nhớ rồi boot lại." ;;
+        nospace) echo "USB không còn đủ chỗ trống phía sau Depot OS (còn $(gb "$P_FREE_MB"), cần ít nhất 512 MB).\n\nHai nguyên nhân hay gặp:\n • USB quá nhỏ — dùng USB từ 4 GB trở lên.\n • USB được ghi kiểu chép file (Rufus chế độ ISO): ghi lại bằng <b>chế độ DD</b> hoặc balenaEtcher." ;;
+        layout | nodisk | *) echo "Không nhận ra bố cục phân vùng của USB này nên không dám sửa.\n\nGhi lại Depot OS ra USB kiểu ảnh đĩa (Rufus chế độ DD, balenaEtcher) rồi thử lại." ;;
+    esac
+}
+
+info() {    # $1 icon, $2 chữ
+    yad --title="$TITLE" --window-icon=$ICON --image="$1" --center --borders=16 --width=520 --fixed \
+        --text="$2" --button="Đóng:0"
+}
+
+busy() {    # chạy lệnh ở nền, hiện thanh chờ; kết quả: $OUT, mã thoát trả về
+    t=$(mktemp) || return 1
+    ( "$@" > "$t" 2>&1; echo $? > "$t.rc" ) &
+    while [ ! -s "$t.rc" ]; do echo "#"; sleep 0.3; done |
+        yad --progress --pulsate --auto-close --no-buttons --center --borders=16 --width=420 --fixed \
+            --title="$TITLE" --window-icon=$ICON --text="$BUSY_TEXT"
+    wait
+    OUT=$(cat "$t"); rc=$(cat "$t.rc" 2>/dev/null || echo 1)
+    rm -f "$t" "$t.rc"
+    return "$rc"
+}
+
+# ------------------------------------------------------------------ tạo vùng lưu
+create() {
+    free=$P_FREE_MB
+    sizes="^Dùng hết chỗ trống ($(gb "$free"))"
+    for g in 4 8 16 32 64; do
+        [ $((g * 1024)) -lt "$free" ] && sizes="$sizes!$g GB"
+    done
+    while :; do
+        out=$(yad --form --title="$TITLE" --window-icon=$ICON --image=$ICON --center --width=600 --borders=16 \
+            --separator="$SEP" --focus-field=4 \
+            --text="<b>Tạo vùng lưu trên ${P_MODEL:-USB} ($(gb "$P_DISK_MB"))</b>\n\nHiện giờ tắt máy là mất mọi thứ bạn làm trong phiên USB này. Vùng lưu nằm ở chỗ còn trống trên chính USB ($(gb "$free")), không đụng tới Depot OS và không đụng tới ổ cứng của máy.\n" \
+            --field="Dung lượng:CB" "$sizes" \
+            --field="Giữ lại:CB" "^Tệp cá nhân, cài đặt, Wi-Fi đã lưu (khuyên dùng)!Mọi thứ, kể cả ứng dụng cài thêm" \
+            --field="Mã hoá bằng mật khẩu (mất USB cũng không ai đọc được):CHK" TRUE \
+            --field="Mật khẩu (từ 8 ký tự):H" "" \
+            --field="Nhập lại mật khẩu:H" "" \
+            --field="Quên mật khẩu là mất dữ liệu trong vùng lưu — không có cách lấy lại.:LBL" "" \
+            --button="Huỷ:1" --button="Tạo vùng lưu:0") || return 0
+        oldifs=$IFS; IFS=$SEP
+        # shellcheck disable=SC2086
+        set -- $out
+        IFS=$oldifs
+        f_size=$1 f_mode=$2 f_enc=$3 f_p1=$4 f_p2=$5
+        case $f_size in Dùng*) size=max ;; *) size=$(( ${f_size%% *} * 1024 )) ;; esac
+        case $f_mode in Mọi*) mode=system ;; *) mode=home ;; esac
+        if [ "$f_enc" = TRUE ]; then
+            enc=1
+            if [ "$f_p1" != "$f_p2" ]; then info dialog-warning "Hai lần nhập mật khẩu không giống nhau."; continue; fi
+            if [ "${#f_p1}" -lt 8 ]; then info dialog-warning "Mật khẩu phải có ít nhất 8 ký tự."; continue; fi
+        else
+            enc=0
+            yad --title="$TITLE" --window-icon=$ICON --image=dialog-warning --center --borders=16 --width=480 --fixed \
+                --text="Không mã hoá: ai cầm được USB cũng đọc được tệp, mật khẩu Wi-Fi, lịch sử duyệt web trong vùng lưu.\n\nVẫn tạo vùng lưu không mã hoá?" \
+                --button="Quay lại:1" --button="Tạo không mã hoá:0" || continue
+        fi
+        break
+    done
+    BUSY_TEXT="Đang tạo vùng lưu… (USB chậm có thể mất một hai phút, đừng rút USB)"
+    if busy run_create "$f_p1" "$size" "$mode" "$enc"; then
+        if [ "$enc" = 1 ]; then
+            how="Ở màn khởi động, máy sẽ hỏi <b>mật khẩu vùng lưu</b>: nhập đúng thì mọi thứ được giữ lại từ lần đó."
+        else
+            how="Từ lần boot sau, mọi thứ được giữ lại tự động."
+        fi
+        info dialog-information "<b>Đã tạo vùng lưu.</b>\n\nPhiên đang chạy này CHƯA dùng vùng lưu — hãy <b>khởi động lại máy</b> (vẫn boot từ USB này).\n\n$how\n\nMuốn chạy như USB trắng: ở menu boot chọn \"Chạy Depot OS — không mở vùng lưu trên USB\"."
+    else
+        info dialog-error "Chưa tạo được vùng lưu.\n\n$(printf '%s\n' "$OUT" | grep -v '^#')"
+    fi
+    return 0
+}
+
+# mật khẩu đi qua stdin của helper (không nằm trên dòng lệnh, không hiện trong danh sách tiến trình)
+run_create() {   # $1 mật khẩu, $2 size, $3 mode, $4 encrypt
+    printf '%s\n' "$1" | root create "size=$2" "mode=$3" "encrypt=$4"
+}
+
+# ------------------------------------------------------------------ vùng lưu đã có
+manage() {
+    if [ "$P_ACTIVE" = 1 ]; then
+        st="<b>Vùng lưu đang được dùng.</b> Những gì bạn làm trong phiên này được giữ lại."
+        [ "$P_MODE" = system ] && st="$st\nĐang giữ: mọi thứ, kể cả ứng dụng cài thêm." || st="$st\nĐang giữ: tệp cá nhân, cài đặt, Wi-Fi đã lưu."
+        st="$st\nĐã dùng $(gb "${P_USED_MB:-0}") trên $(gb "$P_SIZE_MB")."
+    else
+        st="<b>USB này có vùng lưu nhưng phiên này không mở nó</b> — những gì bạn làm bây giờ sẽ mất khi tắt máy.\n\nMuốn dùng: khởi động lại và nhập mật khẩu vùng lưu ở màn khởi động."
+        st="$st\nDung lượng vùng lưu: $(gb "$P_SIZE_MB")."
+    fi
+    [ "$P_ENCRYPTED" = 1 ] && st="$st\nMã hoá: có (LUKS2)." || st="$st\nMã hoá: <b>không</b> — ai cầm USB cũng đọc được."
+    set -- --button="Đóng:0"
+    [ "$P_ENCRYPTED" = 1 ] && set -- "$@" --button="Đổi mật khẩu:3"
+    set -- "$@" --button="Xoá vùng lưu:4"
+    yad --title="$TITLE" --window-icon=$ICON --image=$ICON --center --borders=16 --width=540 --fixed \
+        --text="<b>Vùng lưu trên ${P_MODEL:-USB}</b>\n\n$st" "$@"
+    case $? in
+        3) change_pass ;;
+        4) remove ;;
+    esac
+}
+
+change_pass() {
+    while :; do
+        out=$(yad --form --title="$TITLE" --window-icon=$ICON --center --width=480 --borders=16 --separator="$SEP" \
+            --text="<b>Đổi mật khẩu vùng lưu</b>\n" \
+            --field="Mật khẩu hiện tại:H" "" --field="Mật khẩu mới (từ 8 ký tự):H" "" --field="Nhập lại mật khẩu mới:H" "" \
+            --button="Huỷ:1" --button="Đổi mật khẩu:0") || return 0
+        oldifs=$IFS; IFS=$SEP
+        # shellcheck disable=SC2086
+        set -- $out
+        IFS=$oldifs
+        if [ "$2" != "$3" ]; then info dialog-warning "Hai lần nhập mật khẩu mới không giống nhau."; continue; fi
+        if [ "${#2}" -lt 8 ]; then info dialog-warning "Mật khẩu mới phải có ít nhất 8 ký tự."; continue; fi
+        break
+    done
+    BUSY_TEXT="Đang đổi mật khẩu…"
+    if busy run_passwd "$1" "$2"; then
+        info dialog-information "Đã đổi mật khẩu vùng lưu. Lần boot sau dùng mật khẩu mới."
+    else
+        info dialog-error "Chưa đổi được mật khẩu.\n\n$OUT"
+    fi
+}
+
+run_passwd() { printf '%s\n%s\n' "$1" "$2" | root passwd; }
+
+remove() {
+    if [ "$P_ACTIVE" = 1 ]; then
+        info dialog-warning "Vùng lưu đang được dùng nên chưa xoá được.\n\nKhởi động lại, ở menu boot chọn <b>\"Chạy Depot OS — không mở vùng lưu trên USB\"</b>, rồi mở lại công cụ này để xoá."
+        return 0
+    fi
+    yad --title="$TITLE" --window-icon=$ICON --image=dialog-warning --center --borders=16 --width=480 --fixed \
+        --text="<b>Xoá vùng lưu ($(gb "$P_SIZE_MB"))?</b>\n\nMọi tệp, cài đặt, Wi-Fi đã lưu trong vùng lưu sẽ mất hẳn, không lấy lại được. Depot OS trên USB vẫn boot bình thường." \
+        --button="Giữ lại:1" --button="Xoá hẳn:0" || return 0
+    BUSY_TEXT="Đang xoá vùng lưu…"
+    if busy root delete confirm=yes; then
+        info dialog-information "Đã xoá vùng lưu. Chỗ trống trên USB dùng lại được cho vùng lưu mới."
+    else
+        info dialog-error "Chưa xoá được vùng lưu.\n\n$OUT"
+    fi
+}
+
+status_text() {
+    load || { echo "!! $ERR" >&2; exit 1; }
+    if [ "$P_LIVE" != 1 ]; then echo "Máy đã cài (không phải phiên USB): không dùng vùng lưu"; return; fi
+    echo "USB boot:  ${P_DISK:-?}  ${P_MODEL}  $(gb "$P_DISK_MB")"
+    if [ -n "$P_PART" ]; then
+        echo "Vùng lưu:  $P_PART  $(gb "$P_SIZE_MB")  mã hoá: $([ "$P_ENCRYPTED" = 1 ] && echo có || echo không)"
+        echo "Đang dùng: $([ "$P_ACTIVE" = 1 ] && echo "có (${P_MODE}; đã dùng $(gb "${P_USED_MB:-0}"))" || echo "không — phiên này không lưu gì")"
+    elif [ -n "$P_REASON" ]; then
+        echo "Vùng lưu:  chưa có, không tạo được ($P_REASON)"
+    else
+        echo "Vùng lưu:  chưa có — còn trống $(gb "$P_FREE_MB")"
+    fi
+}
+
+case "${1:-}" in
+    status) status_text; exit 0 ;;
+    '') ;;
+    *) echo "dùng: depot-persist [status]" >&2; exit 2 ;;
+esac
+
+command -v yad >/dev/null || { echo "thiếu yad" >&2; exit 1; }
+if [ ! -d /run/live/medium ] && [ -z "${DEPOT_PERSIST_DISK:-}" ]; then
+    info dialog-information "$(reason_text notlive)"
+    exit 0
+fi
+load || { info dialog-error "Không đọc được tình trạng USB.\n\n$ERR"; exit 1; }
+if [ -n "$P_PART" ]; then
+    manage
+elif [ -n "$P_REASON" ]; then
+    info dialog-warning "<b>Chưa tạo được vùng lưu trên USB này</b>\n\n$(reason_text "$P_REASON")"
+else
+    create
+fi
+exit 0

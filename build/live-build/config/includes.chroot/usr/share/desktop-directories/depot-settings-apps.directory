@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Directory
+Name=Ứng dụng
+Name[en]=Apps
+Comment=Ứng dụng mặc định và tuỳ chọn của app đi kèm
+Icon=preferences-desktop-default-applications

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Depot OS — driver phần cứng (xem /usr/bin/depot-drivers):
+# 1) depot-drivers-scan.service: ghi firmware kernel không tìm thấy lúc boot (depot-drivers đọc để báo người dùng)
+# 2) depot-drivers-auto.service: mỗi lần khởi động tự cài driver còn thiếu, build lại driver sau khi cập nhật kernel
+# 3) quyền file udev rule "cắm USB là tự cài" (file từ ổ Windows mang quyền 777)
+set -e
+systemctl enable depot-drivers-scan.service depot-drivers-auto.service
+chmod 644 /etc/udev/rules.d/91-depot-drivers-auto.rules
+# cùng lý do: mọi unit depot-* đang bị systemd cảnh báo "marked executable" mỗi lần nạp (thấy khi boot thử v0.20.2)
+for u in /usr/lib/systemd/system/depot-*.service /usr/lib/systemd/system/depot-*.timer /etc/systemd/system/depot-*.service; do
+    [ -f "$u" ] && [ ! -L "$u" ] && chmod 644 "$u"
+done
+echo ">> Depot drivers: scan $(systemctl is-enabled depot-drivers-scan.service), auto $(systemctl is-enabled depot-drivers-auto.service), udev $(stat -c %a /etc/udev/rules.d/91-depot-drivers-auto.rules)"

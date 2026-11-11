@@ -1,0 +1,79 @@
+#!/bin/sh
+# Depot OS — thêm mục boot "Chẩn đoán phần cứng" (tham số kernel depot.bootdiag) cho cả GRUB (UEFI, và loopback.cfg
+# cho Ventoy/findiso) lẫn isolinux (BIOS), làm giống hook 1310-depot-autoinstall-menu: chép dòng linux/initrd/append
+# của mục Live, bỏ "splash" (để màn chữ hiện ngay, không có Plymouth), thêm depot.bootdiag depot.noautoinstall.
+# Đặt ngay dưới mục "Cài tự động" (hook 1310 chạy trước), không có thì dưới mục Live. Mặc định vẫn là mục Live.
+# Boot vào mục này: depot-bootdiag.service in báo cáo main / CPU nâng cấp ra màn chữ, lưu ra USB, chờ phím.
+# isolinux không có font tiếng Việt nên nhãn không dấu.
+set -e
+
+TITLE_GRUB='Chẩn đoán phần cứng (main, CPU nâng cấp được)'
+TITLE_SYSLINUX='Chan doan ^phan cung (main, CPU nang cap duoc)'
+ARGS='depot.bootdiag depot.noautoinstall'
+
+patch_grub() {
+    f=$1
+    grep -q 'depot.bootdiag' "$f" && return 0
+    grep -q '^menuentry "Live system (amd64)"' "$f" || { echo "!! $f không có mục Live system (amd64)"; return 1; }
+    anchor='^menuentry "Live system \(amd64\)"'
+    grep -q '^menuentry .*depot-autoinstall' "$f" && anchor='^menuentry .*depot-autoinstall'
+    awk -v t="$TITLE_GRUB" -v a="$anchor" -v args="$ARGS" '
+        NR == FNR {                                   # lượt 1: lấy linux/initrd của mục Live
+            if (!got && /^menuentry "Live system \(amd64\)"/) inb = 1
+            if (inb && /^[ \t]*linux/)  lin = $0
+            if (inb && /^[ \t]*initrd/) ini = $0
+            if (inb && /^}/) { inb = 0; got = 1 }
+            next
+        }
+        !done && $0 ~ a { ina = 1 }
+        { print }
+        ina && /^}/ {
+            ina = 0; done = 1
+            gsub(/[ \t]splash/, "", lin)
+            print ""
+            print "menuentry \"" t "\" --hotkey=p {"
+            print lin " " args
+            print ini
+            print "}"
+        }' "$f" "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> bootdiag menu: đã thêm vào $f"
+}
+
+patch_syslinux() {
+    f=$1
+    grep -q 'depot.bootdiag' "$f" && return 0
+    grep -q '^label live-amd64$' "$f" || { echo "!! $f không có label live-amd64"; return 1; }
+    anchor='^label live-amd64$'
+    grep -q '^label autoinstall-amd64$' "$f" && anchor='^label autoinstall-amd64$'
+    awk -v t="$TITLE_SYSLINUX" -v a="$anchor" -v args="$ARGS" '
+        NR == FNR {
+            if (/^label live-amd64$/) inb = 1
+            if (inb && /^[ \t]*linux /)  lin = $0
+            if (inb && /^[ \t]*initrd /) ini = $0
+            if (inb && /^[ \t]*append /) { app = $0; inb = 0 }
+            next
+        }
+        $0 ~ a { ina = 1 }
+        { print }
+        ina && /^[ \t]*append / {
+            ina = 0
+            gsub(/[ \t]splash/, "", app)
+            print ""
+            print "label bootdiag-amd64"
+            print "\tmenu label " t
+            print lin
+            print ini
+            print app " " args
+        }' "$f" "$f" >"$f.new"
+    mv "$f.new" "$f"
+    echo ">> bootdiag menu: đã thêm vào $f"
+}
+
+for f in binary/boot/grub/grub.cfg boot/grub/grub.cfg binary/boot/grub/loopback.cfg boot/grub/loopback.cfg; do
+    [ -f "$f" ] && grep -q '^menuentry "Live system (amd64)"' "$f" && patch_grub "$f"
+done
+for f in binary/isolinux/live.cfg isolinux/live.cfg; do
+    [ -f "$f" ] && patch_syslinux "$f"
+done
+exit 0

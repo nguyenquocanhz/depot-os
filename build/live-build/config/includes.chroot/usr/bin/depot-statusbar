@@ -1,0 +1,77 @@
+#!/bin/sh
+# Depot OS — depot-statusbar: CPU · RAM · tốc độ mạng trên thanh menu (plugin genmon của xfce4-panel gọi mỗi 2 giây)
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Chỉ dùng lệnh dựng sẵn của sh (read, printf, $(( ))) — không fork thêm tiến trình nào, nhẹ cho máy yếu.
+# Giá trị lần trước (để tính % CPU và tốc độ mạng) lưu ở $XDG_RUNTIME_DIR/depot-statusbar.
+# In theo cú pháp genmon: <txt> chữ trên thanh, <tool> chú thích khi rê chuột, <txtclick> lệnh khi bấm.
+
+STATE=${XDG_RUNTIME_DIR:-/tmp}/depot-statusbar.${USER:-u}
+
+# --- lần trước
+p_busy=0 p_total=0 p_rx=0 p_tx=0 p_cs=0
+[ -r "$STATE" ] && read -r p_busy p_total p_rx p_tx p_cs < "$STATE"
+
+# --- CPU (/proc/stat dòng đầu)
+read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+idle_all=$((idle + iowait))
+total=$((user + nice + system + idle_all + irq + softirq + steal))
+busy=$((total - idle_all))
+dt=$((total - p_total)); db=$((busy - p_busy))
+if [ "$dt" -gt 0 ] && [ "$p_total" -gt 0 ]; then cpu=$(( (db * 100 + dt / 2) / dt )); else cpu=$(( busy * 100 / (total ? total : 1) )); fi
+[ "$cpu" -gt 100 ] && cpu=100
+
+# --- RAM (/proc/meminfo, kB)
+mt=0 ma=0 st=0 sf=0
+while read -r k v _; do
+    case $k in
+        MemTotal:) mt=$v ;;
+        MemAvailable:) ma=$v ;;
+        SwapTotal:) st=$v ;;
+        SwapFree:) sf=$v ;;
+    esac
+done < /proc/meminfo
+used=$((mt - ma))
+ram=$(( mt ? (used * 100 + mt / 2) / mt : 0 ))
+
+# --- mạng: cộng mọi card trừ lo và card ảo (bridge/veth/docker), byte nhận/gửi
+rx=0 tx=0 ifs=""
+while IFS= read -r l; do
+    case $l in *:*) ;; *) continue ;; esac
+    name=${l%%:*}; name=${name##* }
+    case $name in lo | veth* | docker* | br-* | virbr* | vmnet* | tun* | wg*) continue ;; esac
+    set -- ${l#*:}
+    [ "$1" -gt 0 ] 2>/dev/null || [ "$9" -gt 0 ] 2>/dev/null || continue
+    rx=$((rx + $1)); tx=$((tx + $9)); ifs="$ifs $name"
+done < /proc/net/dev
+
+# --- thời gian trôi (centi giây từ /proc/uptime)
+read -r up _ < /proc/uptime
+cs=${up%.*}${up#*.}
+cs=${cs#"${cs%%[!0]*}"}; cs=${cs:-0}
+el=$((cs - p_cs))
+if [ "$p_cs" -gt 0 ] && [ "$el" -gt 0 ] && [ "$rx" -ge "$p_rx" ] && [ "$tx" -ge "$p_tx" ]; then
+    rxs=$(( (rx - p_rx) * 100 / el )); txs=$(( (tx - p_tx) * 100 / el ))
+else
+    rxs=0 txs=0
+fi
+printf '%s %s %s %s %s\n' "$busy" "$total" "$rx" "$tx" "$cs" > "$STATE"
+
+# 1234 B/s -> "1,2 kB"; 12 MB/s -> "12 MB" (dấu phẩy thập phân kiểu Việt)
+rate() {
+    b=$1
+    if [ "$b" -lt 1048576 ]; then t=$((b * 10 / 1024)); u=kB; else t=$((b * 10 / 1048576)); u=MB; fi
+    if [ "$t" -ge 100 ]; then R="$((t / 10)) $u"; else R="$((t / 10)),$((t % 10)) $u"; fi
+}
+gib() { t=$(( $1 * 10 / 1048576 )); G="$((t / 10)),$((t % 10)) GB"; }
+
+rate "$txs"; up_s=$R
+rate "$rxs"; down_s=$R
+gib "$used"; g_used=$G
+gib "$mt"; g_tot=$G
+
+printf '<txt>CPU %d%%   RAM %d%%   ↑%s ↓%s </txt>' "$cpu" "$ram" "$up_s" "$down_s"
+printf '<tool>CPU: %d %%\nRAM: %s / %s (%d %%)' "$cpu" "$g_used" "$g_tot" "$ram"
+if [ "$st" -gt 0 ]; then gib $((st - sf)); g_su=$G; gib "$st"; printf '\nSwap: %s / %s' "$g_su" "$G"; fi
+printf '\nMạng%s: gửi %s/s · nhận %s/s\nBấm để mở Task Manager</tool>' "${ifs:+ (${ifs# })}" "$up_s" "$down_s"
+printf '<txtclick>xfce4-taskmanager</txtclick>\n'

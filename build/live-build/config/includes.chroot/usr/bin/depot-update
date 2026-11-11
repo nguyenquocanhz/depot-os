@@ -1,0 +1,136 @@
+#!/bin/sh
+# Depot OS — cập nhật kiểu Windows: tải ngầm, cài lúc khởi động lại với màn chờ "Đang cập nhật" (Plymouth).
+# Dùng cơ chế offline update của systemd: /system-update tồn tại → máy khởi động vào system-update.target thay vì
+# desktop, depot-offline-update.service cài bản đã tải rồi khởi động lại (giống Fedora/GNOME "Restart & Update").
+#   depot-update download   (root; depot-update.timer mỗi ngày, cuối bước cài của Calamares) tải bản cập nhật,
+#                           cài app còn chờ (lúc cài không có mạng); có gói chờ cài thì bật cờ khởi động lại
+#   depot-update apply      (root; depot-offline-update.service) cài bản đã tải, báo % lên màn chờ, khởi động lại
+#   depot-update notify     (user; autostart) báo "Khởi động lại để cập nhật", nút Khởi động lại ngay / Để sau
+#   depot-update status     in trạng thái
+# Phiên live (USB) không cập nhật gì. Mạng tính phí (4G chia sẻ…) thì không tải ngầm.
+STATE=/var/lib/depot
+READY=$STATE/update-ready        # số gói đã tải, chờ cài lúc khởi động lại
+FAILED=$STATE/update-failed      # lần cài trước lỗi: báo một lần ở phiên sau
+LOGD=/var/log/depot
+LOG=$LOGD/update.log
+APT_OPTS="-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
+live() { [ -d /run/live/medium ]; }
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+metered() {
+    command -v nmcli >/dev/null 2>&1 || return 1
+    dev=$(nmcli -t -f DEVICE,STATE device 2>/dev/null | awk -F: '$2 == "connected" { print $1; exit }')
+    [ -n "$dev" ] && nmcli -t -f GENERAL.METERED device show "$dev" 2>/dev/null | grep -q ':yes'
+}
+
+download() {
+    [ "$(id -u)" = 0 ] || { echo "!! cần root" >&2; exit 1; }
+    live && exit 0
+    mkdir -p "$STATE" "$LOGD"
+    if metered && [ "${1:-}" != --force ]; then log "mạng tính phí: không tải"; exit 0; fi
+    log "== tải bản cập nhật"
+    apt-get update >> "$LOG" 2>&1 || { log "không tải được danh sách gói (mạng?)"; exit 0; }
+    # app chưa cài được lúc cài đặt (không có mạng / tải lỗi)
+    [ -e "$STATE/apps-pending" ] && depot-install-apps >> "$LOG" 2>&1
+    # app thêm của phiên bản (Pro, Workstation) chưa cài được lúc đặt bản
+    [ -e "$STATE/edition-pending" ] && depot-edition apply-pending >> "$LOG" 2>&1
+    # driver / firmware cần tải từ mạng mà lúc cắm thiết bị chưa có mạng (tự bỏ qua khi người dùng tắt chế độ tự động;
+    # lúc Calamares đang cài thì không làm — lần khởi động đầu depot-drivers-auto.service lo)
+    depot-drivers auto >> "$LOG" 2>&1 || true
+    # shellcheck disable=SC2086
+    n=$(apt-get -s $APT_OPTS full-upgrade 2>/dev/null | grep -c '^Inst ')
+    if [ "$n" -eq 0 ]; then
+        rm -f "$READY" /system-update
+        log "không có bản cập nhật"
+        exit 0
+    fi
+    # shellcheck disable=SC2086
+    if DEBIAN_FRONTEND=noninteractive apt-get -d -y $APT_OPTS full-upgrade >> "$LOG" 2>&1; then
+        echo "$n" > "$READY"
+        # spec systemd: /system-update là symlink trỏ tới thư mục của trình cập nhật
+        ln -sfn "$STATE" /system-update
+        log "đã tải $n gói — cài ở lần khởi động lại"
+    else
+        log "tải lỗi, thử lại lần sau"
+    fi
+}
+
+apply() {
+    # xoá cờ NGAY ĐẦU (spec systemd): lỗi gì cũng không kẹt vòng khởi động lại
+    rm -f /system-update
+    mkdir -p "$LOGD"
+    n=$(cat "$READY" 2>/dev/null)
+    rm -f "$READY"
+    log "== cài $n gói (màn chờ cập nhật)"
+    plymouth change-mode --updates 2>/dev/null
+    plymouth system-update --progress=0 2>/dev/null
+    # APT::Status-Fd: dòng "pmstatus:gói:phần trăm:mô tả" → % trên màn chờ
+    # shellcheck disable=SC2086
+    { DEBIAN_FRONTEND=noninteractive apt-get -y --no-download -o APT::Status-Fd=3 $APT_OPTS full-upgrade \
+          3>&1 1>>"$LOG" 2>&1; echo "rc:$?"; } |
+    while IFS=: read -r kind pkg pct _; do
+        case "$kind" in
+            pmstatus)
+                plymouth system-update --progress="${pct%%.*}" 2>/dev/null
+                plymouth display-message --text="Đang cài: $pkg" 2>/dev/null ;;
+            rc) echo "$pkg" > /run/depot-update.rc ;;
+        esac
+    done
+    rc=$(cat /run/depot-update.rc 2>/dev/null || echo 1)
+    if [ "$rc" = 0 ]; then
+        rm -f "$FAILED"
+        log "cài xong"
+        apt-get clean
+    else
+        dpkg --configure -a >> "$LOG" 2>&1
+        date '+%F %T' > "$FAILED"
+        log "cài LỖI (rc=$rc) — đã chạy dpkg --configure -a"
+    fi
+    plymouth system-update --progress=100 2>/dev/null
+    plymouth display-message --text="Xong. Đang khởi động lại…" 2>/dev/null
+    sleep 2
+    systemctl reboot
+}
+
+notify() {
+    live && exit 0
+    shown=""
+    sleep 60
+    while :; do
+        if [ -e "$FAILED" ] && [ ! -e "$HOME/.cache/depot-update-failed-seen" ]; then
+            mkdir -p "$HOME/.cache"; touch "$HOME/.cache/depot-update-failed-seen"
+            notify-send -a "Depot OS" -i dialog-warning "Cập nhật chưa xong" \
+                "Lần cập nhật trước gặp lỗi. Máy sẽ thử lại. Chi tiết: $LOG"
+        fi
+        [ -e "$FAILED" ] || rm -f "$HOME/.cache/depot-update-failed-seen"
+        if [ -e "$READY" ] && [ -e /system-update ]; then
+            n=$(cat "$READY")
+            if [ "$n" != "$shown" ]; then
+                shown=$n
+                a=$(notify-send -a "Depot OS" -i system-software-update -u normal \
+                    -A now="Khởi động lại ngay" -A later="Để sau" \
+                    "Có $n bản cập nhật" \
+                    "Đã tải xong. Lần khởi động lại tới, máy sẽ cài cập nhật (có màn chờ) rồi vào lại desktop.")
+                [ "$a" = now ] && systemctl reboot
+            fi
+        fi
+        sleep 1800
+    done
+}
+
+status() {
+    if live; then echo "Phiên live: không cập nhật"; exit 0; fi
+    [ -e "$READY" ] && echo "Chờ khởi động lại để cài $(cat "$READY") gói" || echo "Không có bản cập nhật đang chờ"
+    [ -e "$STATE/apps-pending" ] && echo "App chưa cài xong (chờ có mạng):$(cat "$STATE/apps-pending")"
+    [ -e "$FAILED" ] && echo "Lần cập nhật trước lỗi lúc $(cat "$FAILED") — xem $LOG"
+    exit 0
+}
+
+case "${1:-}" in
+    download) shift; download "$@" ;;
+    apply) apply ;;
+    notify) notify ;;
+    status|'') status ;;
+    *) echo "dùng: depot-update [status|download [--force]|apply|notify]" >&2; exit 2 ;;
+esac

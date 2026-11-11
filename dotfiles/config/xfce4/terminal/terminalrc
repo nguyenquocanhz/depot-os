@@ -1,0 +1,20 @@
+[Configuration]
+# Depot OS — xfce4-terminal 1.x đọc xfconf (xfce4-terminal.xml); file này chỉ để bản cũ / lần chuyển đổi đầu
+FontUseSystem=FALSE
+FontName=JetBrains Mono 11
+MiscDefaultGeometry=96x28
+MiscMenubarDefault=FALSE
+MiscToolbarDefault=FALSE
+ScrollingBar=TERMINAL_SCROLLBAR_NONE
+ScrollingLines=20000
+MiscCursorShape=TERMINAL_CURSOR_SHAPE_IBEAM
+MiscCursorBlinks=TRUE
+MiscSlimTabs=TRUE
+BackgroundMode=TERMINAL_BACKGROUND_TRANSPARENT
+BackgroundDarkness=0.900000
+ColorUseTheme=FALSE
+ColorForeground=#e8ecf5
+ColorBackground=#07080c
+ColorCursorUseDefault=FALSE
+ColorCursor=#ff2d3d
+ColorPalette=#1b1d24;#ff4d5a;#7fd1a8;#f0c674;#6f9ad8;#c79bf2;#6cc7d9;#c9cfdc;#5d6272;#ff6b74;#9be3bf;#ffd98e;#8fb4ef;#dab6ff;#8fdcea;#ffffff

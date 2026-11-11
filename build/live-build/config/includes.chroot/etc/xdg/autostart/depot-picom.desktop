@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hiệu ứng hình ảnh (Depot OS)
+Comment=Áp dụng hiệu ứng đã chọn: compositor, bóng đổ, animation, widget
+Exec=depot-effects apply
+TryExec=depot-effects
+Terminal=false
+NoDisplay=true

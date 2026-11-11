@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Depot OS (i3)
+Comment=Tiling WM siêu nhẹ cho Depot OS
+Exec=i3
+TryExec=i3
+Type=Application
+DesktopNames=i3;
+Keywords=tiling;wm;depot;

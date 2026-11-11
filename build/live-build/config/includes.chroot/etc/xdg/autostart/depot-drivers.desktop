@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Kiểm tra driver (Depot OS)
+Comment=Báo khi có thiết bị chưa có driver hoặc thiếu firmware
+Exec=depot-drivers --notify
+TryExec=depot-drivers
+Terminal=false
+NoDisplay=true

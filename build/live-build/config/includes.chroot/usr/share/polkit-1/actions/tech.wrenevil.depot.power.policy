@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Depot OS — Chế độ pin: người đang ngồi máy (phiên đang hoạt động) đổi chế độ không cần mật khẩu,
+     giống power-profiles-daemon. Phiên từ xa / không hoạt động: phải là quản trị. -->
+<policyconfig>
+  <vendor>Depot OS by WrenEvil</vendor>
+  <action id="tech.wrenevil.depot.power">
+    <description>Đổi chế độ tiết kiệm pin</description>
+    <message>Đổi chế độ pin cần quyền quản trị</message>
+    <icon_name>battery</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/depot-power-helper</annotate>
+  </action>
+</policyconfig>

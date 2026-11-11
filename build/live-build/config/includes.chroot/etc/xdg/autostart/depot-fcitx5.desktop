@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bộ gõ tiếng Việt (fcitx5 + Unikey)
+Comment=Chạy bộ gõ lúc đăng nhập — im-config của Debian KHÔNG tự chạy nó trên Depot (xem ghi chú trong /etc/environment)
+Exec=fcitx5 -d
+TryExec=fcitx5
+Terminal=false
+NoDisplay=true

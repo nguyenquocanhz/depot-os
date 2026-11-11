@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cài Depot OS
+GenericName=Trình cài hệ điều hành
+Comment=Cài Depot OS vào ổ cứng máy tính
+Exec=pkexec calamares
+Icon=depot-logo
+Terminal=false
+Categories=System;
+Keywords=install;depot;cai;dat;trinh cai;
+StartupNotify=true

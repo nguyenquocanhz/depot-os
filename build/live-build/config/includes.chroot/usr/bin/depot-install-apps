@@ -1,0 +1,176 @@
+#!/bin/sh
+# Depot OS — tải và cài app LÚC CÀI ĐẶT (ISO chỉ mang phần chạy thử máy: driver, Wi-Fi/LAN, âm thanh, bàn phím,
+# Firefox, Chrome, LocalSend). Xong thì tải sẵn bản cập nhật: khởi động lại lần đầu sẽ vào màn chờ cập nhật.
+#   depot-install-apps --target DIR   (Calamares, bước shellprocess@depotapps) chép DNS vào hệ thống vừa cài rồi chroot vào chạy
+#   depot-install-apps                (root, trên máy đã cài) — depot-update gọi lại khi lúc cài không có mạng
+# Không có mạng: không cài gì, đánh dấu /var/lib/depot/apps-pending → depot-update cài khi có mạng.
+# App lấy từ nguồn chính chủ, ghim phiên bản + sha256 cho file tải thẳng; kho apt thì ghim sha256 khoá ký:
+#   kho Debian    GNOME Software ("Phần mềm") + Flathub, VLC, GParted, in ấn & quét
+#   Telegram      Debian trixie-backports (trixie chính không còn gói); giữ nguồn để apt cập nhật
+#   Claude        kho apt chính thức của Anthropic; giữ nguồn để apt cập nhật
+#   Discord       .deb chính thức (chỉ bộ khởi động: lần mở đầu tự tải Discord mới nhất về ~/.config/discord)
+#   Antigravity   tarball của Google (bản 2.x không có trong kho apt) → tự đóng gói .deb để gỡ được như app khác
+# Mỗi phần chạy trong SUBSHELL: lỗi chỉ ghi log và giữ cờ "chờ", không bao giờ làm hỏng bước cài của Calamares.
+STATE=/var/lib/depot
+LOGD=/var/log/depot
+FLAG=$STATE/apps-pending
+
+# Gói Debian cài lúc cài đặt (bỏ khỏi ISO cho nhẹ)
+DEBS="gnome-software gnome-software-plugin-deb gnome-software-plugin-flatpak flatpak vlc gparted
+cups printer-driver-cups-pdf cups-pk-helper cups-ipp-utils system-config-printer
+printer-driver-gutenprint printer-driver-hpcups printer-driver-brlaser printer-driver-foo2zjs printer-driver-splix
+sane-utils simple-scan"
+
+CLAUDE_KEY_SHA=bd70a5e4a268002704024ceba7f8446024114e94f3f0bdd11c23a9e592be81c6
+DISCORD_VER=1.0.168
+DISCORD_SHA=93d43ad090825b9edcacfb3841506ea51e7040c60d93a9e377d0caca547bea28
+AG_VER=2.28.2
+AG_BUILD=5937220255875072
+AG_SHA=bd92938b088863baff568b08236f76f0d237e8a39581077a07937f4dc6e138c3
+
+# ---------- Calamares: chạy từ hệ live, đích là thư mục hệ thống vừa chép
+if [ "${1:-}" = --target ]; then
+    T=${2:?thiếu thư mục đích}
+    # /run của đích là tmpfs trống (mount.conf của Calamares) nên resolv.conf trong đó không phân giải được tên miền
+    cp --remove-destination -L /etc/resolv.conf "$T/etc/resolv.conf" 2>/dev/null
+    # calamares-sources-final chỉ ghi "main non-free-firmware": thiếu contrib/non-free thì máy đã cài không cài được
+    # driver NVIDIA / Broadcom Wi-Fi (depot-drivers) — ISO build với đủ 4 thành phần
+    sed -i 's/ main non-free-firmware$/ main contrib non-free non-free-firmware/' "$T/etc/apt/sources.list"
+    chroot "$T" /usr/bin/depot-install-apps
+    rc=$?
+    # hệ đã cài dùng resolv.conf của NetworkManager: trả lại symlink cho nó
+    ln -sf ../run/NetworkManager/resolv.conf "$T/etc/resolv.conf"
+    exit 0   # không bao giờ làm Calamares báo cài thất bại vì thiếu app (rc=$rc)
+fi
+
+[ "$(id -u)" = 0 ] || { echo "!! cần root" >&2; exit 1; }
+[ -d /run/live/medium ] && { echo "phiên live: không cài app (chỉ cài lúc cài đặt)" >&2; exit 0; }
+mkdir -p "$STATE" "$LOGD"
+export DEBIAN_FRONTEND=noninteractive
+
+online() { curl -fsI --max-time 15 http://deb.debian.org/debian/dists/trixie/Release >/dev/null 2>&1; }
+if ! online; then
+    touch "$FLAG"
+    echo ">> Chưa có mạng: app sẽ tự cài khi máy có mạng (depot-update)"
+    exit 0
+fi
+
+log() { echo "$(date '+%F %T') $*"; }
+fails=""
+step() {   # step TÊN LỆNH… — chạy trong subshell, ghi log riêng
+    name=$1; shift
+    log ">> $name"
+    if ( set -e; "$@" ) > "$LOGD/app-$name.log" 2>&1; then log "   xong"; else log "   LỖI (xem $LOGD/app-$name.log)"; fails="$fails $name"; fi
+}
+
+debian_apps() {
+    apt-get update
+    # shellcheck disable=SC2086
+    apt-get install -y $DEBS
+    # CUPS chạy theo yêu cầu (socket): chỉ khởi động khi có app in, đỡ vài giây boot.
+    # Tắt service TRƯỚC: cups.service có Also=cups.socket nên disable nó gỡ luôn socket vừa bật
+    systemctl disable cups.service || true
+    systemctl enable cups.socket || true
+    # Flathub cho cả máy: app Flatpak hiện trong GNOME Software cạnh app Debian
+    flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    # GNOME Software không tự tải cập nhật ngầm — depot-update lo việc đó (màn chờ cập nhật khi khởi động lại)
+    printf '[org.gnome.software]\ndownload-updates=false\ndownload-updates-notify=false\n' \
+        > /usr/share/glib-2.0/schemas/90_depot-software.gschema.override
+    glib-compile-schemas /usr/share/glib-2.0/schemas
+}
+
+telegram() {
+    # sources.list do Calamares ghi đã có backports; thêm lần nữa thì apt báo "cấu hình trùng"
+    grep -rqs 'trixie-backports' /etc/apt/sources.list /etc/apt/sources.list.d/ ||
+    cat > /etc/apt/sources.list.d/debian-backports.sources <<'EOF'
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie-backports
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+    apt-get update
+    apt-get install -y -t trixie-backports telegram-desktop
+}
+
+claude() {
+    K=/usr/share/keyrings/claude-desktop-archive-keyring.asc
+    curl -fsSL --retry 3 -o "$K" https://downloads.claude.ai/claude-desktop/key.asc
+    echo "$CLAUDE_KEY_SHA  $K" | sha256sum -c -
+    echo "deb [arch=amd64 signed-by=$K] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
+        > /etc/apt/sources.list.d/claude-desktop.list
+    apt-get update
+    apt-get install -y claude-desktop
+    # Claude gọi icon "claude-desktop" (PNG hicolor); WhiteSur có sẵn "claude" kiểu macOS → trỏ sang cho đồng bộ dock
+    W=/usr/share/icons/WhiteSur/apps/scalable
+    [ -f $W/claude.svg ] && ln -sf claude.svg $W/claude-desktop.svg
+    gtk-update-icon-cache -f -q /usr/share/icons/WhiteSur || true
+}
+
+discord() {
+    curl -fsSL --retry 3 --max-time 600 -o /tmp/discord.deb \
+        "https://stable.dl2.discordapp.net/apps/linux/$DISCORD_VER/discord-$DISCORD_VER.deb"
+    echo "$DISCORD_SHA  /tmp/discord.deb" | sha256sum -c -
+    apt-get install -y /tmp/discord.deb
+    rm -f /tmp/discord.deb
+}
+
+antigravity() {
+    curl -fsSL --retry 3 --max-time 1800 -o /tmp/antigravity.tar.gz \
+        "https://storage.googleapis.com/antigravity-public/antigravity-hub/$AG_VER-$AG_BUILD/linux-x64/Antigravity.tar.gz"
+    echo "$AG_SHA  /tmp/antigravity.tar.gz" | sha256sum -c -
+    P=/tmp/antigravity-pkg
+    rm -rf "$P" /tmp/Antigravity-x64
+    mkdir -p "$P/DEBIAN" "$P/opt" "$P/usr/bin" "$P/usr/share/applications"
+    tar xzf /tmp/antigravity.tar.gz -C /tmp
+    mv /tmp/Antigravity-x64 "$P/opt/antigravity"
+    rm -f /tmp/antigravity.tar.gz
+    # Electron cần chrome-sandbox thuộc root + setuid, thiếu thì không mở được (--root-owner-group giữ quyền)
+    chmod 4755 "$P/opt/antigravity/chrome-sandbox"
+    ln -s /opt/antigravity/antigravity "$P/usr/bin/antigravity"
+    cat > "$P/DEBIAN/control" <<EOF
+Package: antigravity
+Version: $AG_VER-depot1
+Architecture: amd64
+Maintainer: Depot OS <depot-os@localhost>
+Installed-Size: $(du -sk "$P" | cut -f1)
+Section: devel
+Priority: optional
+Homepage: https://antigravity.google
+Description: Google Antigravity — lập trình cùng AI agent
+ Tarball chính thức của Google (bản $AG_VER), đóng gói lúc cài Depot OS.
+EOF
+    # tarball không kèm .desktop; icon lấy từ WhiteSur (apps/scalable/antigravity.svg)
+    cat > "$P/usr/share/applications/antigravity.desktop" <<'EOF'
+[Desktop Entry]
+Name=Antigravity
+Comment=Google Antigravity — lập trình cùng AI agent
+Exec=/opt/antigravity/antigravity %U
+Icon=antigravity
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupWMClass=antigravity
+EOF
+    dpkg-deb --root-owner-group -Zxz -b "$P" /tmp/antigravity.deb
+    dpkg -i /tmp/antigravity.deb
+    rm -rf "$P" /tmp/antigravity.deb
+}
+
+dpkg -s gnome-software >/dev/null 2>&1 || step debian debian_apps
+dpkg -s telegram-desktop >/dev/null 2>&1 || step telegram telegram
+dpkg -s claude-desktop >/dev/null 2>&1 || step claude claude
+dpkg -s discord >/dev/null 2>&1 || step discord discord
+dpkg -s antigravity >/dev/null 2>&1 || step antigravity antigravity
+apt-get clean
+
+if [ -n "$fails" ]; then
+    echo "$fails" > "$FLAG"   # depot-update thử lại phần lỗi khi có mạng
+    log "!! Chưa cài được:$fails — sẽ thử lại"
+else
+    rm -f "$FLAG"
+fi
+
+# tải sẵn bản cập nhật → khởi động lại lần đầu vào màn chờ cập nhật
+depot-update download || true
+exit 0

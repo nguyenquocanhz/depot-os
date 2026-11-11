@@ -1,0 +1,5 @@
+# Depot OS — nạp proxy do hộp thoại "DNS và Proxy" lưu (depot-dns-proxy) vào phiên XFCE/i3.
+# Xsession chạy với set -e: dùng if để file luôn trả về 0.
+if [ -r "$HOME/.config/depot/proxy.env" ]; then
+    . "$HOME/.config/depot/proxy.env"
+fi

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Depot OS — Unikey dễ nhìn ở khay hệ thống: biểu tượng của fcitx5 hiện chữ "vi" khi đang gõ tiếng Việt.
+# Mặc định fcitx5 hiện hình: ô "UN" cho Unikey, ký hiệu bàn phím cho tiếng Anh — người quen UniKey trên Windows
+# không biết đang ở chế độ nào. dotfiles (fcitx5/conf/classicui.conf) bật PreferTextIcon: bộ gõ nào có NHÃN thì
+# hiện nhãn dạng chữ; bàn phím tiếng Anh có sẵn nhãn "en", còn Unikey của gói không khai nhãn nên vẫn ra hình.
+# Hook này chép khai báo bộ gõ Unikey sang /usr/local/share/fcitx5/inputmethod (đứng trước /usr/share trong
+# XDG_DATA_DIRS, gói fcitx5-unikey cập nhật không làm mất) rồi thêm Label=vi.
+# Chạy lại được nhiều lần. Thử ngoài chroot: DEPOT_FCITX_SRC / DEPOT_FCITX_DST.
+set -e
+SRC=${DEPOT_FCITX_SRC:-/usr/share/fcitx5/inputmethod}/unikey.conf
+DST=${DEPOT_FCITX_DST:-/usr/local/share/fcitx5/inputmethod}
+[ -f "$SRC" ] || { echo "!! thiếu $SRC (gói fcitx5-unikey)"; exit 1; }
+mkdir -p "$DST"
+awk '
+    /^\[InputMethod\]$/ { print; print "Label=vi"; next }
+    /^Label=/ { next }
+    { print }
+' "$SRC" > "$DST/unikey.conf"
+grep -qx 'Label=vi' "$DST/unikey.conf" || { echo "!! không thêm được nhãn vi vào $DST/unikey.conf"; exit 1; }
+echo ">> Depot unikey: khay hệ thống hiện chữ vi / en ($DST/unikey.conf)"

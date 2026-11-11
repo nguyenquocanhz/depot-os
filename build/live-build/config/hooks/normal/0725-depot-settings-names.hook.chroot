@@ -1,0 +1,28 @@
+#!/bin/sh
+# Depot OS — tên tiếng Việt cho các mục trong Settings Manager (xem /usr/share/depot-os/settings-names.conf).
+# Chép .desktop gốc sang /usr/local/share/applications (cùng id nên đè bản ở /usr/share, gói cập nhật không
+# làm mất) rồi thay Name[vi] / Comment[vi] trong nhóm [Desktop Entry]; các nhóm khác (Desktop Action) giữ nguyên.
+# Gói chưa cài thì bỏ qua dòng đó. Chạy lại được nhiều lần.
+set -e
+CONF=${DEPOT_SETTINGS_NAMES:-/usr/share/depot-os/settings-names.conf}
+SRC=${DEPOT_APPS_SRC:-/usr/share/applications}
+DST=${DEPOT_APPS_DST:-/usr/local/share/applications}
+[ -r "$CONF" ] || { echo "!! thiếu $CONF"; exit 1; }
+mkdir -p "$DST"
+n=0
+while IFS='|' read -r id name comment; do
+    case $id in '' | '#'*) continue ;; esac
+    [ -f "$SRC/$id.desktop" ] || { echo ".. chưa cài: $id"; continue; }
+    awk -v name="$name" -v comment="$comment" '
+        /^\[/ {
+            main = ($0 == "[Desktop Entry]")
+            print
+            if (main) { print "Name[vi]=" name; if (comment != "") print "Comment[vi]=" comment }
+            next
+        }
+        main && /^(Name|Comment)\[vi(_VN)?\]=/ { next }
+        { print }
+    ' "$SRC/$id.desktop" > "$DST/$id.desktop"
+    n=$((n + 1))
+done < "$CONF"
+echo ">> Depot settings names: $n mục có tên tiếng Việt ($DST)"

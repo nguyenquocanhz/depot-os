@@ -1,0 +1,13 @@
+[Unit]
+Description=Depot OS for Workstation: CPU chạy hết tốc khi cắm điện
+# depot-edition set workstation bật service này; bản khác tắt. Rút/cắm sạc: udev 90-depot-edition-tune.rules gọi lại.
+ConditionPathExists=/etc/depot-edition
+ConditionPathExists=!/run/live/medium
+After=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-edition tune
+
+[Install]
+WantedBy=multi-user.target

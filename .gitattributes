@@ -1,0 +1,21 @@
+# Depot OS — mọi tệp chữ giữ xuống dòng kiểu Unix (LF), kể cả khi sửa trên Windows.
+# Script, hook live-build và file cấu hình mà dính CRLF thì build trong WSL hỏng ("bad interpreter", "\r: command not found").
+* text=auto eol=lf
+
+# tệp nhị phân: không đụng tới, không diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gif binary
+*.webp binary
+*.oga binary
+*.ogg binary
+*.wav binary
+*.mp4 binary
+*.ttf binary
+*.otf binary
+*.woff2 binary
+*.deb binary
+*.cache binary
+build/live-build/config/includes.chroot/usr/bin/picom-animated binary

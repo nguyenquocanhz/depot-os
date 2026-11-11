@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Chế độ pin
+GenericName=Battery Mode
+Comment=Tiết kiệm pin Low, Medium, High, Ultra hoặc tự động theo % pin; cho app không dùng ngủ sâu
+Exec=depot-power
+TryExec=yad
+Icon=battery
+Terminal=false
+Categories=Settings;System;X-XFCE-SettingsDialog;X-XFCE-HardwareSettings;
+Keywords=pin;battery;tiết kiệm;power;saver;ngủ sâu;deep sleep;low;medium;high;ultra;

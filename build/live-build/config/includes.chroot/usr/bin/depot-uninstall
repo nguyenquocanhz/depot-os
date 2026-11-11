@@ -1,0 +1,131 @@
+#!/bin/sh
+# Depot OS — "Gỡ cài đặt" ở menu chuột phải (menu Start, dock, taskbar), như Windows/macOS
+#   depot-uninstall ID.desktop      hỏi rồi gỡ app (gói apt của nó, hoặc ẩn khỏi menu nếu không phải gói)
+#   depot-uninstall --refresh       (root) gắn mục "Gỡ cài đặt" vào file .desktop của các app gỡ được;
+#                                   apt tự gọi sau mỗi lần cài/gỡ (/etc/apt/apt.conf.d/90depot-uninstall)
+#   depot-uninstall remove GÓI      (root, tự gọi pkexec) apt-get remove
+# Cài app thì dùng GNOME Software ("Phần mềm"): kho Debian + Flathub, nhấp đúp file .deb.
+# App Flatpak gỡ trong GNOME Software (file .desktop của Flatpak thuộc app, không sửa).
+APPS=/usr/share/applications
+ACTION=depot-uninstall
+SELF=$(command -v "$0")   # pkexec cần đường dẫn tuyệt đối
+
+# Gói của chính desktop / Depot: không gắn mục gỡ, và từ chối nếu gỡ một app kéo theo chúng
+PROTECT='^(xfce4|xfce4-.*|xfwm4|xfdesktop4|xfconf|thunar|thunar-.*|libxfce4.*|lightdm.*|plank|i3.*|rofi|network-manager.*|nm-.*|pipewire.*|wireplumber|fcitx5.*|im-config|gnome-software.*|packagekit.*|flatpak|firefox-esr|yad|calamares.*|policykit-1|polkitd|pkexec|sudo|apt|dpkg|systemd.*|dbus.*|xserver-xorg.*|xorg|picom|conky.*|blueman|pavucontrol|plymouth.*|linux-image-.*|live-.*|grub.*|shim.*)$'
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# giá trị KHOÁ trong nhóm [Desktop Entry] (nhóm Desktop Action cũng có Name/Icon)
+key() {
+    awk -v k="$1" '/^\[/ { g = $0 } g == "[Desktop Entry]" && index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$2"
+}
+
+# "gói<TAB>/usr/share/applications/x.desktop" cho mọi file .desktop thuộc gói (một lần grep, không gọi dpkg -S từng file)
+owners() {
+    grep -H "^$APPS/[^/]*\.desktop\$" /var/lib/dpkg/info/*.list 2>/dev/null \
+        | sed 's|^/var/lib/dpkg/info/||; s|\.list:|\t|; s|:[a-z0-9]*\t|\t|'
+}
+
+# app hiện trong menu: Type=Application, không NoDisplay/Hidden
+listed() {
+    awk '/^\[/ { g = $0 } g == "[Desktop Entry]" && /^(NoDisplay|Hidden)=true/ { bad = 1 }
+         g == "[Desktop Entry]" && /^Type=/ && $0 != "Type=Application" { bad = 1 }
+         END { exit bad }' "$1"
+}
+
+# thêm "depot-uninstall;" vào Actions= của nhóm [Desktop Entry] + nhóm [Desktop Action depot-uninstall] ở cuối file
+tag() {
+    f=$1; id=$(basename "$f")
+    grep -q "^\[Desktop Action $ACTION\]" "$f" && return
+    awk -v a="$ACTION" '
+        function add() { if (!done) { print "Actions=" a ";"; done = 1 } }
+        /^\[/ { if (g == "[Desktop Entry]" && !done) add(); g = $0 }
+        g == "[Desktop Entry]" && /^Actions=/ { sub(/;?[ \t]*$/, ";" a ";"); done = 1 }
+        { print }
+        END { if (!done) add() }' "$f" > "$f.depot-tmp" || { rm -f "$f.depot-tmp"; return; }
+    # dòng trống trước nhóm mới; Exec trỏ ID chứ không trỏ đường dẫn (file có thể nằm chỗ khác sau này)
+    printf '\n[Desktop Action %s]\nName=Uninstall\nName[vi]=Gỡ cài đặt\nIcon=edit-delete\nExec=depot-uninstall %s\n' \
+        "$ACTION" "$id" >> "$f.depot-tmp"
+    cat "$f.depot-tmp" > "$f"; rm -f "$f.depot-tmp"
+}
+
+refresh() {
+    [ "$(id -u)" = 0 ] || { echo "!! cần root" >&2; exit 1; }
+    owners | while IFS="$(printf '\t')" read -r pkg f; do
+        echo "$pkg" | grep -Eq "$PROTECT" && continue
+        [ -f "$f" ] && listed "$f" && tag "$f"
+    done
+    # web app của Depot (Zalo...) không thuộc gói nào: gỡ = ẩn khỏi menu của user
+    for f in "$APPS"/*.desktop; do
+        grep -q '^Exec=depot-webapp ' "$f" 2>/dev/null && tag "$f"
+    done
+    return 0
+}
+
+msg() { yad --title="Gỡ cài đặt" --window-icon=edit-delete --image="$1" --borders=16 --width=460 --center \
+        --text="$2" --button="Đóng:0" >/dev/null 2>&1; }
+
+remove_pkg() {
+    [ "$(id -u)" = 0 ] || exec pkexec "$SELF" remove "$@"
+    case "$1" in ''|*[!a-z0-9.+-]*) echo "!! tên gói không hợp lệ: $1" >&2; exit 2 ;; esac
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y "$1"
+}
+
+uninstall() {
+    id=$(basename "$1"); id=${id%.desktop}.desktop
+    f=$APPS/$id
+    [ -f "$f" ] || { msg dialog-error "Không tìm thấy app <b>$id</b>."; exit 1; }
+    name=$(key 'Name[vi]' "$f"); [ -n "$name" ] || name=$(key Name "$f")
+    icon=$(key Icon "$f")
+    pkg=$(owners | awk -F'\t' -v f="$f" '$2 == f { print $1; exit }')
+
+    if [ -z "$pkg" ]; then
+        # không thuộc gói (web app, lối tắt tự tạo): ẩn khỏi menu của user này, Hidden=true = "đã xoá" theo chuẩn XDG
+        yad --title="Gỡ cài đặt" --window-icon=edit-delete --image="${icon:-edit-delete}" --borders=16 --width=460 --center \
+            --text="Gỡ <b>$name</b> khỏi menu?\n\n$name là web app / lối tắt, không phải phần mềm cài bằng gói, nên chỉ cần ẩn đi.\nDữ liệu đăng nhập của nó cũng được xoá." \
+            --button="Huỷ:1" --button="Gỡ:0" >/dev/null 2>&1 || exit 0
+        mkdir -p "$HOME/.local/share/applications"
+        printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$name" > "$HOME/.local/share/applications/$id"
+        # depot-webapp TÊN URL → hồ sơ Firefox riêng ở ~/.local/share/depot-webapp/TÊN
+        wa=$(sed -n 's/^Exec=depot-webapp \([^ ]*\) .*/\1/p' "$f" | head -1)
+        [ -n "$wa" ] && rm -rf "$HOME/.local/share/depot-webapp/$wa"
+        notify-send -a "Depot OS" -i edit-delete "Đã gỡ $name" 2>/dev/null
+        exit 0
+    fi
+
+    # xem trước apt sẽ gỡ những gói nào: gỡ một app có thể kéo theo gói khác phụ thuộc vào nó
+    gone=$(LC_ALL=C apt-get -s remove "$pkg" 2>/dev/null | awk '/^Remv / { print $2 }')
+    bad=$(echo "$gone" | grep -vx "$pkg" | grep -E "$PROTECT")
+    if [ -n "$bad" ]; then
+        msg dialog-warning "Không gỡ được <b>$name</b>: gỡ nó sẽ kéo theo phần của hệ thống:\n\n<tt>$(echo "$bad" | head -8 | tr '\n' ' ')</tt>"
+        exit 1
+    fi
+    more=$(echo "$gone" | grep -vx "$pkg" | tr '\n' ' ')
+    text="Gỡ <b>$name</b> khỏi máy?\n\nGói: <tt>$pkg</tt>"
+    [ -n "$more" ] && text="$text\nGỡ kèm (phụ thuộc vào nó): <tt>$more</tt>"
+    text="$text\n\nCài lại bất cứ lúc nào trong <b>Phần mềm</b>."
+    yad --title="Gỡ cài đặt" --window-icon=edit-delete --image="${icon:-edit-delete}" --borders=16 --width=460 --center \
+        --text="$text" --button="Huỷ:1" --button="Gỡ:0" >/dev/null 2>&1 || exit 0
+
+    pkexec "$SELF" remove "$pkg" > /tmp/depot-uninstall.$$ 2>&1 &
+    pid=$!
+    ( while kill -0 $pid 2>/dev/null; do echo "#Đang gỡ $name..."; sleep 1; done ) \
+        | yad --progress --pulsate --auto-close --no-buttons --title="Gỡ cài đặt" --window-icon=edit-delete \
+              --borders=16 --width=420 --center >/dev/null 2>&1
+    wait $pid; rc=$?
+    if [ $rc = 0 ] && ! dpkg -s "$pkg" 2>/dev/null | grep -q '^Status: install ok'; then
+        notify-send -a "Depot OS" -i edit-delete "Đã gỡ $name" 2>/dev/null
+    elif [ $rc = 126 ] || [ $rc = 127 ]; then
+        :   # người dùng huỷ hộp nhập mật khẩu
+    else
+        msg dialog-error "Gỡ <b>$name</b> không thành công:\n\n<tt>$(tail -5 /tmp/depot-uninstall.$$ | sed 's/&/\&amp;/g; s/</\&lt;/g')</tt>"
+    fi
+    rm -f /tmp/depot-uninstall.$$
+}
+
+case "${1:-}" in
+    --refresh) refresh ;;
+    remove) shift; remove_pkg "$@" ;;
+    ''|-*) echo "dùng: depot-uninstall ID.desktop | --refresh | remove GÓI" >&2; exit 2 ;;
+    *) have yad || { echo "!! thiếu yad" >&2; exit 1; }; uninstall "$1" ;;
+esac

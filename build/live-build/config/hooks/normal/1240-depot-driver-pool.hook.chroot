@@ -1,0 +1,44 @@
+#!/bin/sh
+# Depot OS — kho driver trong ISO: máy CHƯA có mạng (vì chính card mạng thiếu driver) vẫn cài được driver.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Trước đây "Driver phần cứng" đề xuất broadcom-sta-dkms nhưng phải tải từ mạng: máy Wi-Fi Broadcom không có mạng
+# nên không bao giờ cài được. Driver DKMS còn cần header ĐÚNG kernel đang chạy — kho Debian chỉ giữ header của
+# kernel mới nhất, nên ISO ra vài tuần là header của kernel trong ISO không còn tải được nữa.
+#
+# Hook này chỉ TẢI (không cài) vào /usr/share/depot-os/driver-pool:
+#   base/     dkms + linux-headers của kernel trong ISO + mọi gói phụ thuộc ISO chưa có (apt tự tính phần còn thiếu;
+#             gcc, make đã có sẵn trong ISO)
+#   drivers/  broadcom-sta-dkms (Wi-Fi Broadcom, driver wl), r8168-dkms (mạng dây Realtek, driver chính hãng)
+#   kernel    phiên bản kernel mà base/ dành cho — depot-drivers so với `uname -r` trước khi dùng
+# Đánh số 1240: phải chạy SAU hook 1100 (cài gcc, make để build picom) — chạy trước thì apt tải cả bộ biên dịch vào kho.
+# Không cài sẵn: broadcom-sta-dkms chặn b43/bcma/brcmsmac, r8168-dkms chặn r8169 — cài sẵn là hỏng máy đang chạy tốt.
+# Tải lỗi KHÔNG làm hỏng build: ISO ra không có kho, depot-drivers tự chuyển sang tải từ mạng
+# (scripts/check-v20.sh báo trượt để biết mà build lại).
+set -u
+POOL=/usr/share/depot-os/driver-pool
+DRIVERS="broadcom-sta-dkms r8168-dkms"
+
+kver=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*-amd64' 2>/dev/null | sed 's/^linux-image-//' | sort -V | tail -1)
+if [ -z "$kver" ]; then echo "!! Depot driver pool: không thấy kernel trong chroot — bỏ qua"; exit 0; fi
+
+rm -rf "$POOL"
+mkdir -p "$POOL/base/partial" "$POOL/drivers"
+# shellcheck disable=SC2086
+if ! apt-get install -y --download-only --no-install-recommends -o Dir::Cache::archives="$POOL/base" \
+        dkms "linux-headers-$kver" linux-headers-amd64 $DRIVERS; then
+    echo "!! Depot driver pool: tải lỗi — ISO này KHÔNG có kho driver offline"
+    rm -rf "$POOL"
+    exit 0
+fi
+rm -rf "$POOL/base/partial" "$POOL/base/lock"
+for p in $DRIVERS; do mv "$POOL"/base/"${p}"_*.deb "$POOL/drivers/"; done
+echo "$kver" > "$POOL/kernel"
+chmod -R a+rX "$POOL"
+
+n=$(ls "$POOL"/base/*.deb "$POOL"/drivers/*.deb 2>/dev/null | wc -l)
+if ! ls "$POOL"/base/linux-headers-"$kver"_*.deb >/dev/null 2>&1; then
+    # header đã cài sẵn trong chroot thì apt không tải lại — vẫn dùng được, nhưng ghi rõ để khỏi ngờ
+    [ -e "/lib/modules/$kver/build/Makefile" ] || { echo "!! Depot driver pool: thiếu linux-headers-$kver"; rm -rf "$POOL"; exit 0; }
+fi
+echo ">> Depot driver pool: $n gói, $(du -sh "$POOL" | cut -f1), kernel $kver ($(ls "$POOL/drivers" | tr '\n' ' '))"

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Thông báo cập nhật (Depot OS)
+Comment=Báo khi đã tải xong bản cập nhật, chờ khởi động lại để cài
+Exec=depot-update notify
+TryExec=depot-update
+Terminal=false
+NoDisplay=true

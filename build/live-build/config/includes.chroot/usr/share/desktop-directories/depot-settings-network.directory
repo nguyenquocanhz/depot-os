@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Directory
+Name=Mạng và Internet
+Name[en]=Network & Internet
+Comment=Wi-Fi, mạng dây, DNS, proxy, Bluetooth
+Icon=preferences-system-network

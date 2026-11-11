@@ -1,0 +1,11 @@
+#!/bin/sh
+# Depot OS — tên cũ, giữ cho quen tay. Compositor nay nằm trong depot-effects ("Hiệu ứng hình ảnh")
+#   depot-compositor            = depot-effects apply
+#   depot-compositor status     = depot-effects status
+#   depot-compositor auto|best|fast  = depot-effects set ...
+case "${1:-}" in
+    '') exec depot-effects apply ;;
+    status) exec depot-effects status ;;
+    auto | best | fast) exec depot-effects set "$1" ;;
+    *) echo "đã đổi: dùng depot-effects (mở cửa sổ) hoặc depot-effects set auto|best|fast" >&2; exit 2 ;;
+esac

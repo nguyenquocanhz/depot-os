@@ -1,0 +1,14 @@
+[Unit]
+Description=Depot OS: tải ngầm bản cập nhật (cài ở lần khởi động lại, có màn chờ)
+Documentation=man:systemd.offline-updates(7)
+Wants=network-online.target
+After=network-online.target
+# phiên live (USB) không cập nhật
+ConditionPathExists=!/run/live/medium
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/depot-update download
+# chạy nền, nhường CPU / ổ đĩa cho người dùng
+Nice=15
+IOSchedulingClass=idle

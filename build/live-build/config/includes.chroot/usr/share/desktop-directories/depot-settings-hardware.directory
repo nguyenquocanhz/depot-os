@@ -1,0 +1,7 @@
+[Desktop Entry]
+Version=1.0
+Type=Directory
+Name=Thiết bị
+Name[en]=Devices
+Comment=Màn hình, bàn phím, chuột, âm thanh, driver, USB
+Icon=preferences-desktop-peripherals

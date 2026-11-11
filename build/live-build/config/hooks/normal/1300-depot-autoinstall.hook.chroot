@@ -1,0 +1,25 @@
+#!/bin/sh
+# Depot OS — cài tự động kiểu autounattend.xml (xem /usr/bin/depot-autoinstall):
+# bật depot-autoinstall.service (chỉ chạy trong phiên live, trước màn đăng nhập).
+# Mục boot "Cài tự động" do hook 1310-depot-autoinstall-menu.hook.binary thêm.
+set -e
+
+chmod 755 /usr/bin/depot-autoinstall
+chmod 644 /usr/lib/systemd/system/depot-autoinstall.service   # chép từ Windows hay mang bit exec → systemd cảnh báo
+systemctl enable depot-autoinstall.service
+
+# depot-autoinstall cài bootloader bằng grub-install của hệ vừa chép (gói grub2-common, kéo theo bởi
+# grub-efi-amd64-signed/shim-signed). Lưu ý: live-build gỡ các gói này khỏi chroot SAU khi nén squashfs,
+# nên soi chroot/ sau build sẽ không thấy — squashfs vẫn có.
+command -v grub-install >/dev/null || { echo "!! thiếu grub-install (gói grub2-common)"; exit 1; }
+
+# OpenSSH có trong ISO cho depot-autoinstall (SSH=yes), nhưng KHÔNG chạy trong phiên live (user live mật khẩu "live")
+# và không mang khoá máy chủ chung cho mọi máy — depot-autoinstall sinh khoá riêng (ssh-keygen -A) khi bật SSH.
+if [ -e /usr/lib/systemd/system/ssh.service ]; then
+    systemctl disable ssh.service >/dev/null 2>&1 || true
+    systemctl disable ssh.socket >/dev/null 2>&1 || true
+    rm -f /etc/ssh/ssh_host_*
+fi
+
+echo ">> Depot autoinstall: ssh $(systemctl is-enabled ssh.service 2>/dev/null || echo không-có), host key: $(ls /etc/ssh/ssh_host_* 2>/dev/null | wc -l)"
+echo ">> Depot autoinstall: service $(systemctl is-enabled depot-autoinstall.service), grub-install $(command -v grub-install)"

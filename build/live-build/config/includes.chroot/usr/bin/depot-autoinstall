@@ -1,0 +1,1121 @@
+#!/bin/bash
+# Depot OS — CÀI TỰ ĐỘNG theo file cấu hình (giống autounattend.xml của Windows).
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Calamares không có chế độ tự cài, nên script này tự làm đúng các bước Calamares của Depot OS đang làm
+# (/etc/calamares/settings.conf, phần exec): chia ổ / quick format phân vùng → bung filesystem.squashfs → fstab,
+# ngôn ngữ, bàn phím, múi giờ, user, hostname → giờ phần cứng (depot-rtc) → bootloader (UEFI / Legacy / cả hai,
+# thêm mục vào menu boot) → gỡ gói live → initramfs → nguồn apt → app Depot → OpenSSH + ufw → lệnh sau khi cài.
+#
+#   depot-autoinstall --check [FILE]     kiểm file cấu hình + in kế hoạch (KHÔNG đụng ổ). Không có FILE: tự tìm
+#   depot-autoinstall --find             tìm file cấu hình như lúc boot, in ra đường dẫn
+#   depot-autoinstall --list-disks       liệt kê ổ
+#   depot-autoinstall --list-partitions  liệt kê phân vùng (cái nào cài vào được, cái nào là Windows / EFI…)
+#   depot-autoinstall --run FILE [--yes] cài ngay theo FILE (không có --yes thì bắt gõ XOA để xác nhận)
+#   depot-autoinstall --service          depot-autoinstall.service gọi lúc boot phiên live
+#
+# Hai chế độ (TARGET=):
+#   disk       xoá sạch cả ổ (DISK=, WIPE_DISK=yes), tự chia GPT/MBR
+#   partition  chỉ quick format MỘT phân vùng (PARTITION=, FORMAT_PARTITION=yes), giữ nguyên phân vùng khác
+#              (Windows, ổ D:, EFI) → dual-boot, menu GRUB có cả Windows. PARTITION=ask: hiện danh sách để chọn.
+#
+# Tìm file `depot-autoinstall.conf` (như Windows tìm autounattend.xml ở gốc USB):
+#   1. gốc mọi phân vùng trên USB / ổ rời / đĩa CD
+#   2. gốc ISO (/run/live/medium)
+#   3. chỉ khi boot bằng mục "Cài tự động" (tham số depot.autoinstall): thêm gốc phân vùng của ổ trong máy
+# Tự chạy khi: boot bằng mục "Cài tự động", HOẶC file có AUTO_START=yes. Tham số depot.noautoinstall: không bao giờ.
+set -u
+export LC_ALL=C.UTF-8 PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+CONF_NAME=depot-autoinstall.conf
+FILES_DIR_NAME=depot-files          # thư mục cạnh file cấu hình: chép đè vào gốc máy mới (kiểu $OEM$\$1)
+WORK=/run/depot-autoinstall
+T=$WORK/target                      # gốc hệ thống đang cài
+LOG=$WORK/install.log
+MIN_BYTES=15000000000               # bằng requiredStorage 15 GB của Calamares (welcome.conf)
+RELEASE=trixie
+DEFAULT_GROUPS="cdrom floppy sudo audio dip video plugdev netdev lpadmin scanner bluetooth"   # users.conf của Calamares
+LIVE_PKGS="live-boot live-boot-doc live-config live-config-doc live-config-systemd live-tools live-task-localisation live-task-recommended calamares-settings-debian"   # packages.conf
+# GUID loại phân vùng (GPT) + mã MBR
+GUID_ESP=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+GUID_MSR=e3c9e316-0b5c-4db8-817d-f92df00215ae
+GUID_BIOSGRUB=21686148-6449-6e6f-744e-656564454649
+GUID_WINRE=de94bba4-06d1-4d40-a16a-bfd50179d6ac
+GUID_LINUX=0fc63daf-8483-4772-8e79-3d69d8477de4
+
+mkdir -p "$WORK"
+
+# ---------------------------------------------------------------- hiển thị
+# Màn chữ (VT) của Linux không có font tiếng Việt: bỏ dấu khi in ra VT; log giữ nguyên dấu.
+ON_VT=0
+plain() { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; }
+ui() { if [ "$ON_VT" = 1 ]; then printf '%s' "$*" | plain; else printf '%s' "$*"; fi; }
+out() {
+    if [ "$ON_VT" = 1 ]; then printf '%s\n' "$*" | plain; else printf '%s\n' "$*"; fi
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"
+}
+plymouth_on() { command -v plymouth >/dev/null && plymouth --ping 2>/dev/null; }
+status() {
+    plymouth_on && plymouth display-message --text="$*" 2>/dev/null
+    out ">> $*"
+}
+die() {
+    out "!! LỖI: $*"
+    plymouth_on && plymouth display-message --text="Cài tự động THẤT BẠI: $* — log: $LOG" 2>/dev/null
+    cleanup_mounts
+    if [ "${SERVICE:-0}" = 1 ]; then out "Log: $LOG — vào phiên live sau 60 giây"; sleep 60; fi
+    exit 1
+}
+warn() { out "!! Cảnh báo: $*"; WARNINGS="${WARNINGS:-}
+ - $*"; }
+
+# ---------------------------------------------------------------- đọc file cấu hình
+declare -A CFG=()
+POST_CMDS=(); FIRST_CMDS=()
+KNOWN_KEYS="AUTO_START CONFIRM CONFIRM_TIMEOUT TARGET DISK WIPE_DISK PARTITION FORMAT_PARTITION BOOT_MODE FILESYSTEM
+SWAP_SIZE LOCALE KEYBOARD_LAYOUT KEYBOARD_VARIANT KEYBOARD_MODEL KEYBOARD_OPTIONS TIMEZONE RTC HOSTNAME FULLNAME
+USERNAME PASSWORD PASSWORD_HASH AUTOLOGIN WIFI_SSID WIFI_PASSWORD INSTALL_APPS EXTRA_PACKAGES SSH SSH_PORT SSH_USER
+SSH_PASSWORD SSH_PASSWORD_HASH SSH_AUTHORIZED_KEY SSH_PASSWORD_AUTH SSH_SUDO SSH_STORAGE SSH_STORAGE_FORMAT FIREWALL
+POST_INSTALL FIRSTBOOT FINISH"
+
+parse_config() {   # parse_config FILE — dạng KEY=giá trị, chịu được BOM + CRLF của Notepad
+    local f=$1 line key val n=0
+    [ -r "$f" ] || { echo "không đọc được $f" >&2; return 1; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line=${line%$'\r'}
+        [ $n = 1 ] && line=${line#$'\xef\xbb\xbf'}
+        [[ $line =~ ^[[:space:]]*($|#|\;) ]] && continue
+        if [[ ! $line =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+            echo "dòng $n không đúng dạng KEY=giá trị: $line" >&2; return 1
+        fi
+        key=${BASH_REMATCH[1]^^}; val=${BASH_REMATCH[2]}
+        val=${val#"${val%%[![:space:]]*}"}
+        if [[ $val =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]] || [[ $val =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+            val=${BASH_REMATCH[1]}
+        else
+            val=${val%%[[:space:]]#*}
+            val=${val%"${val##*[![:space:]]}"}
+        fi
+        case " $(echo $KNOWN_KEYS) " in *" $key "*) ;; *) echo "dòng $n: không biết khoá '$key' (bỏ qua)" >&2; continue ;; esac
+        case $key in
+            POST_INSTALL) [ -n "$val" ] && POST_CMDS+=("$val") ;;
+            FIRSTBOOT)    [ -n "$val" ] && FIRST_CMDS+=("$val") ;;
+            *)            CFG[$key]=$val ;;
+        esac
+    done <"$f"
+}
+
+cfg() { local v=${CFG[$1]:-}; [ -n "$v" ] && printf '%s' "$v" || printf '%s' "${2:-}"; }
+is_yes() { case "${1,,}" in yes|y|true|1|co|có) return 0 ;; *) return 1 ;; esac; }
+
+# ---------------------------------------------------------------- ổ đĩa, phân vùng
+field() {   # field TÊN "dòng lsblk -P" — có ranh giới trước tên: TYPE không được khớp nhầm FSTYPE / PARTTYPE
+    [[ $2 =~ (^|[[:space:]])$1=\"([^\"]*)\" ]] && printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+}
+human() { awk -v b="$1" 'BEGIN{ if (b>=1e12) printf "%.1f TB", b/1e12; else if (b>=1e9) printf "%.0f GB", b/1e9; else printf "%.0f MB", b/1e6 }'; }
+disk_of() {   # disk_of DEV → ổ vật lý chứa DEV (qua loop / phân vùng)
+    local dev=$1 back
+    case $dev in /dev/loop*)
+        back=$(losetup -nO BACK-FILE "$dev" 2>/dev/null | head -1)
+        [ -n "$back" ] && dev=$(findmnt -nvo SOURCE --target "$back" 2>/dev/null | head -1) ;;
+    esac
+    [ -b "$dev" ] || return 0
+    lsblk -nrpso NAME,TYPE "$dev" 2>/dev/null | awk '$2=="disk"{print $1}'
+}
+protected_devs() {   # nguồn của ISO đang chạy, file cấu hình, / và swap đang dùng (thiết bị, không phải ổ)
+    local m
+    for m in /run/live/medium /run/live/findiso /run/live/persistence; do
+        mountpoint -q "$m" 2>/dev/null && findmnt -nvo SOURCE "$m" | head -1
+    done
+    [ -n "${CONF_DEV:-}" ] && echo "$CONF_DEV"
+    findmnt -nvo SOURCE / | head -1
+    awk 'NR>1 && $1 ~ /^\/dev\// {print $1}' /proc/swaps
+}
+protected_disks() { protected_devs | while read -r d; do disk_of "$d"; done | sort -u; }
+protected_parts() {   # phân vùng (thật) đang chứa ISO / file cấu hình — kể cả qua loop của findiso/Ventoy
+    protected_devs | while read -r d; do
+        case $d in /dev/loop*) findmnt -nvo SOURCE --target "$(losetup -nO BACK-FILE "$d" 2>/dev/null | head -1)" 2>/dev/null ;;
+                   *) echo "$d" ;; esac
+    done | sort -u
+}
+list_disks() {   # NAME SIZE RM TRAN MODEL — mọi ổ ghi được (không loop/CD/zram)
+    lsblk -dnpbP -o NAME,TYPE,SIZE,RM,RO,TRAN,MODEL 2>/dev/null | while IFS= read -r l; do
+        [ "$(field TYPE "$l")" = disk ] || continue
+        [ "$(field RO "$l")" = 0 ] || continue
+        case $(field NAME "$l") in /dev/zram*|/dev/loop*|/dev/sr*|/dev/fd*|/dev/ram*) continue ;; esac
+        local tr md; tr=$(field TRAN "$l"); md=$(field MODEL "$l" | sed 's/[[:space:]]*$//')
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(field NAME "$l")" "$(field SIZE "$l")" "$(field RM "$l")" "${tr:--}" "${md:--}"
+    done
+}
+disk_desc() {
+    local l; l=$(list_disks | awk -F'\t' -v d="$1" '$1==d')
+    [ -n "$l" ] || { echo "$1"; return; }
+    printf '%s (%s, %s%s)' "$1" "$(human "$(cut -f2 <<<"$l")")" "$(cut -f5 <<<"$l" | sed 's/^-$/không rõ tên/')" \
+        "$( { [ "$(cut -f3 <<<"$l")" = 1 ] || [ "$(cut -f4 <<<"$l")" = usb ]; } && echo ', USB/ổ rời')"
+}
+part_num() { cat "/sys/class/block/$(basename "$1")/partition" 2>/dev/null; }
+part_name() { case $1 in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac; }
+part_type() { lsblk -dno PARTTYPE "$1" 2>/dev/null | tr 'A-F' 'a-f' | tr -d ' '; }
+pt_label() { lsblk -dno PTTYPE "$1" 2>/dev/null | tr -d ' '; }   # gpt / dos
+has_windows() {   # phân vùng NTFS có \Windows\System32 (mount chỉ đọc để xem)
+    local p=$1 m=$WORK/probe r=1
+    [ "$(lsblk -dno FSTYPE "$p" 2>/dev/null)" = ntfs ] || return 1
+    mkdir -p "$m"
+    mount -t ntfs3 -o ro "$p" "$m" 2>/dev/null || mount -o ro "$p" "$m" 2>/dev/null || return 1
+    [ -d "$m/Windows/System32" ] && r=0
+    umount "$m" 2>/dev/null
+    return $r
+}
+part_role() {   # vai trò để hiện + chặn: esp / msr / biosgrub / winre / windows / extended / ""
+    local p=$1 t; t=$(part_type "$p")
+    case $t in
+        $GUID_ESP|0xef) echo esp ;;
+        $GUID_MSR) echo msr ;;
+        $GUID_BIOSGRUB) echo biosgrub ;;
+        $GUID_WINRE|0x27) echo winre ;;
+        0x5|0xf|0x85) echo extended ;;
+        *) has_windows "$p" && echo windows ;;
+    esac
+}
+role_vi() {
+    case $1 in esp) echo "EFI (khởi động)";; msr) echo "MSR của Windows";; biosgrub) echo "BIOS boot";;
+        winre) echo "Windows Recovery";; windows) echo "Windows";; extended) echo "Extended";; *) echo "";; esac
+}
+# Bảng phân vùng: list_parts [DISK] → NAME SIZE FSTYPE LABEL ROLE (tab)
+list_parts() {
+    local args=(-npbP -o NAME,TYPE,SIZE,FSTYPE,LABEL)
+    lsblk "${args[@]}" ${1:+"$1"} 2>/dev/null | while IFS= read -r l; do
+        [ "$(field TYPE "$l")" = part ] || continue
+        local p; p=$(field NAME "$l")
+        case $p in /dev/zram*|/dev/loop*|/dev/sr*) continue ;; esac
+        local fs lb ro; fs=$(field FSTYPE "$l"); lb=$(field LABEL "$l"); ro=$(part_role "$p")
+        printf '%s\t%s\t%s\t%s\t%s\n' "$p" "$(field SIZE "$l")" "${fs:--}" "${lb:--}" "${ro:--}"
+    done
+}
+print_parts() {   # print_parts DISK [PHÂN_VÙNG_SẼ_FORMAT] [ESP_DÙNG_CHUNG] [cả-ổ]
+    local disk=$1 tgt=${2:-} esp=${3:-} whole=${4:-} mark
+    echo "  Ổ $(disk_desc "$disk") — bảng phân vùng: $(pt_label "$disk" | sed 's/^dos$/MBR/; s/^gpt$/GPT/; s/^$/(trống)/')"
+    local rows; rows=$(list_parts "$disk")
+    [ -n "$rows" ] || echo "    (chưa có phân vùng)"
+    while IFS=$'\t' read -r p size fs label role; do
+        [ -n "$p" ] || continue
+        if [ -n "$whole" ]; then mark="XOÁ"
+        elif [ "$p" = "$tgt" ]; then mark="FORMAT → Depot OS"
+        elif [ "$p" = "$esp" ]; then mark="dùng chung (thêm mục boot)"
+        elif [ -n "${SSH_DEV:-}" ] && [ "$p" = "$SSH_DEV" ]; then
+            if is_yes "$(cfg SSH_STORAGE_FORMAT no)" || [ "$fs" = - ]; then mark="FORMAT → lưu trữ SSH"; else mark="lưu trữ SSH (giữ dữ liệu)"; fi
+        else mark="giữ nguyên"; fi
+        printf '    %-16s %9s  %-6s %-14s %-17s [%s]\n' "$p" "$(human "$size")" "$fs" "${label:0:14}" "$(role_vi "$role")" "$mark"
+    done <<<"$rows"
+}
+
+resolve_disk() {   # in ra ổ sẽ cài (chế độ disk), hoặc lỗi
+    local want; want=$(cfg DISK auto)
+    local prot; prot=$(protected_disks)
+    case $want in
+        auto|largest|smallest)
+            local cands
+            cands=$(list_disks | while IFS=$'\t' read -r name size rm tran model; do
+                grep -qx "$name" <<<"$prot" && continue
+                { [ "$rm" = 1 ] || [ "$tran" = usb ]; } && continue
+                [ "$size" -ge "$MIN_BYTES" ] || continue
+                printf '%s\t%s\n' "$name" "$size"
+            done)
+            local n; n=$(grep -c . <<<"$cands")
+            [ "$n" -gt 0 ] || { echo "không có ổ trong máy nào ≥ 15 GB để cài (USB và ổ chứa ISO/file cấu hình bị loại)" >&2; return 1; }
+            if [ "$want" = auto ] && [ "$n" -gt 1 ]; then
+                echo "máy có $n ổ trong ($(cut -f1 <<<"$cands" | tr '\n' ' ')): DISK=auto chỉ dùng khi có đúng 1 ổ. Ghi rõ DISK=/dev/... hoặc DISK=largest / smallest" >&2
+                return 1
+            fi
+            if [ "$want" = smallest ]; then sort -t$'\t' -k2,2n <<<"$cands" | head -1 | cut -f1
+            else sort -t$'\t' -k2,2nr <<<"$cands" | head -1 | cut -f1; fi
+            ;;
+        /dev/*)
+            local d; d=$(readlink -f "$want")
+            [ -b "$d" ] || { echo "không có ổ $want" >&2; return 1; }
+            [ "$(lsblk -dno TYPE "$d")" = disk ] || { echo "$want không phải cả ổ — muốn cài vào 1 phân vùng thì dùng TARGET=partition, PARTITION=$want" >&2; return 1; }
+            grep -qx "$d" <<<"$prot" && { echo "$want đang chứa ISO Depot OS hoặc file cấu hình — không cài đè lên nó" >&2; return 1; }
+            [ "$(blockdev --getsize64 "$d")" -ge "$MIN_BYTES" ] || { echo "$want nhỏ hơn 15 GB" >&2; return 1; }
+            echo "$d"
+            ;;
+        *) echo "DISK='$want' không hợp lệ (auto / largest / smallest / /dev/...)" >&2; return 1 ;;
+    esac
+}
+
+part_ok() {   # part_ok PART — in lý do nếu KHÔNG cài vào được, trả 1
+    local p=$1 role prot
+    [ "$(lsblk -dno TYPE "$p" 2>/dev/null)" = part ] || { echo "$p không phải phân vùng"; return 1; }
+    prot=$(protected_parts)
+    grep -qx "$p" <<<"$prot" && { echo "$p đang chứa ISO Depot OS / file cấu hình"; return 1; }
+    [ "$(blockdev --getsize64 "$p")" -ge "$MIN_BYTES" ] || { echo "$p nhỏ hơn 15 GB"; return 1; }
+    role=$(part_role "$p")
+    case $role in
+        esp|msr|biosgrub|winre|extended) echo "$p là phân vùng $(role_vi "$role") — không được format"; return 1 ;;
+        windows) echo "$p đang chứa Windows — chọn phân vùng khác (hoặc TARGET=disk để xoá cả ổ)"; return 1 ;;
+    esac
+    return 0
+}
+install_candidates() {   # phân vùng cài được: NAME SIZE FS LABEL (tab)
+    local prot; prot=$(protected_disks)
+    list_parts | while IFS=$'\t' read -r p size fs label role; do
+        [ "$role" = - ] || continue
+        grep -qx "$(disk_of "$p")" <<<"$prot" && continue
+        [ "$size" -ge "$MIN_BYTES" ] || continue
+        printf '%s\t%s\t%s\t%s\n' "$p" "$size" "$fs" "$label"
+    done
+}
+resolve_partition() {   # PARTITION=/dev/sda3 | LABEL=x | PARTLABEL=x | UUID=x | PARTUUID=x
+    local want; want=$(cfg PARTITION) p=""
+    case $want in
+        "") echo "TARGET=partition mà thiếu PARTITION=" >&2; return 1 ;;
+        ask) echo "PARTITION=ask: cần chọn trên màn hình" >&2; return 1 ;;
+        /dev/*) p=$(readlink -f "$want") ;;
+        LABEL=*|PARTLABEL=*|UUID=*|PARTUUID=*) p=$(blkid -l -o device -t "$want" 2>/dev/null) ;;
+        *) echo "PARTITION='$want' không hợp lệ (/dev/sda3, LABEL=…, UUID=…, ask)" >&2; return 1 ;;
+    esac
+    [ -n "$p" ] && [ -b "$p" ] || { echo "không thấy phân vùng $want" >&2; return 1; }
+    local why; why=$(part_ok "$p") || { echo "$why" >&2; return 1; }
+    echo "$p"
+}
+pick_partition() {   # hiện danh sách phân vùng (whiptail), in phân vùng được chọn
+    local items=() p size fs label
+    while IFS=$'\t' read -r p size fs label; do
+        [ -n "$p" ] || continue
+        [ "$fs" = - ] && fs="chưa định dạng"; [ "$label" = - ] && label=""
+        items+=("$p" "$(ui "$(human "$size")  $fs  $label  — trên $(disk_of "$p")")")
+    done < <(install_candidates)
+    [ ${#items[@]} -gt 0 ] || { echo "không có phân vùng nào ≥ 15 GB cài được (Windows, EFI, USB bị loại)" >&2; return 1; }
+    TERM=${TERM:-linux} whiptail --title "$(ui "Depot OS — chọn phân vùng để cài")" \
+        --menu "$(ui "Phân vùng được chọn sẽ bị QUICK FORMAT (mất dữ liệu trên nó). Các phân vùng khác giữ nguyên.")" \
+        20 78 10 "${items[@]}" 3>&1 1>&2 2>&3
+}
+
+# ---------------------------------------------------------------- kiểm cấu hình
+firmware() { [ -d /sys/firmware/efi ] && echo uefi || echo bios; }
+boot_mode() { local m; m=$(cfg BOOT_MODE auto); [ "$m" = auto ] && m=$(firmware); echo "$m"; }
+locale_line() {
+    awk -v l="$1" '$1==l || ($1".UTF-8"==l && $2=="UTF-8") {print; exit}' /usr/share/i18n/SUPPORTED 2>/dev/null
+}
+valid_user() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && ! [[ $1 =~ ^(root|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy|www-data|backup|list|irc|nobody|systemd-.*|messagebus|lightdm|depot|sshd)$ ]]; }
+validate() {   # in lỗi ra stderr, trả 1 nếu có lỗi
+    local errs=0 v
+    e() { echo "  ✗ $*" >&2; errs=$((errs + 1)); }
+    case $(cfg TARGET disk) in
+        disk) is_yes "$(cfg WIPE_DISK)" || e "TARGET=disk: WIPE_DISK phải là yes (xác nhận XOÁ SẠCH cả ổ)" ;;
+        partition)
+            is_yes "$(cfg FORMAT_PARTITION)" || e "TARGET=partition: FORMAT_PARTITION phải là yes (xác nhận quick format phân vùng)"
+            [ -n "$(cfg PARTITION)" ] || e "TARGET=partition: thiếu PARTITION= (/dev/sda3, LABEL=…, UUID=… hoặc ask)" ;;
+        *) e "TARGET: disk (xoá cả ổ) / partition (chỉ format 1 phân vùng)" ;;
+    esac
+    case $(cfg BOOT_MODE auto) in auto|uefi|bios|both) ;; *) e "BOOT_MODE: auto / uefi / bios / both" ;; esac
+    [ "$(cfg BOOT_MODE auto)" = uefi ] && [ "$(firmware)" = bios ] && [ -d /run/live/medium ] && e "BOOT_MODE=uefi nhưng máy đang boot Legacy BIOS (dùng both nếu muốn có cả UEFI)"
+    case $(cfg CONFIRM countdown) in countdown|ask) ;; *) e "CONFIRM: countdown / ask" ;; esac
+    case $(cfg FILESYSTEM ext4) in ext4|btrfs) ;; *) e "FILESYSTEM: ext4 / btrfs" ;; esac
+    [[ $(cfg SWAP_SIZE 0) =~ ^[0-9]+$ ]] || e "SWAP_SIZE là số MB (0 = không có, Depot đã có zram)"
+    [[ $(cfg CONFIRM_TIMEOUT 15) =~ ^[0-9]+$ ]] || e "CONFIRM_TIMEOUT là số giây"
+    v=$(cfg LOCALE vi_VN.UTF-8)
+    [ -f /usr/share/i18n/SUPPORTED ] && [ -z "$(locale_line "$v")" ] && e "LOCALE '$v' không có (vd vi_VN.UTF-8, en_US.UTF-8)"
+    v=$(cfg TIMEZONE Asia/Ho_Chi_Minh)
+    { [ -f "/usr/share/zoneinfo/$v" ] && [[ $v != */../* ]]; } || e "TIMEZONE '$v' không có (vd Asia/Ho_Chi_Minh)"
+    [[ $(cfg KEYBOARD_LAYOUT us) =~ ^[a-z]{2,3}$ ]] || e "KEYBOARD_LAYOUT dạng 'us', 'vn', 'fr'…"
+    case $(cfg RTC auto) in auto|local|utc) ;; *) e "RTC: auto / local / utc" ;; esac
+    [[ $(cfg HOSTNAME) =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || e "HOSTNAME chỉ gồm chữ không dấu, số, gạch ngang (vd depot-pc)"
+    valid_user "$(cfg USERNAME)" || e "USERNAME viết thường không dấu, bắt đầu bằng chữ, không trùng tài khoản hệ thống (vd anh)"
+    if [ -n "$(cfg PASSWORD_HASH)" ]; then
+        [[ $(cfg PASSWORD_HASH) =~ ^\$(6|5|y|2[aby]|gy)\$ ]] || e "PASSWORD_HASH phải dạng \$6\$... (openssl passwd -6)"
+    elif [ -z "$(cfg PASSWORD)" ]; then
+        e "thiếu PASSWORD hoặc PASSWORD_HASH"
+    fi
+    case $(cfg FINISH reboot) in reboot|poweroff|none) ;; *) e "FINISH: reboot / poweroff / none" ;; esac
+    [ -n "$(cfg WIFI_PASSWORD)" ] && [ -z "$(cfg WIFI_SSID)" ] && e "có WIFI_PASSWORD mà thiếu WIFI_SSID"
+    [[ $(cfg EXTRA_PACKAGES) =~ ^[a-z0-9.+:\ -]*$ ]] || e "EXTRA_PACKAGES chỉ gồm tên gói cách nhau bằng dấu cách"
+    if is_yes "$(cfg SSH no)"; then
+        [[ $(cfg SSH_PORT 22) =~ ^[0-9]+$ ]] && [ "$(cfg SSH_PORT 22)" -ge 1 ] && [ "$(cfg SSH_PORT 22)" -le 65535 ] || e "SSH_PORT là số 1–65535"
+        v=$(cfg SSH_USER)
+        if [ -n "$v" ]; then
+            valid_user "$v" || e "SSH_USER viết thường không dấu (vd remote)"
+            [ "$v" = "$(cfg USERNAME)" ] && e "SSH_USER phải khác USERNAME (để trống SSH_USER nếu muốn SSH bằng user chính)"
+            if [ -n "$(cfg SSH_PASSWORD_HASH)" ]; then
+                [[ $(cfg SSH_PASSWORD_HASH) =~ ^\$(6|5|y|2[aby]|gy)\$ ]] || e "SSH_PASSWORD_HASH phải dạng \$6\$..."
+            elif [ -z "$(cfg SSH_PASSWORD)" ] && [ -z "$(cfg SSH_AUTHORIZED_KEY)" ]; then
+                e "SSH_USER cần SSH_PASSWORD(_HASH) hoặc SSH_AUTHORIZED_KEY"
+            fi
+        fi
+        ! is_yes "$(cfg SSH_PASSWORD_AUTH yes)" && [ -z "$(cfg SSH_AUTHORIZED_KEY)" ] && e "SSH_PASSWORD_AUTH=no thì phải có SSH_AUTHORIZED_KEY (không thì không ai đăng nhập được)"
+        [ -n "$(cfg SSH_AUTHORIZED_KEY)" ] && ! [[ $(cfg SSH_AUTHORIZED_KEY) =~ ^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9@.-]+)\  ]] && e "SSH_AUTHORIZED_KEY phải là 1 dòng public key (ssh-ed25519 AAAA… hoặc ssh-rsa …)"
+        v=$(cfg SSH_STORAGE)
+        case $v in ""|/*) [[ $v == /dev/* ]] || [[ $v =~ ^(/[A-Za-z0-9._-]+)*$ ]] || e "SSH_STORAGE: thư mục (vd /srv/remote) hoặc phân vùng (/dev/sdb1, LABEL=…)" ;;
+            LABEL=*|UUID=*|PARTLABEL=*|PARTUUID=*) ;;
+            *) e "SSH_STORAGE: thư mục (vd /srv/remote) hoặc phân vùng (/dev/sdb1, LABEL=…)" ;; esac
+    fi
+    [ $errs = 0 ]
+}
+
+# ---------------------------------------------------------------- kế hoạch
+TGT_DISK=""; TGT_PART=""; TGT_ESP=""
+find_esp() {   # phân vùng EFI có sẵn: ưu tiên trên cùng ổ
+    local disk=$1 p
+    for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
+        [ "$(part_role "$p")" = esp ] && { echo "$p"; return 0; }
+    done
+    list_parts | while IFS=$'\t' read -r p _ _ _ role; do [ "$role" = esp ] && { echo "$p"; break; }; done
+}
+resolve_target() {   # đặt TGT_DISK / TGT_PART / TGT_ESP; lỗi → stderr, trả 1
+    TGT_PART=""; TGT_ESP=""; SSH_DEV=""
+    if is_yes "$(cfg SSH no)"; then
+        case $(cfg SSH_STORAGE) in
+            /dev/*) SSH_DEV=$(readlink -f "$(cfg SSH_STORAGE)") ;;
+            LABEL=*|UUID=*|PARTLABEL=*|PARTUUID=*) SSH_DEV=$(blkid -l -o device -t "$(cfg SSH_STORAGE)" 2>/dev/null) ;;
+        esac
+    fi
+    if [ "$(cfg TARGET disk)" = disk ]; then
+        TGT_DISK=$(resolve_disk) || return 1
+    else
+        if [ -z "${PICKED_PART:-}" ]; then TGT_PART=$(resolve_partition) || return 1; else TGT_PART=$PICKED_PART; fi
+        TGT_DISK=$(disk_of "$TGT_PART")
+        local m; m=$(boot_mode)
+        if [ "$m" = uefi ] || [ "$m" = both ]; then
+            TGT_ESP=$(find_esp "$TGT_DISK")
+            [ -n "$TGT_ESP" ] || [ "$m" = both ] || { echo "không có phân vùng EFI có sẵn để thêm mục boot — dùng TARGET=disk hoặc tạo phân vùng EFI trước" >&2; return 1; }
+        fi
+        if { [ "$m" = bios ] || [ "$m" = both ]; } && [ "$(pt_label "$TGT_DISK")" = gpt ]; then
+            local bg=""; for p in $(lsblk -lnpo NAME,TYPE "$TGT_DISK" | awk '$2=="part"{print $1}'); do [ "$(part_role "$p")" = biosgrub ] && bg=$p; done
+            [ -n "$bg" ] || [ "$m" = both ] || { echo "ổ GPT không có phân vùng BIOS boot (1 MB) — Legacy không cài được; dùng BOOT_MODE=uefi" >&2; return 1; }
+        fi
+    fi
+    if [ -n "$SSH_DEV" ]; then
+        [ "$SSH_DEV" = "$TGT_PART" ] && { echo "SSH_STORAGE trùng phân vùng cài Depot OS" >&2; return 1; }
+        [ -z "$TGT_PART" ] && [ "$(disk_of "$SSH_DEV")" = "$TGT_DISK" ] && { echo "SSH_STORAGE $SSH_DEV nằm trên ổ $TGT_DISK sắp bị xoá sạch — để trống SSH_STORAGE hoặc dùng ổ khác" >&2; return 1; }
+    fi
+    return 0
+}
+print_plan() {
+    local mode; mode=$(boot_mode)
+    echo "Kế hoạch cài:"
+    if [ -z "$TGT_PART" ]; then
+        echo "  Nơi cài:      XOÁ SẠCH CẢ Ổ $(disk_desc "$TGT_DISK")"
+        case $mode in
+            uefi) echo "  Chia lại:     GPT — EFI 512 MB + Depot OS ($(cfg FILESYSTEM ext4))" ;;
+            both) echo "  Chia lại:     GPT — BIOS boot 2 MB + EFI 512 MB + Depot OS ($(cfg FILESYSTEM ext4)) — boot được cả Legacy lẫn UEFI" ;;
+            bios) echo "  Chia lại:     MBR — Depot OS ($(cfg FILESYSTEM ext4))" ;;
+        esac
+        [ "$(cfg SWAP_SIZE 0)" != 0 ] && echo "                + swap $(cfg SWAP_SIZE) MB ở cuối ổ"
+        print_parts "$TGT_DISK" "" "" whole
+    else
+        echo "  Nơi cài:      QUICK FORMAT $TGT_PART ($(cfg FILESYSTEM ext4)) — phân vùng khác giữ nguyên"
+        echo "  Menu boot:    $mode$( [ -n "$TGT_ESP" ] && echo ", thêm mục Depot OS vào EFI có sẵn $TGT_ESP")$( { [ "$mode" = bios ] || [ "$mode" = both ]; } && echo ", GRUB vào MBR của $TGT_DISK"); GRUB liệt kê cả Windows"
+        [ "$(cfg SWAP_SIZE 0)" != 0 ] && echo "  Swap:         file /swapfile $(cfg SWAP_SIZE) MB"
+        print_parts "$TGT_DISK" "$TGT_PART" "$TGT_ESP"
+    fi
+    echo "  Ngôn ngữ:     $(cfg LOCALE vi_VN.UTF-8)   Bàn phím: $(cfg KEYBOARD_LAYOUT us)$( [ -n "$(cfg KEYBOARD_VARIANT)" ] && echo "/$(cfg KEYBOARD_VARIANT)")   Múi giờ: $(cfg TIMEZONE Asia/Ho_Chi_Minh)   RTC: $(cfg RTC auto)"
+    echo "  Máy:          $(cfg HOSTNAME)   User: $(cfg USERNAME) ($(cfg FULLNAME "$(cfg USERNAME)"))$(is_yes "$(cfg AUTOLOGIN no)" && echo ", tự đăng nhập")"
+    echo "  Mật khẩu:     $( [ -n "$(cfg PASSWORD_HASH)" ] && echo "đã mã hoá (PASSWORD_HASH)" || echo "chữ thường (PASSWORD) — nên dùng PASSWORD_HASH")"
+    [ -n "$(cfg WIFI_SSID)" ] && echo "  Wi-Fi:        $(cfg WIFI_SSID)"
+    echo "  App:          Firefox, VLC, LocalSend có sẵn; bộ app Depot: $(is_yes "$(cfg INSTALL_APPS yes)" && echo "tải lúc cài (cần mạng)" || echo "không")"
+    [ -n "$(cfg EXTRA_PACKAGES)" ] && echo "  Gói thêm:     $(cfg EXTRA_PACKAGES)"
+    if is_yes "$(cfg SSH no)"; then
+        echo "  OpenSSH:      cổng $(cfg SSH_PORT 22), user $(cfg SSH_USER "$(cfg USERNAME)")$( [ -n "$(cfg SSH_USER)" ] && echo " (riêng, lưu trữ: $(cfg SSH_STORAGE "/srv/$(cfg SSH_USER)"))"), mật khẩu: $(is_yes "$(cfg SSH_PASSWORD_AUTH yes)" && echo có || echo tắt)$( [ -n "$(cfg SSH_AUTHORIZED_KEY)" ] && echo ", có public key")"
+    fi
+    echo "  Tường lửa:    $(is_yes "$(cfg FIREWALL yes)" && echo "ufw bật — chặn vào, mở$(is_yes "$(cfg SSH no)" && echo " SSH $(cfg SSH_PORT 22)," ) LocalSend 53317, mDNS" || echo "tắt")"
+    [ ${#POST_CMDS[@]} -gt 0 ] && echo "  Lệnh sau cài: ${#POST_CMDS[@]} lệnh"
+    [ ${#FIRST_CMDS[@]} -gt 0 ] && echo "  Lần boot đầu: ${#FIRST_CMDS[@]} lệnh"
+    [ -n "${CONF_DIR:-}" ] && [ -d "$CONF_DIR/$FILES_DIR_NAME" ] && echo "  Chép thêm:    $CONF_DIR/$FILES_DIR_NAME/ → / của máy mới"
+    echo "  Xong thì:     $(cfg FINISH reboot)"
+    return 0
+}
+
+# ---------------------------------------------------------------- tìm file cấu hình
+SCAN_MNT=$WORK/scan
+CONF_DEV=""; CONF_DIR=""; CONF_FILE=""
+cmdline_has() { grep -qw "$1" /proc/cmdline; }
+find_config() {   # find_config [all] — đặt CONF_FILE/CONF_DEV/CONF_DIR; giữ phân vùng chứa file mount (ro) ở $SCAN_MNT
+    local scope=${1:-removable} dev fstype rm tran disk l
+    udevadm settle -t 15 2>/dev/null
+    mkdir -p "$SCAN_MNT"
+    local medium; medium=$(findmnt -nvo SOURCE /run/live/medium 2>/dev/null | head -1)
+    while IFS= read -r l; do
+        dev=$(field NAME "$l"); fstype=$(field FSTYPE "$l")
+        case $fstype in vfat|exfat|ntfs|ext2|ext3|ext4|iso9660|udf|btrfs) ;; *) continue ;; esac
+        [ "$dev" = "$medium" ] && continue
+        disk=$(lsblk -nrpso NAME,TYPE "$dev" 2>/dev/null | awk '$2=="disk"||$2=="rom"{print $1}' | tail -1)
+        rm=$(lsblk -dno RM "$disk" 2>/dev/null | tr -d ' '); tran=$(lsblk -dno TRAN "$disk" 2>/dev/null | tr -d ' ')
+        if [ "$scope" != all ] && [ "$rm" != 1 ] && [ "$tran" != usb ] && [ "$(lsblk -dno TYPE "$disk" 2>/dev/null)" != rom ]; then
+            continue
+        fi
+        try_dev "$dev" "$fstype" && return 0
+    done < <(lsblk -npP -o NAME,FSTYPE 2>/dev/null)   # -P đã là danh sách phẳng (thêm -l thì lsblk báo lỗi)
+    if [ -f "/run/live/medium/$CONF_NAME" ]; then
+        CONF_FILE=/run/live/medium/$CONF_NAME; CONF_DIR=/run/live/medium; CONF_DEV=$medium; return 0
+    fi
+    return 1
+}
+try_dev() {
+    local dev=$1 fstype=$2 mp opts=ro
+    mp=$(findmnt -nfo TARGET -S "$dev" 2>/dev/null | head -1)
+    if [ -n "$mp" ]; then
+        [ -f "$mp/$CONF_NAME" ] || return 1
+        CONF_FILE=$mp/$CONF_NAME; CONF_DIR=$mp; CONF_DEV=$dev; return 0
+    fi
+    case $fstype in ntfs) fstype=ntfs3 ;; ext3|ext4) opts=ro,noload ;; esac
+    timeout 15 mount -t "$fstype" -o "$opts" "$dev" "$SCAN_MNT" 2>/dev/null || return 1
+    if [ -f "$SCAN_MNT/$CONF_NAME" ]; then
+        CONF_FILE=$SCAN_MNT/$CONF_NAME; CONF_DIR=$SCAN_MNT; CONF_DEV=$dev; return 0
+    fi
+    umount "$SCAN_MNT" 2>/dev/null
+    return 1
+}
+
+# đã cài bằng đúng file này chưa (chống vòng lặp cài lại khi máy vẫn boot vào USB)
+already_installed() {   # already_installed HASH — xem TGT_PART hoặc mọi phân vùng của TGT_DISK
+    local p fs found=1 m=$WORK/probe parts
+    mkdir -p "$m"
+    if [ -n "$TGT_PART" ]; then parts=$TGT_PART; else parts=$(lsblk -lnpo NAME,TYPE "$TGT_DISK" | awk '$2=="part"{print $1}'); fi
+    for p in $parts; do
+        fs=$(lsblk -dno FSTYPE "$p" | head -1)
+        case $fs in ext4|btrfs) ;; *) continue ;; esac
+        mount -o ro "$p" "$m" 2>/dev/null || continue
+        grep -qx "$1" "$m/var/lib/depot/autoinstall.sha256" 2>/dev/null && found=0
+        umount "$m"
+        [ $found = 0 ] && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------- cài
+STEP=0; STEPS=16
+step() { STEP=$((STEP + 1)); status "Đang cài Depot OS — bước $STEP/$STEPS: $* (đừng tắt máy)"; }
+run() { echo "\$ $*" >>"$LOG"; "$@" >>"$LOG" 2>&1 || die "lệnh thất bại: $*"; }
+try() { echo "\$ $*" >>"$LOG"; "$@" >>"$LOG" 2>&1 || { warn "lệnh lỗi (bỏ qua): $*"; return 1; }; }
+inchroot() { chroot "$T" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive "$@"; }
+online() { curl -fsI --max-time 15 "http://deb.debian.org/debian/dists/$RELEASE/Release" >/dev/null 2>&1; }
+
+MOUNTED=()
+cleanup_mounts() {
+    local i
+    sync
+    for ((i=${#MOUNTED[@]}-1; i>=0; i--)); do umount -l "${MOUNTED[$i]}" 2>/dev/null; done
+    MOUNTED=()
+    return 0
+}
+mnt() { local src=$1 dst=$2; shift 2; mkdir -p "$dst"; run mount "$@" "$src" "$dst"; MOUNTED+=("$dst"); }
+unmount_dev() {   # gỡ mount + swap của thiết bị (và phân vùng con)
+    local p m
+    for p in $(lsblk -lnpo NAME "$1" | tac); do
+        swapoff "$p" 2>/dev/null
+        for m in $(findmnt -nlo TARGET -S "$p" 2>/dev/null); do umount "$m" >>"$LOG" 2>&1 || die "$p đang được dùng ở $m"; done
+    done
+}
+wait_dev() { local _; for _ in $(seq 20); do [ -b "$1" ] && return 0; sleep 0.5; done; die "không thấy $1"; }
+mkfs_root() {
+    if [ "$(cfg FILESYSTEM ext4)" = btrfs ]; then run mkfs.btrfs -f -L DepotOS "$1"; else run mkfs.ext4 -F -q -L DepotOS "$1"; fi
+}
+set_hash_or_pw() {   # set_hash_or_pw USER HASH PLAIN
+    if [ -n "$2" ]; then printf '%s:%s\n' "$1" "$2" | inchroot chpasswd -e >>"$LOG" 2>&1 || die "đặt mật khẩu $1 thất bại"
+    elif [ -n "$3" ]; then printf '%s:%s\n' "$1" "$3" | inchroot chpasswd >>"$LOG" 2>&1 || die "đặt mật khẩu $1 thất bại"
+    else inchroot passwd -l "$1" >>"$LOG" 2>&1; fi
+}
+source_squashfs() {
+    local f
+    for f in /run/live/medium/live/filesystem.squashfs /run/initramfs/live/live/filesystem.squashfs; do
+        [ -f "$f" ] && { echo "$f"; return; }
+    done
+    losetup -nO BACK-FILE 2>/dev/null | grep -m1 'filesystem.squashfs$'
+}
+
+do_install() {
+    local MODE FS SWAP ESP_DEV="" ROOT_DEV SWAP_DEV="" SIZE_MIB ROOT_END SSD=0 SQ DISK=$TGT_DISK
+    MODE=$(boot_mode); FS=$(cfg FILESYSTEM ext4); SWAP=$(cfg SWAP_SIZE 0)
+    SQ=$(source_squashfs); [ -n "$SQ" ] || die "không thấy filesystem.squashfs của phiên live"
+    WARNINGS=""
+    out "== depot-autoinstall $(date '+%F %T'), file: ${CONF_FILE:-?} (${CONF_DEV:-?}), ổ: $DISK${TGT_PART:+, phân vùng: $TGT_PART}, boot: $MODE"
+    print_plan >>"$LOG"
+    [ "$(cat "/sys/block/$(basename "$DISK")/queue/rotational" 2>/dev/null)" = 0 ] && SSD=1
+
+    if [ -n "$(cfg WIFI_SSID)" ]; then
+        status "Đang kết nối Wi-Fi $(cfg WIFI_SSID)…"
+        local i
+        for i in 1 2 3; do
+            if [ -n "$(cfg WIFI_PASSWORD)" ]; then
+                nmcli device wifi connect "$(cfg WIFI_SSID)" password "$(cfg WIFI_PASSWORD)" >>"$LOG" 2>&1 && break
+            else
+                nmcli device wifi connect "$(cfg WIFI_SSID)" >>"$LOG" 2>&1 && break
+            fi
+            sleep 5; nmcli device wifi rescan >/dev/null 2>&1
+        done || warn "không kết nối được Wi-Fi $(cfg WIFI_SSID)"
+    fi
+
+    # ---- 1. chia ổ (TARGET=disk) hoặc chuẩn bị phân vùng (TARGET=partition)
+    if [ -z "$TGT_PART" ]; then
+        step "xoá và chia lại ổ $DISK"
+        unmount_dev "$DISK"
+        run wipefs -a $(lsblk -lnpo NAME,TYPE "$DISK" | awk '$2=="part"{print $1}') "$DISK"
+        SIZE_MIB=$(( $(blockdev --getsize64 "$DISK") / 1048576 ))
+        ROOT_END=$(( SIZE_MIB - 1 - SWAP ))
+        local n
+        case $MODE in
+            uefi) run parted -s -a optimal "$DISK" mklabel gpt \
+                      mkpart EFI fat32 1MiB 513MiB set 1 esp on mkpart DepotOS "$FS" 513MiB "${ROOT_END}MiB"
+                  ESP_DEV=$(part_name "$DISK" 1); ROOT_DEV=$(part_name "$DISK" 2); n=3 ;;
+            both) # GPT lai: bios_grub cho Legacy + ESP cho UEFI; pmbr_boot cho BIOS đời cũ đòi cờ active
+                  run parted -s -a optimal "$DISK" mklabel gpt \
+                      mkpart biosgrub 1MiB 3MiB set 1 bios_grub on \
+                      mkpart EFI fat32 3MiB 515MiB set 2 esp on \
+                      mkpart DepotOS "$FS" 515MiB "${ROOT_END}MiB" disk_set pmbr_boot on
+                  ESP_DEV=$(part_name "$DISK" 2); ROOT_DEV=$(part_name "$DISK" 3); n=4 ;;
+            bios) if [ "$SIZE_MIB" -gt 2097152 ]; then   # > 2 TB: MBR không đủ
+                      run parted -s -a optimal "$DISK" mklabel gpt \
+                          mkpart biosgrub 1MiB 3MiB set 1 bios_grub on mkpart DepotOS "$FS" 3MiB "${ROOT_END}MiB"
+                      ROOT_DEV=$(part_name "$DISK" 2); n=3
+                  else
+                      run parted -s -a optimal "$DISK" mklabel msdos mkpart primary "$FS" 1MiB "${ROOT_END}MiB" set 1 boot on
+                      ROOT_DEV=$(part_name "$DISK" 1); n=2
+                  fi ;;
+        esac
+        if [ "$SWAP" -gt 0 ]; then
+            run parted -s -a optimal "$DISK" mkpart "$( [ "$(pt_label "$DISK")" = gpt ] && echo swap || echo primary)" linux-swap "${ROOT_END}MiB" "$((SIZE_MIB - 1))MiB"
+            SWAP_DEV=$(part_name "$DISK" $n)
+        fi
+        partprobe "$DISK" 2>/dev/null; udevadm settle -t 30 2>/dev/null
+        for p in $ESP_DEV $ROOT_DEV $SWAP_DEV; do wait_dev "$p"; done
+        step "định dạng phân vùng"
+        [ -n "$ESP_DEV" ] && run mkfs.fat -F 32 -n EFI "$ESP_DEV"
+        mkfs_root "$ROOT_DEV"
+        [ -n "$SWAP_DEV" ] && run mkswap -L swap "$SWAP_DEV"
+    else
+        step "quick format $TGT_PART (giữ nguyên phân vùng khác)"
+        ROOT_DEV=$TGT_PART; ESP_DEV=$TGT_ESP
+        unmount_dev "$ROOT_DEV"
+        [ -n "$ESP_DEV" ] && unmount_dev "$ESP_DEV"
+        run wipefs -a "$ROOT_DEV"
+        # đổi loại phân vùng sang Linux (Windows khỏi nhận nhầm là ổ dữ liệu); không được thì thôi
+        local pn; pn=$(part_num "$ROOT_DEV")
+        if [ -n "$pn" ]; then
+            if [ "$(pt_label "$DISK")" = gpt ]; then try sfdisk --part-type "$DISK" "$pn" "$GUID_LINUX"; else try sfdisk --part-type "$DISK" "$pn" 83; fi
+            partprobe "$DISK" 2>/dev/null; udevadm settle -t 30 2>/dev/null; wait_dev "$ROOT_DEV"
+        fi
+        step "định dạng phân vùng"
+        mkfs_root "$ROOT_DEV"
+        [ -n "$ESP_DEV" ] && out "   giữ phân vùng EFI có sẵn $ESP_DEV (không format), chỉ thêm mục Depot OS"
+    fi
+    mnt "$ROOT_DEV" "$T"
+    [ -n "$ESP_DEV" ] && mnt "$ESP_DEV" "$T/boot/efi"
+
+    # ---- 2. bung squashfs (unpackfs)
+    step "bung hệ thống (filesystem.squashfs)"
+    local last=-1 pct
+    echo "\$ unsquashfs -f -d $T $SQ" >>"$LOG"
+    unsquashfs -percentage -f -d "$T" "$SQ" 2>>"$LOG" | while IFS= read -r pct; do
+        [[ $pct =~ ^[[:space:]]*([0-9]{1,3})[[:space:]]*$ ]] || continue
+        pct=${BASH_REMATCH[1]}
+        if [ $((pct / 5)) != $((last / 5)) ]; then
+            last=$pct
+            plymouth_on && plymouth display-message --text="Đang cài Depot OS — bước $STEP/$STEPS: bung hệ thống $pct% (đừng tắt máy)" 2>/dev/null
+            [ "$ON_VT" = 1 ] && printf '\r   %3s%%' "$pct"
+        fi
+    done
+    [ "${PIPESTATUS[0]}" = 0 ] || die "bung hệ thống thất bại (unsquashfs)"
+    [ "$ON_VT" = 1 ] && echo
+    { [ -x "$T/usr/bin/bash" ] && ls "$T"/boot/vmlinuz-* >/dev/null 2>&1; } || die "hệ thống vừa chép thiếu kernel"
+    mnt proc "$T/proc" -t proc
+    mnt sys "$T/sys" -t sysfs
+    mnt /dev "$T/dev" --bind
+    mnt tmpfs "$T/run" -t tmpfs
+    mnt /run/udev "$T/run/udev" --bind
+    [ -d /sys/firmware/efi/efivars ] && mnt efivarfs "$T/sys/firmware/efi/efivars" -t efivarfs
+    mnt /dev/pts "$T/dev/pts" --bind
+    echo force-unsafe-io >"$T/etc/dpkg/dpkg.cfg.d/depot-autoinstall-unsafe-io"
+    cp --remove-destination -L /etc/resolv.conf "$T/etc/resolv.conf" 2>/dev/null
+
+    # ---- 3. machine-id + fstab (+ swapfile ở chế độ phân vùng)
+    step "machine-id, fstab"
+    rm -f "$T/etc/machine-id" "$T/var/lib/dbus/machine-id"
+    run systemd-machine-id-setup --root="$T"
+    mkdir -p "$T/var/lib/dbus"; ln -sf /etc/machine-id "$T/var/lib/dbus/machine-id"
+    if [ -n "$TGT_PART" ] && [ "$SWAP" -gt 0 ]; then
+        if [ "$FS" = btrfs ]; then run btrfs filesystem mkswapfile --size "${SWAP}m" "$T/swapfile"
+        else run fallocate -l "${SWAP}M" "$T/swapfile"; chmod 600 "$T/swapfile"; run mkswap "$T/swapfile"; fi
+    fi
+    local ropt="defaults,noatime" pass=1
+    [ "$FS" = btrfs ] && { pass=0; [ $SSD = 1 ] && ropt="$ropt,discard,compress=lzo"; }
+    [ "$FS" = ext4 ] && [ $SSD = 1 ] && ropt="$ropt,discard"
+    {
+        echo "# /etc/fstab — tạo bởi depot-autoinstall $(date '+%F %T')"
+        echo "UUID=$(blkid -s UUID -o value "$ROOT_DEV") / $FS $ropt 0 $pass"
+        [ -n "$ESP_DEV" ] && echo "UUID=$(blkid -s UUID -o value "$ESP_DEV") /boot/efi vfat umask=0077 0 2"
+        [ -n "$SWAP_DEV" ] && echo "UUID=$(blkid -s UUID -o value "$SWAP_DEV") none swap defaults$( [ $SSD = 1 ] && echo ,discard) 0 0"
+        [ -n "$TGT_PART" ] && [ "$SWAP" -gt 0 ] && echo "/swapfile none swap defaults 0 0"
+    } >"$T/etc/fstab"
+    cat "$T/etc/fstab" >>"$LOG"
+
+    # ---- 4. ngôn ngữ, bàn phím, múi giờ, hostname
+    step "ngôn ngữ, bàn phím, múi giờ"
+    local loc; loc=$(cfg LOCALE vi_VN.UTF-8)
+    local lline; lline=$(locale_line "$loc"); lline=${lline:-$loc UTF-8}
+    if ! grep -qE "^($loc|${lline%% *}) " "$T/etc/locale.gen"; then
+        if grep -q "^# *$lline\$" "$T/etc/locale.gen"; then sed -i "s/^# *\($lline\)\$/\1/" "$T/etc/locale.gen"
+        else echo "$lline" >>"$T/etc/locale.gen"; fi
+    fi
+    # Ghi cả /etc/locale.conf: trong ISO file này chỉ có dòng chú thích, và lúc boot máy đã cài
+    # /etc/default/locale bị đồng bộ lại từ nó → LANG=C.UTF-8 (đã gặp khi cài thử trên VMware)
+    { printf 'LANG=%s\n' "$loc"; [ "${loc%%_*}" = vi ] && echo 'LANGUAGE=vi:en'; } >"$T/etc/default/locale"
+    [ -L "$T/etc/locale.conf" ] || cp "$T/etc/default/locale" "$T/etc/locale.conf"
+    run inchroot locale-gen
+    cat >"$T/etc/default/keyboard" <<EOF
+# KEYBOARD CONFIGURATION FILE — depot-autoinstall
+XKBMODEL="$(cfg KEYBOARD_MODEL pc105)"
+XKBLAYOUT="$(cfg KEYBOARD_LAYOUT us)"
+XKBVARIANT="$(cfg KEYBOARD_VARIANT)"
+XKBOPTIONS="$(cfg KEYBOARD_OPTIONS)"
+
+BACKSPACE="guess"
+EOF
+    mkdir -p "$T/etc/X11/xorg.conf.d"
+    cat >"$T/etc/X11/xorg.conf.d/00-keyboard.conf" <<EOF
+# depot-autoinstall (giống module keyboard của Calamares)
+Section "InputClass"
+        Identifier "system-keyboard"
+        MatchIsKeyboard "on"
+        Option "XkbLayout" "$(cfg KEYBOARD_LAYOUT us)"
+        Option "XkbModel" "$(cfg KEYBOARD_MODEL pc105)"
+        Option "XkbVariant" "$(cfg KEYBOARD_VARIANT)"
+        Option "XkbOptions" "$(cfg KEYBOARD_OPTIONS)"
+EndSection
+EOF
+    local tz; tz=$(cfg TIMEZONE Asia/Ho_Chi_Minh)
+    ln -sf "/usr/share/zoneinfo/$tz" "$T/etc/localtime"; echo "$tz" >"$T/etc/timezone"
+    local hn; hn=$(cfg HOSTNAME)
+    echo "$hn" >"$T/etc/hostname"
+    cat >"$T/etc/hosts" <<EOF
+127.0.0.1	localhost
+127.0.1.1	$hn
+
+::1	localhost ip6-localhost ip6-loopback
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+EOF
+
+    # ---- 5. user
+    step "tạo người dùng $(cfg USERNAME)"
+    local u; u=$(cfg USERNAME)
+    run inchroot useradd -m -U -s /bin/bash -c "$(cfg FULLNAME "$u")" "$u"
+    local g groups=""
+    for g in $DEFAULT_GROUPS; do inchroot getent group "$g" >/dev/null && groups="$groups,$g"; done
+    [ -n "$groups" ] && run inchroot usermod -aG "${groups#,}" "$u"
+    set_hash_or_pw "$u" "$(cfg PASSWORD_HASH)" "$(cfg PASSWORD)"
+    inchroot passwd -l root >>"$LOG" 2>&1   # setRootPassword: false — root khoá, dùng sudo
+    if is_yes "$(cfg AUTOLOGIN no)"; then
+        inchroot groupadd -rf autologin >>"$LOG" 2>&1; run inchroot usermod -aG autologin "$u"
+        mkdir -p "$T/etc/lightdm/lightdm.conf.d"
+        printf '[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\n' "$u" >"$T/etc/lightdm/lightdm.conf.d/50-depot-autologin.conf"
+    fi
+    if ls /etc/NetworkManager/system-connections/* >/dev/null 2>&1; then   # networkcfg
+        mkdir -p "$T/etc/NetworkManager/system-connections"
+        cp -a /etc/NetworkManager/system-connections/. "$T/etc/NetworkManager/system-connections/"
+        chmod 600 "$T"/etc/NetworkManager/system-connections/* 2>/dev/null
+    fi
+
+    # ---- 6. giờ phần cứng (hwclock + shellprocess@depotrtc)
+    step "đồng hồ phần cứng"
+    case $(cfg RTC auto) in
+        auto)  try hwclock --systohc --utc; [ -x /usr/bin/depot-rtc ] && try /usr/bin/depot-rtc --target "$T" ;;
+        utc)   try hwclock --systohc --utc; printf '0.0 0 0.0\n0\nUTC\n' >"$T/etc/adjtime" ;;
+        local) try env TZ="$tz" hwclock --systohc --localtime; printf '0.0 0 0.0\n0\nLOCAL\n' >"$T/etc/adjtime" ;;
+    esac
+
+    # ---- 7. nguồn apt cuối (sources-final; thêm contrib non-free như depot-install-apps)
+    step "nguồn phần mềm"
+    rm -f "$T/etc/apt/sources.list.d/debian-live-media.list" "$T/etc/apt/sources.list.d/base.list"
+    cat >"$T/etc/apt/sources.list" <<EOF
+# See https://wiki.debian.org/SourcesList for more information.
+deb http://deb.debian.org/debian $RELEASE main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian $RELEASE main contrib non-free non-free-firmware
+
+deb http://deb.debian.org/debian $RELEASE-updates main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian $RELEASE-updates main contrib non-free non-free-firmware
+
+deb http://security.debian.org/debian-security/ $RELEASE-security main contrib non-free non-free-firmware
+deb-src http://security.debian.org/debian-security/ $RELEASE-security main contrib non-free non-free-firmware
+
+# Backports allow you to install newer versions of software made available for this release
+deb http://deb.debian.org/debian $RELEASE-backports main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian $RELEASE-backports main contrib non-free non-free-firmware
+EOF
+    NET=0
+    command -v nm-online >/dev/null && nm-online -q -t 30 >/dev/null 2>&1
+    if online; then NET=1; try inchroot apt-get update; else out "   (không có mạng — bỏ qua phần cần tải)"; fi
+
+    # ---- 8. bootloader: UEFI / Legacy / cả hai, thêm mục vào menu boot
+    step "cài bootloader ($MODE)"
+    if [ $NET = 1 ]; then   # gói grub đầy đủ theo firmware đang chạy, để grub tự cập nhật về sau
+        if [ "$(firmware)" = uefi ] && [ "$MODE" != bios ]; then
+            echo "grub-efi-amd64 grub2/force_efi_extra_removable boolean true" | inchroot debconf-set-selections
+            try inchroot apt-get install -y grub-efi-amd64
+        else
+            echo "grub-pc grub-pc/install_devices multiselect $DISK" | inchroot debconf-set-selections
+            try inchroot apt-get install -y grub-pc
+        fi
+    fi
+    [ -x "$T/usr/sbin/grub-install" ] || die "hệ thống thiếu grub-install (gói grub2-common) và không có mạng để tải"
+    if { [ "$MODE" = uefi ] || [ "$MODE" = both ]; } && [ -n "$ESP_DEV" ]; then
+        if [ "$(firmware)" = uefi ]; then
+            # không ghi --bootloader-id: lấy từ GRUB_DISTRIBUTOR ("Depot OS" → EFI/depot + mục NVRAM "depot"),
+            # trùng chỗ gói grub-efi-amd64 cài lại mỗi lần cập nhật grub
+            run inchroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --recheck
+        fi
+        if [ -n "$TGT_PART" ] && [ -e "$T/boot/efi/EFI/Boot/bootx64.efi" -o -e "$T/boot/efi/EFI/BOOT/BOOTX64.EFI" ] && [ "$(firmware)" = uefi ]; then
+            out "   giữ EFI/BOOT/BOOTX64.EFI có sẵn (của Windows / hệ khác) — Depot dùng mục NVRAM \"depot\""
+        else
+            # bản dự phòng EFI/BOOT/BOOTX64.EFI: máy quên mục NVRAM / đang boot Legacy mà vẫn muốn UEFI chạy được
+            run inchroot grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram
+        fi
+    elif [ "$MODE" = uefi ]; then
+        die "không có phân vùng EFI để cài bootloader UEFI"
+    fi
+    if [ "$MODE" = bios ] || [ "$MODE" = both ]; then
+        if [ "$(pt_label "$DISK")" = gpt ] && ! lsblk -lnpo NAME "$DISK" | while read -r p; do [ "$(part_role "$p")" = biosgrub ] && echo y; done | grep -q y; then
+            warn "ổ GPT không có phân vùng BIOS boot — bỏ qua bootloader Legacy"
+        else
+            run inchroot grub-install --target=i386-pc --recheck "$DISK"
+        fi
+    fi
+
+    # ---- 9. gỡ gói live, initramfs, menu GRUB (os-prober thêm Windows / hệ khác)
+    step "gỡ gói của phiên live"
+    local rm_pkgs="" pk
+    for pk in $LIVE_PKGS; do inchroot dpkg -s "$pk" >/dev/null 2>&1 && rm_pkgs="$rm_pkgs $pk"; done
+    # shellcheck disable=SC2086
+    [ -n "$rm_pkgs" ] && try inchroot apt-get -y remove $rm_pkgs
+    inchroot systemctl disable depot-autoinstall.service >>"$LOG" 2>&1
+    step "tạo initramfs + menu GRUB"
+    run inchroot update-initramfs -u -k all
+    run inchroot grub-mkconfig -o /boot/grub/grub.cfg
+    grep -E "^menuentry|^submenu" "$T/boot/grub/grub.cfg" | sed 's/^/   menu GRUB: /' | tee -a "$LOG" >/dev/null
+
+    # ---- 10. app Depot (shellprocess@depotapps) — Firefox, VLC, LocalSend đã có sẵn trong ISO
+    step "tải ứng dụng Depot"
+    if is_yes "$(cfg INSTALL_APPS yes)" && [ -x /usr/bin/depot-install-apps ]; then
+        status "Đang cài Depot OS — bước $STEP/$STEPS: tải ứng dụng (có thể mất 10–20 phút, đừng tắt máy)"
+        /usr/bin/depot-install-apps --target "$T" >>"$LOG" 2>&1
+        cp --remove-destination -L /etc/resolv.conf "$T/etc/resolv.conf" 2>/dev/null
+    else
+        out "   (bỏ qua: INSTALL_APPS=no)"
+    fi
+    local need=""
+    for pk in firefox-esr vlc localsend; do inchroot dpkg -s "$pk" >/dev/null 2>&1 || need="$need $pk"; done
+    [ -n "$need" ] && [ $NET = 1 ] && try inchroot apt-get install -y $need
+    step "gói cài thêm"
+    if [ -n "$(cfg EXTRA_PACKAGES)" ]; then
+        if [ $NET = 1 ]; then
+            # shellcheck disable=SC2046
+            try inchroot apt-get install -y $(cfg EXTRA_PACKAGES)
+        else
+            warn "không có mạng: chưa cài được EXTRA_PACKAGES ($(cfg EXTRA_PACKAGES))"
+        fi
+    fi
+
+    # ---- 11. OpenSSH + ufw
+    step "OpenSSH, tường lửa"
+    setup_ssh_firewall "$u"
+
+    # ---- 12. file chép thêm + lệnh sau khi cài + lệnh lần boot đầu
+    step "lệnh sau khi cài"
+    if [ -n "$CONF_DIR" ] && [ -d "$CONF_DIR/$FILES_DIR_NAME" ]; then
+        out "   chép $CONF_DIR/$FILES_DIR_NAME/ → /"
+        try cp -r --no-preserve=ownership "$CONF_DIR/$FILES_DIR_NAME/." "$T/"
+    fi
+    local c i=0
+    for c in "${POST_CMDS[@]}"; do
+        i=$((i + 1)); out "   POST_INSTALL $i: $c"
+        echo "\$ (chroot) $c" >>"$LOG"
+        inchroot DEPOT_USER="$u" DEPOT_HOSTNAME="$hn" /bin/bash -c "$c" >>"$LOG" 2>&1 || warn "POST_INSTALL $i lỗi: $c"
+    done
+    if [ ${#FIRST_CMDS[@]} -gt 0 ]; then
+        mkdir -p "$T/usr/local/lib/depot" "$T/var/lib/depot"
+        {
+            echo '#!/bin/bash'
+            echo "# Lệnh lần boot đầu — sinh bởi depot-autoinstall $(date '+%F %T'). Chạy 1 lần, quyền root."
+            echo "export DEPOT_USER='$u' DEPOT_HOSTNAME='$hn'"
+            i=0; for c in "${FIRST_CMDS[@]}"; do i=$((i + 1)); printf '%s || echo "!! FIRSTBOOT %d lỗi"\n' "$c" "$i"; done
+        } >"$T/usr/local/lib/depot/firstboot.sh"
+        chmod 755 "$T/usr/local/lib/depot/firstboot.sh"
+        cat >"$T/etc/systemd/system/depot-firstboot.service" <<'EOF'
+[Unit]
+Description=Depot OS — lệnh lần boot đầu (FIRSTBOOT trong depot-autoinstall.conf)
+ConditionPathExists=/var/lib/depot/firstboot-pending
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'mkdir -p /var/log/depot; /usr/local/lib/depot/firstboot.sh >>/var/log/depot/firstboot.log 2>&1; rm -f /var/lib/depot/firstboot-pending'
+TimeoutStartSec=1h
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        touch "$T/var/lib/depot/firstboot-pending"
+        run inchroot systemctl enable depot-firstboot.service
+    fi
+
+    # ---- 13. dọn dẹp
+    step "hoàn tất"
+    rm -f "$T/etc/dpkg/dpkg.cfg.d/depot-autoinstall-unsafe-io"
+    ln -sf ../run/NetworkManager/resolv.conf "$T/etc/resolv.conf"
+    mkdir -p "$T/var/lib/depot" "$T/var/log/depot"
+    [ -n "$CONF_FILE" ] && sha256sum <"$CONF_FILE" | cut -d' ' -f1 >"$T/var/lib/depot/autoinstall.sha256"
+    [ -n "$WARNINGS" ] && out "Cảnh báo trong lúc cài:$WARNINGS"
+    out "== xong $(date '+%F %T')"
+    cp "$LOG" "$T/var/log/depot/autoinstall.log"; chmod 600 "$T/var/log/depot/autoinstall.log"
+    cleanup_mounts
+    return 0
+}
+
+setup_ssh_firewall() {   # setup_ssh_firewall USER_CHÍNH
+    local u=$1 port su home dev
+    port=$(cfg SSH_PORT 22)
+    if is_yes "$(cfg SSH no)"; then
+        if ! inchroot dpkg -s openssh-server >/dev/null 2>&1; then
+            [ $NET = 1 ] && try inchroot apt-get install -y openssh-server
+        fi
+        if inchroot dpkg -s openssh-server >/dev/null 2>&1; then
+            # khoá máy chủ riêng cho máy này (ISO không mang khoá)
+            rm -f "$T"/etc/ssh/ssh_host_*
+            run inchroot ssh-keygen -A
+            su=$(cfg SSH_USER)
+            if [ -n "$su" ]; then   # user SSH riêng + chỗ lưu trữ riêng
+                home=/srv/$su
+                local st; st=$(cfg SSH_STORAGE)
+                case $st in
+                    "") ;;
+                    /dev/*|LABEL=*|UUID=*|PARTLABEL=*|PARTUUID=*)
+                        case $st in /dev/*) dev=$(readlink -f "$st") ;; *) dev=$(blkid -l -o device -t "$st" 2>/dev/null) ;; esac
+                        if [ -z "$dev" ] || [ ! -b "$dev" ] || [ "$(lsblk -dno TYPE "$dev")" != part ]; then
+                            warn "SSH_STORAGE $st không phải phân vùng có thật — lưu ở $home"
+                        elif [ "$dev" = "$ROOT_DEV" ] || [ "$dev" = "$ESP_DEV" ] || [ -n "$(part_role "$dev")" ] || grep -qx "$dev" <<<"$(protected_parts)"; then
+                            warn "SSH_STORAGE $dev là phân vùng hệ thống / Windows / USB cài — không dùng, lưu ở $home"
+                        else
+                            unmount_dev "$dev"
+                            if is_yes "$(cfg SSH_STORAGE_FORMAT no)" || [ -z "$(lsblk -dno FSTYPE "$dev")" ]; then
+                                run wipefs -a "$dev"; run mkfs.ext4 -F -q -L "ssh-$su" "$dev"
+                            fi
+                            mkdir -p "$T$home"
+                            echo "UUID=$(blkid -s UUID -o value "$dev") $home $(lsblk -dno FSTYPE "$dev") defaults,noatime,nofail 0 2" >>"$T/etc/fstab"
+                            mnt "$dev" "$T$home"
+                            out "   lưu trữ SSH: $dev → $home"
+                        fi ;;
+                    *) home=$st ;;
+                esac
+                mkdir -p "$T$(dirname "$home")"
+                run inchroot useradd -m -d "$home" -U -s /bin/bash -c "SSH ($su)" "$su"
+                [ -d "$T$home" ] && cp -rn "$T/etc/skel/." "$T$home/" 2>/dev/null
+                inchroot chown -R "$su:$su" "$home"; chmod 750 "$T$home"
+                set_hash_or_pw "$su" "$(cfg SSH_PASSWORD_HASH)" "$(cfg SSH_PASSWORD)"
+                is_yes "$(cfg SSH_SUDO no)" && run inchroot usermod -aG sudo "$su"
+            fi
+            local login=${su:-$u} kh
+            if [ -n "$(cfg SSH_AUTHORIZED_KEY)" ]; then
+                kh=$(inchroot getent passwd "$login" | cut -d: -f6)
+                mkdir -p "$T$kh/.ssh"; printf '%s\n' "$(cfg SSH_AUTHORIZED_KEY)" >>"$T$kh/.ssh/authorized_keys"
+                chmod 700 "$T$kh/.ssh"; chmod 600 "$T$kh/.ssh/authorized_keys"; inchroot chown -R "$login:$login" "$kh/.ssh"
+            fi
+            mkdir -p "$T/etc/ssh/sshd_config.d"
+            cat >"$T/etc/ssh/sshd_config.d/50-depot.conf" <<EOF
+# depot-autoinstall: truy cập từ xa
+Port $port
+PermitRootLogin no
+PasswordAuthentication $(is_yes "$(cfg SSH_PASSWORD_AUTH yes)" && echo yes || echo no)
+KbdInteractiveAuthentication no
+AllowUsers $login
+MaxAuthTries 4
+EOF
+            run inchroot systemctl enable ssh.service
+            out "   OpenSSH: cổng $port, chỉ cho user $login"
+        else
+            warn "không cài được openssh-server (không có mạng?) — bỏ qua SSH"
+        fi
+    else
+        inchroot systemctl disable ssh.service ssh.socket >>"$LOG" 2>&1
+    fi
+    if is_yes "$(cfg FIREWALL yes)"; then
+        if ! inchroot dpkg -s ufw >/dev/null 2>&1; then [ $NET = 1 ] && try inchroot apt-get install -y ufw; fi
+        if inchroot dpkg -s ufw >/dev/null 2>&1; then
+            try inchroot ufw default deny incoming
+            try inchroot ufw default allow outgoing
+            try inchroot ufw allow 53317/tcp comment LocalSend
+            try inchroot ufw allow 53317/udp comment LocalSend
+            try inchroot ufw allow 5353/udp comment mDNS
+            is_yes "$(cfg SSH no)" && try inchroot ufw limit "$port/tcp" comment SSH
+            sed -i 's/^ENABLED=.*/ENABLED=yes/' "$T/etc/ufw/ufw.conf"
+            run inchroot systemctl enable ufw.service
+            out "   ufw: chặn kết nối vào, mở$(is_yes "$(cfg SSH no)" && echo " SSH $port,") LocalSend 53317, mDNS 5353"
+        else
+            warn "không cài được ufw — tường lửa chưa bật"
+        fi
+    fi
+}
+
+finish() {
+    case $(cfg FINISH reboot) in
+        reboot)   status "Cài Depot OS xong! Rút USB — máy khởi động lại sau 10 giây…"; sleep 10; systemctl reboot ;;
+        poweroff) status "Cài Depot OS xong! Máy tắt sau 10 giây…"; sleep 10; systemctl poweroff ;;
+        none)     status "Cài Depot OS xong! Khởi động lại máy khi sẵn sàng."; sleep 5 ;;
+    esac
+}
+
+# ---------------------------------------------------------------- màn xác nhận (cảnh báo trước khi bung squashfs)
+confirm_screen() {   # in kế hoạch + bảng phân vùng, rồi đếm ngược hoặc hỏi. Trả 1 nếu huỷ.
+    local s key what
+    if [ -z "$TGT_PART" ]; then what="XOÁ SẠCH CẢ Ổ $TGT_DISK"; else what="QUICK FORMAT phân vùng $TGT_PART"; fi
+    [ "$ON_VT" = 1 ] && printf '\033c'
+    out "================ DEPOT OS — CÀI TỰ ĐỘNG ================"
+    out "File cấu hình: $CONF_FILE ($CONF_DEV)"
+    print_plan | while IFS= read -r l; do out "$l"; done
+    out ""
+    out "!!! CẢNH BÁO: sắp $what rồi bung filesystem.squashfs lên đó — dữ liệu trên đó MẤT HẲN."
+    if [ "$(cfg CONFIRM countdown)" = ask ]; then
+        if command -v whiptail >/dev/null && [ "$ON_VT" = 1 ]; then
+            TERM=linux whiptail --title "$(ui "Depot OS — xác nhận")" --defaultno --yes-button "$(ui "Cài")" --no-button "$(ui "Huỷ")" \
+                --yesno "$(ui "Sắp $what rồi bung hệ thống lên đó. Dữ liệu trên đó MẤT HẲN. Tiếp tục?")" 10 74 || return 1
+            return 0
+        fi
+        printf '%s' "$(ui "Gõ CAI (in hoa) rồi Enter để cài, Enter để huỷ: ")"
+        read -r key; [ "$key" = CAI ] || return 1
+        return 0
+    fi
+    s=$(cfg CONFIRM_TIMEOUT 15)
+    [ "$s" -le 0 ] && return 0
+    out "Nhấn phím bất kỳ để HUỶ (vào phiên live bình thường)."
+    while [ "$s" -gt 0 ]; do
+        plymouth_on && plymouth display-message --text="CÀI TỰ ĐỘNG: sắp $what sau $s giây — nhấn phím bất kỳ để huỷ" 2>/dev/null
+        printf '\r%s' "$(ui "   Bắt đầu sau $s giây...  ")"
+        if plymouth_on; then
+            timeout 1 plymouth watch-keystroke >/dev/null 2>&1 && return 1
+        else
+            read -r -s -t 1 -n 1 key 2>/dev/null && return 1
+        fi
+        s=$((s - 1))
+    done
+    echo
+    return 0
+}
+
+# ================================================================ main
+need_root() { [ "$(id -u)" = 0 ] || { echo "Cần quyền root: sudo depot-autoinstall $*" >&2; exit 1; }; }
+load_or_die() {
+    parse_config "$1" || exit 1
+    echo "Kiểm tra $1:"
+    if validate; then echo "  ✓ hợp lệ"; else echo "File cấu hình có lỗi — sửa rồi chạy lại." >&2; exit 1; fi
+}
+vt_mode() {   # chuyển sang màn chữ tty1 (bảng phân vùng, whiptail): tắt màn boot đồ hoạ, bớt log kernel
+    ON_VT=1
+    plymouth_on && plymouth quit 2>/dev/null
+    dmesg -n 1 2>/dev/null
+    exec </dev/tty1 >/dev/tty1 2>&1
+    export TERM=linux
+    printf '\033c'
+}
+
+case "${1:-}" in
+    --check)
+        if [ -n "${2:-}" ]; then CONF_FILE=$2; CONF_DIR=$(dirname "$(readlink -f "$2")")
+        else
+            need_root --check
+            find_config all || { echo "Không tìm thấy $CONF_NAME ở gốc phân vùng nào." >&2; exit 1; }
+            echo "Tìm thấy: $CONF_FILE ($CONF_DEV)"
+        fi
+        load_or_die "$CONF_FILE"
+        if [ "$(cfg PARTITION)" = ask ] && [ "$(cfg TARGET disk)" = partition ]; then
+            echo "  PARTITION=ask: lúc cài sẽ hiện danh sách để chọn. Phân vùng cài được trên máy này:"
+            install_candidates | while IFS=$'\t' read -r p size fs label; do printf '    %-16s %9s %-6s %s\n' "$p" "$(human "$size")" "${fs:--}" "$label"; done
+        elif resolve_target; then print_plan; else echo "  (chưa xác định được nơi cài trên máy này — xem lỗi ở trên)"; fi
+        mountpoint -q "$SCAN_MNT" && umount "$SCAN_MNT"
+        exit 0
+        ;;
+    --find)
+        need_root --find
+        if find_config all; then echo "$CONF_FILE ($CONF_DEV)"; mountpoint -q "$SCAN_MNT" && umount "$SCAN_MNT"; exit 0; fi
+        echo "Không tìm thấy $CONF_NAME" >&2; exit 1
+        ;;
+    --list-disks)
+        list_disks | while IFS=$'\t' read -r name size rm tran model; do
+            printf '%-14s %9s  %-5s %s\n' "$name" "$(human "$size")" "${tran:-?}$( [ "$rm" = 1 ] && echo ,rời)" "$model"
+        done
+        exit 0
+        ;;
+    --list-partitions)
+        need_root --list-partitions
+        list_disks | while IFS=$'\t' read -r d _; do print_parts "$d"; done | sed 's/\[giữ nguyên\]//'
+        echo; echo "Cài được (≥ 15 GB, không phải Windows/EFI/USB/ISO):"
+        install_candidates | while IFS=$'\t' read -r p size fs label; do printf '  %-16s %9s %-6s %s\n' "$p" "$(human "$size")" "${fs:--}" "$label"; done
+        exit 0
+        ;;
+    --run)
+        need_root --run
+        CONF_FILE=${2:?thiếu đường dẫn file cấu hình}; CONF_DIR=$(dirname "$(readlink -f "$CONF_FILE")")
+        CONF_DEV=$(findmnt -nvo SOURCE --target "$CONF_FILE" 2>/dev/null | head -1)
+        load_or_die "$CONF_FILE"
+        if [ "$(cfg TARGET disk)" = partition ] && [ "$(cfg PARTITION)" = ask ]; then
+            PICKED_PART=$(pick_partition) || { echo "Đã huỷ."; exit 1; }
+            why=$(part_ok "$PICKED_PART") || { echo "$why" >&2; exit 1; }
+        fi
+        resolve_target || exit 1
+        : >"$LOG"
+        print_plan
+        if [ "${3:-}" != --yes ]; then
+            printf '\n!!! %s SẼ MẤT DỮ LIỆU. Gõ XOA (in hoa) để tiếp tục: ' "${TGT_PART:-Cả ổ $TGT_DISK}"
+            read -r ans; [ "$ans" = XOA ] || { echo "Đã huỷ."; exit 1; }
+        fi
+        do_install
+        out "Cài xong. Log: $LOG (bản sao trong máy mới: /var/log/depot/autoinstall.log)"
+        exit 0
+        ;;
+    --service)
+        need_root --service
+        SERVICE=1
+        cmdline_has depot.noautoinstall && exit 0
+        [ -d /run/live/medium ] || exit 0
+        FORCED=0; cmdline_has depot.autoinstall && FORCED=1
+        if [ $FORCED = 1 ]; then find_config all; else find_config removable; fi || {
+            [ $FORCED = 1 ] && { status "Cài tự động: không tìm thấy $CONF_NAME ở gốc USB/ổ nào — vào phiên live sau 15 giây"; sleep 15; plymouth_on && plymouth hide-message --text="" 2>/dev/null; }
+            exit 0
+        }
+        : >"$LOG"
+        if ! parse_config "$CONF_FILE" 2>>"$LOG"; then
+            status "Cài tự động: file $CONF_FILE sai cú pháp — vào phiên live sau 20 giây"; sleep 20; exit 0
+        fi
+        if [ $FORCED = 0 ] && ! is_yes "$(cfg AUTO_START no)"; then
+            mountpoint -q "$SCAN_MNT" && umount "$SCAN_MNT"
+            exit 0   # có file nhưng không AUTO_START: chỉ chạy khi chọn mục boot "Cài tự động"
+        fi
+        vt_mode
+        if ! validate 2>>"$LOG"; then
+            out "Cài tự động: file cấu hình có lỗi:"; validate; out "Vào phiên live sau 30 giây"; sleep 30; exit 0
+        fi
+        if [ "$(cfg TARGET disk)" = partition ] && [ "$(cfg PARTITION)" = ask ]; then
+            out "Đang dò phân vùng…"
+            if ! PICKED_PART=$(pick_partition); then
+                out "Không chọn phân vùng — huỷ, vào phiên live"; sleep 5; exit 0
+            fi
+        fi
+        if ! resolve_target 2>>"$LOG"; then
+            out "Cài tự động: $(tail -1 "$LOG") — vào phiên live sau 30 giây"; sleep 30; exit 0
+        fi
+        HASH=$(sha256sum <"$CONF_FILE" | cut -d' ' -f1)
+        if [ $FORCED = 0 ] && [ "$(cfg PARTITION)" != ask ] && already_installed "$HASH"; then
+            out "Máy đã được cài bằng file này rồi — bỏ qua (muốn cài lại: chọn mục boot \"Cài tự động\")"; sleep 8
+            exit 0
+        fi
+        if ! confirm_screen; then
+            out ""; out "Đã huỷ cài tự động — vào phiên live"; sleep 3; exit 0
+        fi
+        do_install
+        finish
+        exit 0
+        ;;
+    *)
+        sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'
+        exit 1
+        ;;
+esac
