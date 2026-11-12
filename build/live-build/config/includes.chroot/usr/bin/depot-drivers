@@ -9,6 +9,7 @@
 #                                   @firmware  isenkram tìm gói firmware còn thiếu (+ firmware b43)
 #                                   @kernel    kernel mới hơn từ backports (Wi-Fi USB đời mới kernel 6.12 chưa có driver)
 #                                   @fix       như "repair"
+#                                   @nvidia    driver NVIDIA chính hãng: gọi "depot-nvidia install" (xem /usr/bin/depot-nvidia)
 #   depot-drivers repair          (root) card mạng không lên: bỏ khoá rfkill, đưa USB Wi-Fi khỏi chế độ ổ đĩa (ZeroCD),
 #                                 nạp lại driver, khởi động lại NetworkManager — không cần khởi động lại máy
 #   depot-drivers report [FILE]   ghi báo cáo phần cứng mạng (mặc định ~/depot-drivers-report.txt) để gửi nhờ hỗ trợ
@@ -100,15 +101,18 @@ short() {
         -e 's/ Technology Co\., Ltd\.//; s/ Co\., Ltd\.//; s/, Inc\.//; s/ Inc\.//'
 }
 
+# Driver NVIDIA chính hãng: depot-nvidia chọn theo thế hệ card (tài liệu Debian + NVIDIA). In @nvidia khi card có
+# driver cài được; trống = Debian 13 không có driver chính hãng cho card này, cứ dùng nouveau.
+# (Trước v0.24 hỏi nvidia-detect: wiki Debian đã bỏ mục đó vì nó chỉ gói lỗi thời — gói legacy không còn trong trixie.)
 nvidia_pkg() {
-    have nvidia-detect || return
-    nvidia-detect 2>/dev/null | awk '/recommended to install the/ { getline; gsub(/ /, ""); print; exit }'
+    have depot-nvidia || return
+    [ -n "$(depot-nvidia recommend 2>/dev/null)" ] && echo "@nvidia"
 }
 
 row() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-—}" "$4" "$5" "$6"; }
 
 # Dòng ra: loại \t thiết bị \t driver \t trạng thái \t gói đề xuất \t cần làm
-#   gói: tên gói Debian | @firmware | @kernel | @fix; có "?" đứng đầu = tuỳ chọn (không tick sẵn)
+#   gói: tên gói Debian | @firmware | @kernel | @fix | @nvidia; có "?" đứng đầu = tuỳ chọn (không tick sẵn)
 #   cần làm: 1 = chưa chạy được (có nhắc lúc đăng nhập), 2 = xem cho biết (không nhắc), 0 = ổn
 scan() {
     pci_list | while IFS="$TAB" read -r slot cname cls name id drv mods; do
@@ -130,8 +134,9 @@ scan() {
         case "$vendor:$cls" in
             10de:03*)
                 if [ "$drv" != nvidia ]; then
-                    pkg=$(nvidia_pkg)
-                    [ -n "$pkg" ] && [ "$drv" = nouveau ] && st="✓ Đang chạy (nouveau, mã mở)"
+                    nv=$(nvidia_pkg)
+                    [ -n "$nv" ] && pkg=$nv
+                    [ -n "$nv" ] && [ "$drv" = nouveau ] && st="✓ Đang chạy (nouveau, mã mở)"
                 fi ;;
             14e4:0280)   # Broadcom: b43/bcma bám vào nhưng không có firmware thì vẫn không có Wi-Fi → driver wl
                 if [ $need = 1 ] && in_list "$dev" "$BCM_STA"; then pkg=broadcom-sta-dkms; fi ;;
@@ -369,13 +374,14 @@ install_firmware() {
 install_pkgs() {
     if [ "$(id -u)" != 0 ]; then as_root "$SELF" install "$@"; exit $?; fi
     rm -f "$AUTO_STATE"/fail-* "$AUTO_STATE"/fw-* 2>/dev/null   # người dùng cài tay: lượt tự động sau được thử lại
-    fw=0; kernel=0; fix=0; pkgs=""; dk=""; headers=0; fails=""; REBOOT=0
+    fw=0; kernel=0; fix=0; nvidia=0; pkgs=""; dk=""; headers=0; fails=""; REBOOT=0
     for p in "$@"; do
         p=${p#\?}
         case "$p" in
             @firmware) fw=1 ;;
             @kernel) kernel=1 ;;
             @fix) fix=1 ;;
+            @nvidia) nvidia=1 ;;
             '' | *[!a-z0-9.+-]*) echo "!! tên gói không hợp lệ: $p" >&2; exit 2 ;;
             *-dkms) dk="$dk $p" ;;
             *) pkgs="$pkgs $p"; case "$p" in nvidia-*) headers=1 ;; esac ;;
@@ -401,6 +407,10 @@ install_pkgs() {
     fi
     [ $kernel = 1 ] && { install_kernel || fails="$fails kernel-backports"; }
     [ $fw = 1 ] && { install_firmware || fails="$fails firmware"; }
+    # driver NVIDIA: depot-nvidia tự chọn kênh theo thế hệ card, tự lo header, DKMS, Secure Boot
+    if [ $nvidia = 1 ]; then
+        if have depot-nvidia && depot-nvidia install; then REBOOT=1; else fails="$fails driver-NVIDIA"; fi
+    fi
     [ $fix = 1 ] && repair
     echo
     if [ -n "$fails" ]; then echo "!! Chưa xong:$fails"; else echo ">> Xong."; fi
@@ -671,6 +681,7 @@ auto_body() {
                     else todo_add "Thiếu firmware ($n): chưa tìm được gói — mở “Driver phần cứng”"; fi
                 fi ;;
             @kernel) todo_add "$n: cần kernel mới hơn — mở “Driver phần cứng”, tick dòng đó rồi bấm Cài mục đã chọn" ;;
+            @nvidia) todo_add "$n: có driver NVIDIA chính hãng — mở “Driver NVIDIA” để cài" ;;
             *) todo_add "$n: có driver đề xuất ($p) — mở “Driver phần cứng” để cài" ;;
         esac
     done
@@ -766,6 +777,7 @@ gui() {
             if (p == "@firmware") return opt "tự tìm gói firmware"
             if (p == "@kernel") return opt "kernel mới hơn (backports)"
             if (p == "@fix") return opt "Sửa mạng"
+            if (p == "@nvidia") return opt "driver NVIDIA chính hãng"
             if (p == "broadcom-sta-dkms") return opt "driver Broadcom wl" (pool == 1 ? " (có sẵn trong máy)" : "")
             if (p == "r8168-dkms") return opt "driver Realtek chính hãng r8168"
             return opt p
@@ -782,8 +794,12 @@ gui() {
                 yad --title="Driver phần cứng" --window-icon=preferences-system --image=dialog-information --borders=14 --center --fixed \
                     --text="Chưa tick mục nào có gói để cài.\nTick ô ở cột “Cài” của dòng có đề xuất rồi bấm lại." --button="Đóng:0" >/dev/null 2>&1
             else
+                # driver NVIDIA có cửa sổ riêng (hỏi kênh cài, báo việc thêm kho của NVIDIA, bước Secure Boot)
+                nvgui=0
+                case " $pkgs " in *" @nvidia "*) nvgui=1; pkgs=$(echo " $pkgs " | sed 's/ @nvidia / /; s/^ *//; s/ *$//') ;; esac
                 # shellcheck disable=SC2086
-                run_log "Đang cài driver" install $pkgs
+                [ -n "$pkgs" ] && run_log "Đang cài driver" install $pkgs
+                [ $nvgui = 1 ] && have depot-nvidia && depot-nvidia
             fi
             exec "$SELF" ;;
         4) run_log "Sửa mạng" repair; exec "$SELF" ;;

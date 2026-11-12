@@ -94,6 +94,7 @@
       <Filename>org.pulseaudio.pavucontrol.desktop</Filename>
       <Filename>depot-sound-test.desktop</Filename>
       <Filename>depot-drivers.desktop</Filename>
+      <Filename>depot-nvidia.desktop</Filename>
       <Filename>thunar-volman-settings.desktop</Filename>
       <Filename>blueman-adapters.desktop</Filename>
       <Filename>system-config-printer.desktop</Filename>

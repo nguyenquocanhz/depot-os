@@ -6,7 +6,8 @@ intel-microcode
 # firmware: ISO đã có toàn bộ non-free-firmware (live-build tự cài, ~850 MB). Phần dưới để DÒ driver:
 # isenkram-cli: map phần cứng -> gói Debian, tự tìm gói firmware còn thiếu (cần mạng)
 isenkram-cli
-# nvidia-detect: card NVIDIA nào hợp gói driver nào
+# nvidia-detect: card NVIDIA nào hợp gói driver nào. Từ v0.24 "Driver NVIDIA" (depot-nvidia) tự phân thế hệ card theo
+# tài liệu Debian, không dựa vào gói này nữa (wiki Debian: bản đóng gói chỉ gói lỗi thời) — giữ cho người quen lệnh.
 nvidia-detect
 # lsusb cho depot-drivers
 usbutils

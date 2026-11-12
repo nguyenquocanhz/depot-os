@@ -1,0 +1,602 @@
+#!/bin/sh
+# Depot OS — Driver NVIDIA: dò card, chọn đúng driver theo tài liệu, cài bằng một nút (như "ubuntu-drivers install")
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-nvidia                    mở cửa sổ (yad)
+#   depot-nvidia status             in card, thế hệ, driver đang chạy, gói đã cài, đề xuất
+#   depot-nvidia recommend          in kênh đề xuất: nvidia | debian | (trống = cứ dùng nouveau) — depot-drivers gọi
+#   depot-nvidia install [--channel nvidia|debian]
+#                                   (root, tự xin quyền) cài driver đề xuất, hoặc theo kênh chỉ định
+#   depot-nvidia remove             (root, tự xin quyền) gỡ sạch driver NVIDIA, quay về nouveau
+#   depot-nvidia run LỆNH…          laptop hai card: chạy LỆNH bằng card NVIDIA (PRIME render offload)
+#   depot-nvidia --notify           lúc đăng nhập: báo kết quả sau lần cài, gợi ý cài khi card có driver chính hãng
+#
+# CHỌN DRIVER theo wiki.debian.org/NvidiaGraphicsDrivers (bản 2026, mục Debian 13 "Trixie") và hướng dẫn cài của NVIDIA
+# (docs.nvidia.com/datacenter/tesla/driver-installation-guide, mục Debian):
+#   Turing, Ampere, Ada, Blackwell      kênh "nvidia": kho của NVIDIA cho Debian 13, gói nvidia-open (module nhân mã mở,
+#   (GTX 16xx, RTX 20/30/40/50)         build bằng DKMS; dòng 590 trở lên, NVIDIA tự ra bản mới qua apt).
+#                                       Turing/Ampere/Ada còn dùng được kênh "debian" (xem dưới); Blackwell thì không.
+#   Maxwell, Pascal, Volta              kênh "debian": gói nvidia-kernel-dkms + nvidia-driver của Debian 13 (dòng 550,
+#   (GTX 750/9xx/10xx, Titan V)         kho non-free). Debian ghi: dòng 550 không còn được vá lỗi. Dòng 580 mà wiki nhắc
+#                                       cho các card này phải lấy từ kho NVIDIA của Debian 12 kèm tắt kiểm chữ ký apt —
+#                                       chính wiki gọi là "dirty hack", công cụ này KHÔNG làm.
+#   Kepler trở về trước                 không cài gì: Debian 13 không có gói 470 / 390 / 340, dùng nouveau có sẵn.
+#   (GTX 6xx/7xx, GT 730, GTX 5xx…)
+# CÁC BƯỚC CÀI (đúng thứ tự tài liệu):
+#   1. đang có driver NVIDIA của kênh khác → gỡ sạch trước ("critical to first purge the old driver");
+#   2. header của kernel ĐANG CHẠY + linux-headers-amd64 (kernel cập nhật về sau thì DKMS tự build lại);
+#   3. kênh nvidia: tải cuda-keyring_1.1-1_all.deb từ kho NVIDIA, dpkg -i, apt update, apt install nvidia-open;
+#      kênh debian: apt install nvidia-kernel-dkms nvidia-driver;
+#   4. kiểm tra DKMS đã build module cho kernel đang chạy (dkms status 'nvidia*');
+#   5. máy bật Secure Boot: đăng ký khoá ký của DKMS (mokutil --import /var/lib/dkms/mok.pub), hướng dẫn bước màn hình xanh;
+#   6. khởi động lại (nouveau đang nạp, không đổi sang nvidia khi máy đang chạy được).
+# GỠ: apt purge --auto-remove mọi gói *nvidia* / *cuda* (trừ firmware và nvidia-detect), cài lại firmware-nvidia-graphics
+#     cho nouveau, khởi động lại.
+# Không đụng tới: cấu hình Wayland (Depot chỉ có phiên X11), tham số ngủ/treo máy NVreg_* (wiki ghi có thể hỏng trên
+#   laptop Optimus), xorg.conf (gói driver tự lo).
+# Phiên USB (live): không có vùng lưu thì không cài — driver chỉ chạy sau khi khởi động lại, mà khởi động lại là mất.
+# Thử không cần card thật: lspci giả đặt trước trong PATH; DEPOT_KVER=<kernel> thay cho `uname -r`;
+#   DEPOT_NVIDIA_TEST=1 cho phép chạy trong chroot và trên máy không có card NVIDIA; DEPOT_NVIDIA_STATE / _RUN đổi thư mục.
+NV_REPO=https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64
+NV_KEYRING=cuda-keyring_1.1-1_all.deb
+POOL=${DEPOT_DRIVER_POOL:-/usr/share/depot-os/driver-pool}
+STATE=${DEPOT_NVIDIA_STATE:-/var/lib/depot/nvidia}
+RUN=${DEPOT_NVIDIA_RUN:-/run/depot-nvidia}
+IGNORE="$HOME/.config/depot/nvidia-ignore"
+TAB=$(printf '\t')
+SELF=$(command -v "$0")   # pkexec cần đường dẫn tuyệt đối
+MOK_PW=depot1234          # mật khẩu dùng MỘT lần ở màn hình xanh MOK lúc khởi động lại (cùng giá trị với depot-drivers)
+TITLE="Driver NVIDIA"
+ICON=preferences-system
+
+have() { command -v "$1" >/dev/null 2>&1; }
+kver() { echo "${DEPOT_KVER:-$(uname -r)}"; }
+live() { [ -d /run/live/medium ]; }
+persisted() { grep -q ' /run/live/persistence/' /proc/mounts 2>/dev/null; }
+online() { curl -fsI --max-time 8 http://deb.debian.org/debian/dists/trixie/Release >/dev/null 2>&1; }
+sb_on() { have mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; }
+mok_ok() { [ -r /var/lib/dkms/mok.pub ] && mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -qi 'already enrolled'; }
+
+# ------------------------------------------------------------------ dò card
+# Mỗi dòng: slot \t mã thiết bị \t tên theo pci.ids ("TU117M [GeForce GTX 1650 Mobile / Max-Q]")
+gpus() {
+    lspci -Dnn 2>/dev/null | awk -v OFS='\t' '
+        / \[03[0-9a-f][0-9a-f]\]: / && /\[10de:[0-9a-f]+\]/ {
+            match($0, /\[10de:[0-9a-f]+\]/); id = substr($0, RSTART + 6, RLENGTH - 7)
+            name = $0; sub(/^.*\]: /, "", name); sub(/ \[10de:.*$/, "", name); sub(/^NVIDIA Corporation /, "", name)
+            print $1, id, name
+        }'
+}
+
+# card đồ hoạ của hãng khác cùng nằm trong máy (Intel / AMD)
+hybrid() { lspci -nn 2>/dev/null | grep -q -E ' \[03[0-9a-f][0-9a-f]\]: .*\[(8086|1002):'; }
+# laptop hai card (Optimus) = có pin + có card Intel / AMD. Máy bàn có card onboard: màn hình cắm vào card nào chạy card đó,
+# không cần nói gì thêm. DEPOT_NVIDIA_LAPTOP=1|0 để thử.
+laptop() {
+    case "${DEPOT_NVIDIA_LAPTOP:-}" in 1) return 0 ;; 0) return 1 ;; esac
+    ls -d /sys/class/power_supply/BAT* >/dev/null 2>&1
+}
+optimus() { hybrid && laptop; }
+
+# Thế hệ chip. pci.ids đặt tên card NVIDIA bằng mã chip (GK = Kepler, GM = Maxwell, GP = Pascal, GV = Volta, TU = Turing,
+# GA = Ampere, AD = Ada, GH = Hopper, GB = Blackwell); card mới hơn pci.ids của máy thì hiện "Device 2c05" → xét theo mã.
+gen_of() {   # $1 tên, $2 mã thiết bị (hex)
+    case "$1" in
+        GB[0-9]*) echo blackwell; return ;;
+        AD[0-9]* | GH[0-9]*) echo ada; return ;;
+        GA[0-9]*) echo ampere; return ;;
+        TU[0-9]*) echo turing; return ;;
+        GV[0-9]*) echo volta; return ;;
+        GP[0-9]*) echo pascal; return ;;
+        GM[0-9]*) echo maxwell; return ;;
+        GK[0-9]*) echo kepler; return ;;
+        GF[0-9]* | GT[0-9]* | G[0-9]* | NV[0-9]* | MCP* | C[0-9]* | CK[0-9]* | nForce*) echo old; return ;;
+    esac
+    n=$(printf '%d' "0x$2" 2>/dev/null) || n=0
+    if [ "$n" -ge 10496 ]; then echo blackwell                                   # 0x2900 trở lên (kể cả thế hệ sau)
+    elif [ "$n" -ge 9728 ]; then echo ada                                        # 0x2600
+    elif [ "$n" -ge 8704 ]; then echo ampere                                     # 0x2200
+    elif [ "$n" -ge 7680 ]; then echo turing                                     # 0x1e00
+    elif [ "$n" -ge 7552 ]; then echo volta                                      # 0x1d80
+    elif [ "$n" -ge 6912 ]; then echo pascal                                     # 0x1b00
+    elif [ "$n" -ge 5632 ]; then echo maxwell                                    # 0x1600
+    elif [ "$n" -ge 5616 ]; then echo pascal                                     # 0x15f0 (GP100)
+    elif [ "$n" -ge 4928 ] && [ "$n" -le 5183 ]; then echo maxwell               # 0x1340–0x143f
+    elif [ "$n" -ge 4736 ] && [ "$n" -le 4863 ]; then echo kepler                # 0x1280–0x12ff
+    elif [ "$n" -ge 4480 ] && [ "$n" -le 4607 ]; then echo kepler                # 0x1180–0x11ff
+    elif [ "$n" -ge 4032 ] && [ "$n" -le 4159 ]; then echo kepler                # 0x0fc0–0x103f
+    else echo old
+    fi
+}
+
+gen_name() {
+    case "$1" in
+        blackwell) echo "Blackwell (RTX 50)" ;;
+        ada) echo "Ada (RTX 40)" ;;
+        ampere) echo "Ampere (RTX 30)" ;;
+        turing) echo "Turing (GTX 16, RTX 20)" ;;
+        volta) echo "Volta (Titan V)" ;;
+        pascal) echo "Pascal (GTX 10)" ;;
+        maxwell) echo "Maxwell (GTX 750, GTX 900)" ;;
+        kepler) echo "Kepler (GTX 600 / 700)" ;;
+        *) echo "đời cũ (trước GTX 600)" ;;
+    esac
+}
+
+driver_of() { d=$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null); echo "${d##*/}"; }
+
+# Đặt REC (kênh đề xuất), ALT (kênh khác cũng dùng được), GENS (các thế hệ có trong máy), UNSUP (1 = có card không kênh nào đỡ)
+plan() {
+    GENS=$(gpus | while IFS="$TAB" read -r _s id name; do gen_of "$name" "$id"; done | sort -u | tr '\n' ' ')
+    REC=""; ALT=""; UNSUP=0; bw=0; mid=0; new=0
+    for g in $GENS; do
+        case "$g" in
+            blackwell) bw=1 ;;
+            turing | ampere | ada) new=1 ;;
+            maxwell | pascal | volta) mid=1 ;;
+            *) UNSUP=1 ;;
+        esac
+    done
+    if [ $bw = 1 ]; then REC=nvidia; [ $mid = 1 ] && UNSUP=1      # 590+ bỏ Maxwell/Pascal/Volta, 550 không có Blackwell
+    elif [ $mid = 1 ]; then REC=debian                            # một dòng 550 đỡ cả Maxwell → Ada
+    elif [ $new = 1 ]; then REC=nvidia; ALT=debian
+    fi
+}
+
+pkg_ver() { dpkg-query -W -f='${db:Status-Abbrev}${Version}\n' "$1" 2>/dev/null | sed -n 's/^ii //p' | head -1; }
+installed_ver() {
+    for p in nvidia-driver nvidia-kernel-dkms nvidia-kernel-open-dkms nvidia-open-kernel-dkms; do
+        v=$(pkg_ver "$p"); [ -n "$v" ] && { echo "$v"; return; }
+    done
+}
+# kênh của driver đang cài: dòng 590 trở lên chỉ có ở kho NVIDIA, Debian 13 dừng ở 550
+installed_channel() {
+    v=$(installed_ver); [ -n "$v" ] || return 0
+    m=${v#*:}; m=${m%%.*}
+    case "$m" in '' | *[!0-9]*) echo debian; return ;; esac
+    if [ "$m" -ge 590 ]; then echo nvidia; else echo debian; fi
+}
+running_ver() { cat /sys/module/nvidia/version 2>/dev/null; }
+chan_name() { case "$1" in nvidia) echo "kho của NVIDIA (gói nvidia-open, bản mới nhất)" ;; debian) echo "kho Debian (gói nvidia-driver, dòng 550)" ;; esac; }
+# module đã build cho kernel này chưa (Debian đặt tên nvidia-current.ko, NVIDIA đặt nvidia.ko)
+built_for() { ls "/lib/modules/$1/updates/dkms/"nvidia*.ko* >/dev/null 2>&1; }
+
+status() {
+    list=$(gpus)
+    if [ -z "$list" ]; then echo "Máy này không có card đồ hoạ NVIDIA."; return 0; fi
+    plan
+    echo "$list" | while IFS="$TAB" read -r slot id name; do
+        d=$(driver_of "$slot")
+        echo "Card:            NVIDIA $name [10de:$id]"
+        echo "  thế hệ:        $(gen_name "$(gen_of "$name" "$id")")"
+        echo "  driver đang chạy: ${d:-chưa có}"
+    done
+    optimus && echo "Laptop hai card (có thêm card Intel / AMD): màn hình chạy bằng card đó, card NVIDIA dùng khi cần."
+    v=$(installed_ver)
+    if [ -n "$v" ]; then
+        echo "Đã cài:          driver NVIDIA $v — $(chan_name "$(installed_channel)")"
+        r=$(running_ver)
+        if [ -n "$r" ]; then echo "Đang chạy:       module nvidia $r"
+        else echo "Đang chạy:       CHƯA — module nvidia chưa nạp (chưa khởi động lại, hoặc Secure Boot chặn)"; fi
+        have dkms && dkms status 2>/dev/null | grep -i '^nvidia' | sed 's/^/  dkms: /'
+    else
+        echo "Đã cài:          chưa có driver NVIDIA chính hãng"
+    fi
+    if sb_on; then
+        if mok_ok; then echo "Secure Boot:     bật, khoá ký driver đã đăng ký"
+        else echo "Secure Boot:     bật, khoá ký driver CHƯA đăng ký (cài xong sẽ có một bước ở màn hình xanh lúc khởi động lại)"; fi
+    fi
+    case "$REC" in
+        '') echo "Đề xuất:         giữ driver nouveau có sẵn — Debian 13 không có driver chính hãng cho thế hệ card này." ;;
+        *)  echo "Đề xuất:         $(chan_name "$REC")"
+            [ -n "$ALT" ] && echo "Cũng dùng được:  $(chan_name "$ALT")" ;;
+    esac
+    [ "$UNSUP" = 1 ] && [ -n "$REC" ] && echo "Lưu ý:           máy có card NVIDIA đời khác mà driver này không đỡ; card đó sẽ không chạy bằng driver chính hãng."
+    return 0
+}
+
+# ------------------------------------------------------------------ quyền root
+as_root() {
+    if [ "$(id -u)" = 0 ]; then "$@"
+    elif have pkexec; then pkexec "$@"
+    elif [ -t 0 ] && have sudo; then sudo "$@"
+    else
+        echo "!! Thiếu pkexec nên không xin được quyền quản trị từ cửa sổ này."
+        echo "   Mở Terminal và chạy:  sudo $(basename "$1") $(shift; echo "$*")"
+        return 1
+    fi
+}
+
+result() { mkdir -p "$RUN" 2>/dev/null; echo "$1" > "$RUN/result" 2>/dev/null; chmod 644 "$RUN/result" 2>/dev/null; }
+fail() { echo; echo "!! $1"; shift; for l in "$@"; do echo "   $l"; done; result fail; exit 1; }
+apt_do() { DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
+# kho có bản cài được của gói $1? LC_ALL=C: máy để tiếng Việt thì apt-cache in "Ứng cử:" chứ không phải "Candidate:"
+has_candidate() { LC_ALL=C apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [0-9]'; }
+
+# gói driver NVIDIA đang có trong máy (kể cả gói chỉ còn file cấu hình). Giữ lại firmware (nouveau cần) và nvidia-detect.
+nv_pkgs() {
+    dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 2>/dev/null |
+        awk '$2 != "not-installed" && $1 ~ /nvidia|cuda/ && $1 !~ /^firmware-/ && $1 !~ /^nvidia-detect/ { print $1 }'
+}
+
+purge_driver() {
+    list=$(nv_pkgs | tr '\n' ' ')
+    [ -n "$list" ] || return 0
+    echo ">> Gỡ sạch driver NVIDIA đang có…"
+    # shellcheck disable=SC2086
+    apt_do purge -y --auto-remove $list
+}
+
+# Secure Boot chỉ nạp module đã ký bằng khoá máy tin. DKMS tự ký bằng /var/lib/dkms/mok.key; khoá công khai phải được
+# đăng ký (MOK) một lần ở màn hình xanh lúc khởi động lại. Trả 0 nếu vừa xếp hàng đăng ký.
+mok_enroll() {
+    sb_on || return 1
+    [ -r /var/lib/dkms/mok.pub ] || { have dkms && dkms generate_mok >/dev/null 2>&1; }
+    [ -r /var/lib/dkms/mok.pub ] || return 1
+    mok_ok && return 1
+    printf '%s\n%s\n' "$MOK_PW" "$MOK_PW" | mokutil --import /var/lib/dkms/mok.pub >/dev/null 2>&1 || return 1
+    cat <<E
+
+!! MÁY BẬT SECURE BOOT — còn MỘT bước lúc khởi động lại, thiếu bước này driver NVIDIA không chạy (máy vẫn vào được
+   desktop bằng driver cơ bản, chỉ là chậm và sai độ phân giải):
+   1. Khởi động lại máy. Màn hình xanh "Perform MOK management" hiện ra (chỉ hiện ~10 giây, bấm phím bất kỳ).
+   2. Chọn  Enroll MOK  →  Continue  →  Yes.
+   3. Nhập mật khẩu:  $MOK_PW
+   4. Chọn  Reboot.
+   Lỡ bỏ qua màn hình đó thì mở lại "Driver NVIDIA" và bấm cài lần nữa.
+E
+    return 0
+}
+
+# header của kernel ĐANG CHẠY — DKMS build module cho kernel nào có header
+ensure_headers() {
+    k=$(kver)
+    [ -e "/lib/modules/$k/build/Makefile" ] && return 0
+    if [ "$(cat "$POOL/kernel" 2>/dev/null)" = "$k" ] && ls "$POOL"/base/*.deb >/dev/null 2>&1; then
+        echo ">> Cài công cụ build driver từ kho có sẵn trong máy (kernel $k)…"
+        dpkg -i -E -G "$POOL"/base/*.deb >/dev/null 2>&1 || dpkg --configure -a >/dev/null 2>&1
+        [ -e "/lib/modules/$k/build/Makefile" ] && return 0
+    fi
+    echo ">> Tải header cho kernel đang chạy ($k)…"
+    apt_do install -y "linux-headers-$k" && [ -e "/lib/modules/$k/build/Makefile" ] && return 0
+    return 1
+}
+
+setup_nvidia_repo() {
+    if [ -z "$(pkg_ver cuda-keyring)" ]; then
+        echo ">> Thêm kho phần mềm của NVIDIA: $NV_REPO"
+        t=$(mktemp -d) || return 1
+        if ! curl -fL --retry 2 --max-time 120 -o "$t/$NV_KEYRING" "$NV_REPO/$NV_KEYRING"; then
+            rm -f "$t/$NV_KEYRING"; rmdir "$t" 2>/dev/null
+            echo "!! Không tải được khoá của kho NVIDIA."; return 1
+        fi
+        if [ "$(dpkg-deb -f "$t/$NV_KEYRING" Package 2>/dev/null)" != cuda-keyring ]; then
+            rm -f "$t/$NV_KEYRING"; rmdir "$t" 2>/dev/null
+            echo "!! File tải về không phải gói cuda-keyring — dừng."; return 1
+        fi
+        dpkg -i "$t/$NV_KEYRING" || { rm -f "$t/$NV_KEYRING"; rmdir "$t" 2>/dev/null; return 1; }
+        rm -f "$t/$NV_KEYRING"; rmdir "$t" 2>/dev/null
+    fi
+    echo ">> Cập nhật danh sách gói (có kho NVIDIA)…"
+    apt_do update || return 1
+    has_candidate nvidia-open || { echo "!! Kho NVIDIA không có gói nvidia-open cho Debian 13."; return 1; }
+}
+
+install_driver() {
+    if [ "$(id -u)" != 0 ]; then as_root "$SELF" install "$@"; exit $?; fi
+    ch=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --channel) ch=${2:-}; shift ;;
+            --channel=*) ch=${1#*=} ;;
+            *) echo "dùng: depot-nvidia install [--channel nvidia|debian]" >&2; exit 2 ;;
+        esac
+        shift
+    done
+    mkdir -p "$RUN" "$STATE"; rm -f "$RUN/result"
+    k=$(kver)
+
+    # --- kiểm tra trước khi đụng vào máy
+    [ "$(dpkg --print-architecture 2>/dev/null)" = amd64 ] || fail "Công cụ này chỉ làm cho máy amd64."
+    if [ "${DEPOT_NVIDIA_TEST:-0}" != 1 ]; then
+        systemd-detect-virt -q --chroot 2>/dev/null && fail "Đang ở trong chroot — không cài driver ở đây."
+        [ -n "$(gpus)" ] || fail "Máy này không có card đồ hoạ NVIDIA."
+    fi
+    plan
+    [ -n "$ch" ] || ch=$REC
+    case "$ch" in
+        nvidia | debian) ;;
+        '') fail "Card này không có driver chính hãng trên Debian 13 ($(for g in $GENS; do gen_name "$g"; done | paste -sd, -))." \
+                "Driver nouveau có sẵn là lựa chọn duy nhất còn được hỗ trợ — không cần cài gì thêm." ;;
+        *) echo "kênh không hợp lệ: $ch (nvidia | debian)" >&2; exit 2 ;;
+    esac
+    if [ "${DEPOT_NVIDIA_TEST:-0}" != 1 ]; then
+        case "$ch:$GENS" in
+            debian:*blackwell*) fail "Dòng 550 của Debian không đỡ card Blackwell (RTX 50). Dùng kênh nvidia." ;;
+            nvidia:*maxwell* | nvidia:*pascal* | nvidia:*volta*)
+                [ "$REC" = nvidia ] || fail "Kho NVIDIA cho Debian 13 chỉ có dòng 590 trở lên, đã bỏ Maxwell / Pascal / Volta. Dùng kênh debian." ;;
+        esac
+    fi
+    if live && ! persisted; then
+        fail "Đang chạy từ USB không có vùng lưu: driver NVIDIA chỉ chạy sau khi khởi động lại, mà khởi động lại là mất hết." \
+            "Cài Depot OS vào máy rồi cài driver, hoặc tạo vùng lưu trước: mở “Lưu dữ liệu trên USB”."
+    fi
+    online || fail "Chưa có mạng. Driver NVIDIA phải tải từ mạng (vài trăm MB)." \
+        "Cắm dây LAN, vào Wi-Fi, hoặc cắm điện thoại bằng cáp USB rồi bật “Chia sẻ kết nối qua USB”."
+    need=1500; [ "$ch" = nvidia ] && need=3000
+    free=$(df -Pm / 2>/dev/null | awk 'NR == 2 { print $4 }')
+    [ "${free:-0}" -ge $need ] || fail "Ổ hệ thống còn ${free:-?} MB trống, cần khoảng $need MB để tải và build driver."
+
+    echo "== Depot OS — cài driver NVIDIA: $(chan_name "$ch")"
+    echo "   kernel đang chạy: $k"
+    gpus | while IFS="$TAB" read -r _s id name; do echo "   card: NVIDIA $name [10de:$id]"; done
+    echo
+
+    # --- 1. gỡ driver của kênh khác (tài liệu: phải gỡ sạch driver cũ trước khi cài driver mới)
+    cur=$(installed_channel)
+    if [ -n "$cur" ] && [ "$cur" != "$ch" ]; then
+        echo ">> Đang có driver từ $(chan_name "$cur"): gỡ trước khi đổi kênh."
+        purge_driver || fail "Gỡ driver cũ lỗi (xem dòng phía trên)."
+    fi
+    # kho NVIDIA còn trong máy thì apt sẽ lấy bản 590+ của NVIDIA thay cho bản 550 của Debian
+    if [ "$ch" = debian ] && [ -n "$(pkg_ver cuda-keyring)" ]; then
+        echo ">> Bỏ kho NVIDIA khỏi máy (kênh debian dùng gói của Debian)."
+        apt_do purge -y cuda-keyring || fail "Không gỡ được gói cuda-keyring."
+    fi
+
+    echo ">> Cập nhật danh sách gói…"
+    apt_do update || echo "!! Không tải được danh sách gói, vẫn thử với danh sách đang có."
+
+    # --- 2. header kernel
+    if ! ensure_headers; then
+        fail "Không có header cho kernel đang chạy ($k) — kho Debian chỉ giữ header của kernel mới nhất." \
+            "Mở “Cập nhật”, cập nhật máy rồi khởi động lại (để chạy kernel mới), sau đó cài lại driver NVIDIA."
+    fi
+
+    # --- 3. cài
+    case "$ch" in
+        debian)
+            # Depot OS cài bằng Calamares / cài tự động đều đã thêm contrib non-free (depot-install-apps, depot-autoinstall)
+            has_candidate nvidia-driver ||
+                fail "Kho của máy không có gói nvidia-driver: nguồn apt thiếu thành phần non-free." \
+                    "Thêm “contrib non-free non-free-firmware” vào các dòng Debian trong /etc/apt/sources.list rồi thử lại."
+            echo ">> Cài nvidia-kernel-dkms + nvidia-driver (tải khoảng 150 MB, build module mất vài phút)…"
+            apt_do install -y linux-headers-amd64 nvidia-kernel-dkms nvidia-driver ||
+                fail "Cài gói lỗi (xem dòng phía trên). Máy vẫn dùng driver cũ." ;;
+        nvidia)
+            setup_nvidia_repo || fail "Không dùng được kho NVIDIA (xem dòng phía trên). Máy chưa bị đổi driver."
+            echo ">> Cài nvidia-open (tải khoảng 370 MB, build module mất vài phút)…"
+            apt_do install -y linux-headers-amd64 nvidia-open ||
+                fail "Cài gói lỗi (xem dòng phía trên). Máy vẫn dùng driver cũ." ;;
+    esac
+
+    # --- 4. DKMS đã build cho kernel đang chạy chưa
+    echo
+    echo ">> Kiểm tra module đã build:"
+    dkms status 2>/dev/null | grep -i '^nvidia' | sed 's/^/   /'
+    if ! built_for "$k"; then
+        echo "!! Module nvidia chưa build được cho kernel $k:"
+        for l in /var/lib/dkms/nvidia*/*/build/make.log; do [ -r "$l" ] && tail -15 "$l" | sed 's/^/   | /'; done
+        fail "Driver đã cài nhưng module chưa có cho kernel đang chạy — khởi động lại máy vẫn sẽ dùng driver cũ." \
+            "Thường do kernel mới hơn mức driver này đỡ. Bấm “Gỡ, về nouveau” để máy sạch, hoặc thử kênh còn lại."
+    fi
+    echo "   có module cho kernel $k"
+
+    # --- 5. Secure Boot
+    mok=0
+    mok_enroll && mok=1
+
+    v=$(installed_ver)
+    printf '%s %s %s\n' "$ch" "${v:-?}" "$(date '+%F %T')" > "$STATE/pending"
+    chmod 644 "$STATE/pending"
+    echo
+    echo ">> Xong: driver NVIDIA ${v:-} đã cài. KHỞI ĐỘNG LẠI máy để dùng."
+    optimus && echo "   Laptop hai card: màn hình vẫn chạy bằng card Intel / AMD. Muốn app nào chạy bằng card NVIDIA:  depot-nvidia run TÊN-APP"
+    if [ $mok = 1 ]; then result ok-mok; else result ok; fi
+    return 0
+}
+
+remove_driver() {
+    if [ "$(id -u)" != 0 ]; then as_root "$SELF" remove; exit $?; fi
+    mkdir -p "$RUN" "$STATE"; rm -f "$RUN/result"
+    if [ -z "$(nv_pkgs)" ]; then echo "Máy không có gói driver NVIDIA nào để gỡ."; result none; return 0; fi
+    echo "== Depot OS — gỡ driver NVIDIA, quay về nouveau"
+    purge_driver || fail "Gỡ lỗi (xem dòng phía trên)."
+    rm -f "$STATE/pending"
+    # nouveau cần firmware cho card đời mới (tài liệu: cài lại firmware-nvidia-graphics khi quay về nouveau)
+    if [ -z "$(pkg_ver firmware-nvidia-graphics)" ]; then
+        if online; then
+            echo ">> Cài lại firmware cho nouveau…"
+            apt_do update >/dev/null 2>&1
+            apt_do install -y firmware-nvidia-graphics || echo "!! Chưa cài được firmware-nvidia-graphics — cài sau khi có mạng."
+        else
+            echo "!! Chưa có mạng: cài firmware-nvidia-graphics sau khi có mạng (nouveau cần nó cho card đời mới)."
+        fi
+    fi
+    echo
+    echo ">> Xong. KHỞI ĐỘNG LẠI máy để quay về driver nouveau."
+    result ok
+}
+
+# ------------------------------------------------------------------ lúc đăng nhập
+notify() {
+    have notify-send || exit 0
+    sleep 45
+    # --- vừa cài xong ở lần bật máy trước: driver chạy chưa?
+    if [ -r "$STATE/pending" ]; then
+        sig=$(md5sum < "$STATE/pending" | cut -c1-16)
+        seen="$HOME/.cache/depot-nvidia-seen"
+        if [ "$(cat "$seen" 2>/dev/null)" != "$sig" ]; then
+            r=$(running_ver)
+            if [ -n "$r" ]; then
+                mkdir -p "$HOME/.cache"; echo "$sig" > "$seen"
+                notify-send -a "Depot OS" -i "$ICON" -t 15000 "Driver NVIDIA $r đang chạy" "Card NVIDIA đã dùng driver chính hãng."
+            elif [ -n "$(installed_ver)" ]; then
+                if sb_on && ! mok_ok; then why="Máy bật Secure Boot mà bước đăng ký khoá ở màn hình xanh chưa làm xong."
+                else why="Module nvidia chưa nạp được."; fi
+                a=$(notify-send -a "Depot OS" -i dialog-warning -A open="Mở Driver NVIDIA" \
+                    "Driver NVIDIA đã cài nhưng chưa chạy" "$why")
+                [ "$a" = open ] && exec "$SELF"
+            fi
+            exit 0
+        fi
+    fi
+    # --- card có driver chính hãng mà chưa cài: gợi ý một lần
+    [ -n "$(gpus)" ] || exit 0
+    [ -z "$(installed_ver)" ] || exit 0
+    live && ! persisted && exit 0
+    plan
+    [ -n "$REC" ] || exit 0
+    sig=$(gpus | md5sum | cut -c1-16)
+    [ "$(cat "$IGNORE" 2>/dev/null)" = "$sig" ] && exit 0
+    name=$(gpus | head -1 | cut -f3)
+    a=$(notify-send -a "Depot OS" -i "$ICON" -A open="Cài driver" -A ignore="Đừng nhắc lại" \
+        "Card NVIDIA có driver chính hãng" "$name đang chạy bằng driver cơ bản (nouveau). Driver chính hãng cho chơi game, giải mã video và CUDA.")
+    case "$a" in
+        open) exec "$SELF" ;;
+        ignore) mkdir -p "$(dirname "$IGNORE")"; echo "$sig" > "$IGNORE" ;;
+    esac
+}
+
+# ------------------------------------------------------------------ cửa sổ
+esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+# --fixed, không --width: cửa sổ rộng theo dòng chữ dài nhất, nên chữ phải TỰ xuống dòng (mỗi dòng ≤ ~80 ký tự).
+# Đặt --width thì yad 0.40 / GTK 3 tính chiều cao theo bề rộng tối thiểu của hàng nút: cửa sổ một nút cao quá màn hình.
+msg() {   # $1 icon, $2 chữ, còn lại: nút
+    i=$1; t=$2; shift 2
+    yad --title="$TITLE" --window-icon=$ICON --image="$i" --borders=16 --center --fixed --text="$t" "$@" 2>/dev/null
+}
+
+run_log() {   # $1 tiêu đề, còn lại: đối số cho chính script này (chạy bằng root, chữ đổ ra cửa sổ theo dõi)
+    t=$1; shift
+    st=$(mktemp) || return 1
+    { as_root "$SELF" "$@" 2>&1; echo $? > "$st"; } | yad --text-info --tail --title="$t" --window-icon=$ICON \
+        --width=860 --height=520 --borders=12 --button="Đóng:0" 2>/dev/null
+    rc=$(cat "$st" 2>/dev/null); rm -f "$st"
+    # file kết quả do lượt root vừa chạy ghi; không được cấp quyền (bấm Huỷ ở hộp mật khẩu) thì file cũ không tính
+    [ "$rc" = 0 ] && cat "$RUN/result" 2>/dev/null
+}
+
+ask_reboot() {
+    msg system-reboot "$1" --button="Để sau:1" --button="Khởi động lại ngay:0" && systemctl reboot
+}
+
+confirm_install() {   # $1 kênh
+    case "$1" in
+        nvidia) t="<b>Cài driver từ kho của NVIDIA</b>
+
+• Thêm kho phần mềm chính thức của NVIDIA cho Debian 13 vào máy
+   (developer.download.nvidia.com).
+• Cài gói <b>nvidia-open</b>: bản mới nhất, về sau tự lên bản mới qua “Cập nhật”.
+• Tải khoảng 370 MB, chiếm khoảng 1,3 GB trên ổ (máy cần còn 3 GB trống), build mất vài phút." ;;
+        debian) t="<b>Cài driver từ kho Debian</b>
+
+• Cài gói <b>nvidia-driver</b> dòng 550 có sẵn trong kho Debian 13, không thêm kho ngoài.
+• Debian ghi rõ: dòng 550 không còn được vá lỗi. Với card đời GTX 750 / 900 / 10
+   đây là driver chính hãng duy nhất cài gọn được.
+• Tải khoảng 150 MB, chiếm khoảng 450 MB trên ổ (máy cần còn 1,5 GB trống), build mất vài phút." ;;
+    esac
+    sb_on && ! mok_ok && t="$t
+• Máy bật <b>Secure Boot</b>: lúc khởi động lại có thêm một bước ở màn hình xanh,
+   hướng dẫn hiện ở cuối cửa sổ cài."
+    optimus && t="$t
+• Laptop hai card: màn hình vẫn chạy bằng card Intel / AMD; app nào cần card NVIDIA
+   thì chạy bằng <tt>depot-nvidia run TÊN-APP</tt>."
+    t="$t
+
+Cài xong phải <b>khởi động lại</b>. Không ưng thì mở lại công cụ này, bấm “Gỡ, về nouveau”."
+    msg "$ICON" "$t" --button="Thôi:1" --button="Cài:0"
+}
+
+do_install() {   # $1 kênh
+    confirm_install "$1" || return 0
+    case "$(run_log "Đang cài driver NVIDIA" install --channel "$1")" in
+        ok) ask_reboot "Driver NVIDIA đã cài xong.\nKhởi động lại để dùng." ;;
+        ok-mok) ask_reboot "Driver NVIDIA đã cài xong.\n\n<b>Máy bật Secure Boot</b>: lúc khởi động lại, màn hình xanh hiện ra khoảng 10 giây —\nbấm phím bất kỳ, chọn <b>Enroll MOK → Continue → Yes</b>,\nnhập mật khẩu <b>$MOK_PW</b>, rồi chọn <b>Reboot</b>." ;;
+    esac
+}
+
+gui() {
+    have yad || { status; exit 0; }
+    list=$(gpus)
+    if [ -z "$list" ]; then
+        msg dialog-information "Máy này không có card đồ hoạ NVIDIA.\n\nCard Intel và AMD dùng driver có sẵn trong Depot OS, không phải cài thêm." --button="Đóng:0"
+        exit 0
+    fi
+    plan
+    cards=$(echo "$list" | while IFS="$TAB" read -r slot id name; do
+        d=$(driver_of "$slot")
+        printf '<b>NVIDIA %s</b>\n   thế hệ %s — đang chạy bằng: %s\n' "$(echo "$name" | esc)" "$(gen_name "$(gen_of "$name" "$id")")" "${d:-chưa có driver}"
+    done)
+    v=$(installed_ver); cur=$(installed_channel); r=$(running_ver)
+    text="$cards"
+    if [ -n "$v" ]; then
+        text="$text
+
+Đã cài driver NVIDIA <b>$v</b> từ $(chan_name "$cur")."
+        if [ -n "$r" ]; then text="$text
+Module nvidia <b>$r</b> đang chạy."
+        elif sb_on && ! mok_ok; then text="$text
+<b>Chưa chạy</b>: máy bật Secure Boot mà khoá ký driver chưa đăng ký.
+Bấm “Cài lại” rồi làm bước màn hình xanh lúc khởi động lại."
+        else text="$text
+<b>Chưa chạy</b>: khởi động lại máy. Khởi động lại rồi vẫn chưa chạy thì bấm “Cài lại”,
+hoặc “Gỡ, về nouveau”."
+        fi
+    elif [ -n "$REC" ]; then
+        text="$text
+
+Đề xuất: driver chính hãng từ <b>$(chan_name "$REC")</b>."
+        [ -n "$ALT" ] && text="$text
+Cũng dùng được: $(chan_name "$ALT")."
+        [ "$UNSUP" = 1 ] && text="$text
+Lưu ý: máy có card NVIDIA đời khác mà driver này không đỡ."
+    else
+        text="$text
+
+Debian 13 <b>không có driver chính hãng</b> cho thế hệ card này (các dòng 470 / 390 / 340 đã bị bỏ).
+Driver nouveau có sẵn là lựa chọn duy nhất còn được hỗ trợ — không cần cài gì thêm."
+    fi
+    optimus && text="$text
+
+Laptop hai card: có thêm card Intel / AMD, màn hình chạy bằng card đó."
+    live && ! persisted && [ -n "$REC" ] && text="$text
+
+<b>Đang chạy từ USB không có vùng lưu</b>: chưa cài driver được, vì driver chỉ chạy
+sau khi khởi động lại. Cài Depot OS vào máy, hoặc tạo vùng lưu ở “Lưu dữ liệu trên USB”."
+
+    set --
+    if [ -n "$v" ]; then
+        set -- "$@" --button="Gỡ, về nouveau:4" --button="Cài lại:2"
+        other=""; [ "$cur" = "$REC" ] && other=$ALT; [ "$cur" = "$ALT" ] && other=$REC
+        [ -n "$other" ] && set -- "$@" --button="Đổi sang $( [ "$other" = nvidia ] && echo "kho NVIDIA" || echo "kho Debian" ):3"
+        inst=$cur
+    elif [ -n "$REC" ]; then
+        other=$ALT; inst=$REC
+        [ -n "$ALT" ] && set -- "$@" --button="Dùng $( [ "$ALT" = nvidia ] && echo "kho NVIDIA" || echo "kho Debian" ):3"
+        set -- "$@" --button="Cài driver đề xuất:2"
+    fi
+    msg "$ICON" "$text" "$@" --button="Đóng:1"
+    case $? in
+        2) do_install "$inst"; exec "$SELF" ;;
+        3) do_install "$other"; exec "$SELF" ;;
+        4)  if msg dialog-question "Gỡ sạch driver NVIDIA và quay về driver nouveau có sẵn?\n\nGỡ xong phải khởi động lại." --button="Thôi:1" --button="Gỡ:0"; then
+                [ "$(run_log "Đang gỡ driver NVIDIA" remove)" = ok ] && ask_reboot "Đã gỡ driver NVIDIA.\nKhởi động lại để quay về nouveau."
+            fi
+            exec "$SELF" ;;
+    esac
+}
+
+case "${1:-}" in
+    status) status ;;
+    recommend) [ -n "$(gpus)" ] || exit 0; plan; [ -n "$REC" ] && echo "$REC"; exit 0 ;;
+    install) shift; install_driver "$@" ;;
+    remove) remove_driver ;;
+    run)
+        shift
+        [ $# -gt 0 ] || { echo "dùng: depot-nvidia run LỆNH [đối số…]" >&2; exit 2; }
+        # biến môi trường theo README của driver NVIDIA, mục "PRIME Render Offload"
+        exec env __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only "$@" ;;
+    --notify) notify ;;
+    '') gui ;;
+    *) echo "dùng: depot-nvidia [status|recommend|install [--channel nvidia|debian]|remove|run LỆNH…|--notify]" >&2; exit 2 ;;
+esac

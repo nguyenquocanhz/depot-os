@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Driver NVIDIA
+Comment=Tự dò card NVIDIA, chọn đúng driver chính hãng và cài bằng một nút; gỡ để quay về nouveau
+Exec=depot-nvidia
+TryExec=yad
+Icon=preferences-system
+Terminal=false
+Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-HardwareSettings;HardwareSettings;
+Keywords=driver;nvidia;geforce;rtx;gtx;card đồ hoạ;card màn hình;gpu;nouveau;cuda;

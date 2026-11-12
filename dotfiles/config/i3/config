@@ -41,6 +41,7 @@ exec --no-startup-id fcitx5
 # polkit agent: không có thì pkexec (cài driver, lưu DNS) không hỏi được mật khẩu
 exec --no-startup-id /usr/libexec/polkit-mate-authentication-agent-1
 exec --no-startup-id depot-drivers --notify
+exec --no-startup-id depot-nvidia --notify
 exec --no-startup-id depot-update notify
 exec --no-startup-id depot-sounds session
 # Chế độ pin: tự đổi mức theo % pin + ngủ sâu app không dùng (depot-power)

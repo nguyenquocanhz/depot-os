@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Depot OS — "Driver NVIDIA" (depot-nvidia install / remove): cài hoặc gỡ driver card đồ hoạ, thêm kho của NVIDIA.
+     Luôn hỏi mật khẩu quản trị, không nhớ: mỗi lần là một thay đổi lớn tới hệ thống. -->
+<policyconfig>
+  <vendor>Depot OS by WrenEvil</vendor>
+  <action id="tech.wrenevil.depot.nvidia">
+    <description>Cài hoặc gỡ driver NVIDIA</description>
+    <message>Cài hoặc gỡ driver NVIDIA cần quyền quản trị</message>
+    <icon_name>preferences-system</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/depot-nvidia</annotate>
+  </action>
+</policyconfig>

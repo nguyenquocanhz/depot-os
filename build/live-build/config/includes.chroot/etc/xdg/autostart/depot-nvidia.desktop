@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Kiểm tra driver NVIDIA (Depot OS)
+Comment=Báo kết quả sau khi cài driver NVIDIA; gợi ý cài khi card có driver chính hãng
+Exec=depot-nvidia --notify
+TryExec=depot-nvidia
+Terminal=false
+NoDisplay=true
