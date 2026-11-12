@@ -1,15 +1,29 @@
 // =============================================================
-// Depot OS — boot animation từ video (plymouth script)
-// FILE SINH RA từ scripts/plymouth/depot.script.in bởi scripts/video-to-plymouth.sh — sửa file .in, đừng sửa bản sinh.
+// Depot OS — boot animation (plymouth script)
+// FILE SINH RA từ scripts/plymouth/depot.script.in — sửa file .in, đừng sửa bản sinh. Hai nguồn sinh:
+//   scripts/gen-boot-video.py      bố cục "logo" (mặc định): khung hình là logo Depot nền trong suốt. Logo, quầng đỏ
+//                                  và hai dòng chữ đặt ĐÚNG chỗ, đúng cỡ như ảnh menu boot của GRUB (mọi số đo tính
+//                                  theo chiều cao màn hình, lấy từ wrenevil_logo.py) → từ menu sang animation logo đứng
+//                                  yên; thanh tiến trình nằm ở chỗ menu vừa biến mất.
+//   scripts/video-to-plymouth.sh   bố cục "video": khung hình cắt từ một video bất kỳ, đặt giữa màn, giữ cỡ gốc.
 // Chạy khung hình frame-000.png… một lượt, rồi lặp đoạn từ khung LOOP tới hết; dưới là thanh tiến trình mảnh
 // kiểu macOS (lúc boot), màn chờ cập nhật có % (chế độ updates), hộp nhập mật khẩu (ổ mã hoá LUKS), dòng thông báo.
 // LƯU Ý: ngôn ngữ script của Plymouth KHÔNG phải JS — tránh hex literal, ternary (?:) và escape \u.
 // =============================================================
 
-FRAMES = 90;     // số khung hình
-LOOP = 50;         // khung bắt đầu đoạn lặp (= FRAMES: dừng ở khung cuối)
-FPS = 25;           // khung hình/giây của video; script plugin gọi refresh 50 lần/giây
-BG_R = 6 / 255.0; BG_G = 7 / 255.0; BG_B = 12 / 255.0;   // = màu góc video, nền liền mạch
+FRAMES = 70;     // số khung hình
+LOOP = 30;         // khung bắt đầu đoạn lặp (= FRAMES: dừng ở khung cuối)
+FPS = 25;           // khung hình/giây; script plugin gọi refresh 50 lần/giây
+BG_R = 7 / 255.0; BG_G = 8 / 255.0; BG_B = 12 / 255.0;   // nền: màu nền logo, hoặc màu góc video
+LAYOUT_LOGO = 1;   // 1 = bố cục "logo", 0 = bố cục "video"
+// bố cục "logo" — tỉ lệ theo chiều cao màn hình H (BOOT_* trong design/identity/wrenevil/wrenevil_logo.py)
+LOGO_FRAC = 0.2133;       // cạnh hộp logo / H
+TOP_FRAC = 0.11;         // mép trên hộp logo / H
+HALO_CY = 0.55;           // tâm quầng đỏ dưới mép trên hộp logo (theo cạnh logo)
+HALO_R = 2.2;             // bán kính quầng đỏ (theo cạnh logo)
+WORD_W = 2.0;             // hộp hai dòng chữ: rộng, cao (theo cạnh logo), mép trên = đáy hộp logo
+WORD_H = 0.625;
+MENU_TOP = 0.5;         // chỗ menu GRUB bắt đầu / H — thanh tiến trình nằm ở đây
 
 Window.SetBackgroundTopColor(BG_R, BG_G, BG_B);
 Window.SetBackgroundBottomColor(BG_R, BG_G, BG_B);
@@ -27,21 +41,45 @@ fun pad3(n) {
 }
 
 // ---- khung hình (nạp hết một lần: vài chục ảnh nhỏ, đổi ảnh mỗi khung chỉ là SetImage)
-for (i = 0; i < FRAMES; i++) {
-    frames[i] = Image("frame-" + pad3(i) + ".png");
+if (LAYOUT_LOGO) {
+    // logo: co giãn theo màn hình, đặt đúng chỗ logo của ảnh menu boot
+    AW = Math.Int(H * LOGO_FRAC + 0.5);
+    AH = AW;
+    for (i = 0; i < FRAMES; i++) {
+        raw = Image("frame-" + pad3(i) + ".png");
+        frames[i] = raw.Scale(AW, AH);
+    }
+    anim.x = Math.Int(W / 2 - AW / 2);
+    anim.y = Math.Int(H * TOP_FRAC + 0.5);
+    // quầng đỏ rất mờ sau logo
+    halo.r = Math.Int(AW * HALO_R + 0.5);
+    halo.img = Image("halo.png");
+    halo.sprite = Sprite(halo.img.Scale(halo.r * 2, halo.r * 2));
+    halo.sprite.SetPosition(Math.Int(W / 2 - halo.r), Math.Int(anim.y + AW * HALO_CY - halo.r + 0.5), 0);
+    // hai dòng chữ DEPOT / by WrenEvil ngay dưới logo
+    word.w = Math.Int(AW * WORD_W + 0.5);
+    word.img = Image("wordmark.png");
+    word.sprite = Sprite(word.img.Scale(word.w, Math.Int(AW * WORD_H + 0.5)));
+    word.sprite.SetPosition(Math.Int(W / 2 - word.w / 2), anim.y + AH, 1);
+    BAR_W = Math.Int(H * 0.30);
+    bar.y = Math.Int(H * MENU_TOP) + 14;
+} else {
+    for (i = 0; i < FRAMES; i++) {
+        frames[i] = Image("frame-" + pad3(i) + ".png");
+    }
+    AW = frames[0].GetWidth();
+    AH = frames[0].GetHeight();
+    anim.x = Math.Int(W / 2 - AW / 2);
+    anim.y = Math.Int(H / 2 - AH / 2 - 20);
+    BAR_W = 200;
+    bar.y = anim.y + AH + 36;
 }
-AW = frames[0].GetWidth();
-AH = frames[0].GetHeight();
-anim.x = Math.Int(W / 2 - AW / 2);
-anim.y = Math.Int(H / 2 - AH / 2 - 20);
 anim.sprite = Sprite(frames[0]);
 anim.sprite.SetPosition(anim.x, anim.y, 1);
 anim.cur = 0;
 
 // ---- thanh tiến trình mảnh (bar.png là ô trắng, kéo giãn theo bề rộng)
-BAR_W = 200;
 BAR_H = 4;
-bar.y = anim.y + AH + 36;
 bar.x = Math.Int(W / 2 - BAR_W / 2);
 bar.white = Image("bar.png");
 bar.track = Sprite(bar.white.Scale(BAR_W, BAR_H));

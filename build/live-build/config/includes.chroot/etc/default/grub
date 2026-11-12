@@ -3,10 +3,16 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=5
 GRUB_TIMEOUT_STYLE=menu
 GRUB_DISTRIBUTOR="Depot OS"
-# nền menu GRUB: logo "Depot by WrenEvil" góc dưới phải (chữ menu chạy từ góc trên trái). /etc/grub.d/05_debian_theme
-# tự chép ảnh vào /boot/grub nếu /boot là phân vùng riêng; đọc ảnh lỗi thì quay về menu chữ thường.
+# menu GRUB cùng bố cục với menu boot của ISO và animation Plymouth: logo "Depot by WrenEvil" + chữ ở phần trên, menu
+# từ giữa màn trở xuống (theme sinh bởi design/identity/wrenevil/wrenevil_logo.py; nằm trong /boot để GRUB đọc được
+# cả khi / mã hoá). Font của theme là Unifont — unicode.pf2 mà grub-mkconfig vẫn nạp sẵn.
+GRUB_THEME="/boot/grub/themes/depot/theme.txt"
+# dự phòng khi GRUB không nạp được theme: ảnh nền logo góc dưới phải (chữ menu chạy từ góc trên trái).
+# /etc/grub.d/05_debian_theme tự chép ảnh vào /boot/grub nếu /boot là phân vùng riêng.
 GRUB_BACKGROUND="/usr/share/images/depot/grub.png"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+# loglevel=3: "quiet" vẫn để lọt thông báo mức lỗi của nhân (BIOS cũ, thiết bị ảo…) ra màn hình đen giữa menu GRUB và
+# animation; chúng vẫn nằm trong `dmesg` / `journalctl -k`. Mục "Advanced options > recovery mode" không dùng dòng này.
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=3"
 GRUB_CMDLINE_LINUX=""
 
 # grub 2.06+ tắt os-prober mặc định — bắt buộc bật để menu hiện Windows (dual-boot)

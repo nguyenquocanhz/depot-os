@@ -1,6 +1,6 @@
 [Plymouth Theme]
 Name=Depot
-Description=Depot OS boot animation — khung hình cắt từ video (scripts/video-to-plymouth.sh), thanh tiến trình mảnh
+Description=Depot OS boot animation — logo đặt khớp với menu boot (scripts/gen-boot-video.py), thanh tiến trình mảnh
 ModuleName=script
 
 [script]

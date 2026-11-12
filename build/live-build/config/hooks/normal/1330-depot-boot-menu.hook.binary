@@ -53,6 +53,16 @@ syslinux_names() {
 for f in binary/boot/grub/grub.cfg boot/grub/grub.cfg binary/boot/grub/loopback.cfg boot/grub/loopback.cfg; do
     [ -f "$f" ] && grub_names "$f"
 done
+# Menu GRUB chạy ở độ phân giải gốc của màn hình (auto) thay cho 800x600 mà live-build chép từ bản netinst:
+# 800x600 trên màn 16:9 bị kéo bè ra, logo ở menu to bè hơn logo của animation Plymouth ngay sau đó, và máy phải đổi
+# độ phân giải giữa chừng. Theme co ảnh nền theo chiều cao màn hình (fitheight) nên bố cục giữ nguyên ở mọi cỡ màn.
+# gfxpayload=keep giữ nguyên: nhân Linux nhận lại đúng chế độ màn hình này.
+for f in binary/boot/grub/config.cfg boot/grub/config.cfg; do
+    if [ -f "$f" ] && grep -q '^    set gfxmode=800x600$' "$f"; then
+        sed -i 's/^    set gfxmode=800x600$/    set gfxmode=auto/' "$f"
+        echo ">> boot menu: GRUB dùng độ phân giải gốc của màn hình (gfxmode=auto) trong $f"
+    fi
+done
 for d in binary/isolinux isolinux; do
     [ -d "$d" ] && syslinux_names "$d"
 done

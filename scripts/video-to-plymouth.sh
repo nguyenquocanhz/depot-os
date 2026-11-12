@@ -12,7 +12,8 @@
 # Ghi vào theme: frame-NNN.png + bar.png + depot.script (sinh từ scripts/plymouth/depot.script.in).
 # Nền màn hình boot lấy theo màu góc trên-trái của khung đầu, để video không lộ khung chữ nhật.
 # Mọi khung hình nằm trong initramfs: giữ ít khung, ảnh nhỏ (máy cũ đọc USB chậm) — vượt 150 khung là dừng.
-# Video mặc định: design/boot/depot-boot.mp4 (scripts/gen-boot-video.py), lặp từ 1.6 giây.
+# Animation MẶC ĐỊNH của Depot không đi qua file này: scripts/gen-boot-video.py sinh thẳng khung hình logo nền trong
+# suốt, đặt khớp với logo ở menu boot (bố cục "logo"). File này dành cho ai muốn thay bằng một video riêng.
 # Cần: ffmpeg, ffprobe. Sau đó build lại ISO (hook 0800 cập nhật initramfs).
 set -eu
 
@@ -65,8 +66,12 @@ BG_R=$1 BG_G=$2 BG_B=$3
 # ô trắng cho thanh tiến trình
 ffmpeg -loglevel error -y -f lavfi -i color=white:s=4x4 -frames:v 1 "$THEME/bar.png"
 
+# bố cục "video": khung hình đặt giữa màn, giữ cỡ gốc; quầng đỏ + chữ của bố cục "logo" (gen-boot-video.py) không dùng
+rm -f "$THEME/halo.png" "$THEME/wordmark.png"
 sed -e "s/@FRAMES@/$N/" -e "s/@LOOP@/$LOOP/" -e "s/@FPS@/$FPS/" \
-    -e "s/@BG_R@/$BG_R/" -e "s/@BG_G@/$BG_G/" -e "s/@BG_B@/$BG_B/" "$TEMPLATE" > "$THEME/depot.script"
+    -e "s/@BG_R@/$BG_R/" -e "s/@BG_G@/$BG_G/" -e "s/@BG_B@/$BG_B/" \
+    -e "s/@LAYOUT_LOGO@/0/" -e "s/@LOGO_FRAC@/0/" -e "s/@TOP_FRAC@/0/" -e "s/@HALO_CY@/0/" -e "s/@HALO_R@/0/" \
+    -e "s/@WORD_W@/0/" -e "s/@WORD_H@/0/" -e "s/@MENU_TOP@/0/" "$TEMPLATE" > "$THEME/depot.script"
 
 KB=$(du -ck "$THEME"/frame-*.png | tail -1 | cut -f1)
 echo ">> $N khung ${HEIGHT}px ($OUTPIX) @ ${FPS} fps, lặp từ khung $LOOP, nền rgb($BG_R,$BG_G,$BG_B), ${KB} KB vào initramfs"

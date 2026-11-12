@@ -3,8 +3,10 @@
 # Chữ D của Depot đặc ở thân, tan dần sang phải như bóng ma đang biến mất; hai sừng (sừng sau mờ); mắt đỏ trong lòng D.
 # By WrenEvil.tech & nguyenquocanhz (nqatech)
 #
-# Một nguồn hình học cho mọi nơi: file logo (design/identity/logo/), icon trong ISO, video boot (scripts/gen-boot-video.py).
+# Một nguồn hình học cho mọi nơi: file logo (design/identity/logo/), icon trong ISO, ảnh + theme menu boot (GRUB của ISO,
+# GRUB máy đã cài, isolinux), animation Plymouth (scripts/gen-boot-video.py) — các màn boot dùng chung BỐ CỤC ở dưới.
 #   python3 design/identity/wrenevil/wrenevil_logo.py      ghi lại các file logo + bản sao trong includes.chroot
+#   python3 scripts/gen-boot-video.py                      rồi sinh lại animation Plymouth cho khớp (chạy trong WSL)
 # Logo cũ "Kiện trong kho": design/identity/logo/cu-kien-trong-kho/
 
 import os
@@ -75,49 +77,130 @@ def wordmark():
             ).format(d=defs(), bg=BG, m=mark(), fg=FG, red=RED)
 
 
-def boot_bg(w, h, logo, top, title=True, corner=False):
-    """Nền menu boot: đen + quầng đỏ rất mờ, logo (giữa trên, hoặc góc dưới phải cho GRUB máy đã cài)."""
-    s = logo / 160.0
+# ---- BỐ CỤC CHUNG của mọi màn boot: menu GRUB của ISO, menu GRUB máy đã cài, isolinux, animation Plymouth.
+# Mọi số đo tính theo CHIỀU CAO màn hình H, canh giữa theo chiều ngang → logo, chữ và quầng đỏ đứng nguyên một chỗ,
+# cùng một cỡ khi máy chuyển từ menu boot sang animation (trước v0.24: menu để logo sát trên + chữ + quầng đỏ, còn
+# animation để logo giữa màn, cỡ tính bằng pixel, nền phẳng, không chữ, lại bắt đầu từ màn đen).
+# scripts/gen-boot-video.py đọc các số này để sinh theme Plymouth; theme GRUB để menu bắt đầu ở BOOT_MENU_TOP.
+BOOT_LOGO = 0.2133      # cạnh hộp logo (hộp 160 đơn vị) / H — 128 px ở màn 600
+BOOT_TOP = 0.11         # mép trên hộp logo / H
+BOOT_HALO_CY = 0.55     # tâm quầng đỏ: dưới mép trên hộp logo 0.55 cạnh
+BOOT_HALO_R = 2.2       # bán kính quầng đỏ = 2.2 cạnh logo
+BOOT_HALO_OP = 0.10     # độ đậm quầng đỏ ở tâm
+BOOT_WORD_Y = 0.28      # chân chữ DEPOT: dưới đáy hộp logo 0.28 cạnh
+BOOT_WORD_FS = 0.2      # cỡ chữ DEPOT / cạnh logo
+BOOT_WORD_BOX = (2.0, 0.625)  # hộp chứa hai dòng chữ (rộng, cao) / cạnh logo — ảnh wordmark.png của Plymouth (512x160)
+BOOT_MENU_TOP = 0.50    # menu (GRUB) hoặc thanh tiến trình (Plymouth) bắt đầu ở đây / H
+
+
+def word(cx, base, L):
+    """Hai dòng chữ dưới logo: DEPOT + by WrenEvil. cx = tâm ngang, base = đáy hộp logo, L = cạnh hộp logo (px)."""
+    fs = L * BOOT_WORD_FS
+    y = base + L * BOOT_WORD_Y
+    return ('<text x="{x:.2f}" y="{y:.2f}" text-anchor="middle" font-family="Inter, sans-serif" font-weight="800" '
+            'font-size="{f:.2f}" letter-spacing="{ls:.2f}" fill="{fg}">DEPOT</text>'
+            '<text x="{x:.2f}" y="{y2:.2f}" text-anchor="middle" font-family="Inter, sans-serif" font-size="{f2:.2f}" '
+            'letter-spacing="{ls2:.2f}" fill="#8a90a2">by Wren<tspan fill="{red}">Evil</tspan></text>'
+            ).format(x=cx, y=y, y2=y + fs * 0.95, f=fs, f2=fs * 0.5, ls=fs * 0.16, ls2=fs * 0.04, fg=FG, red=RED)
+
+
+def halo_stops():
+    return ('<stop offset="0" stop-color="{red}" stop-opacity="{op}"/><stop offset="1" stop-color="{red}" '
+            'stop-opacity="0"/>').format(red=RED, op=BOOT_HALO_OP)
+
+
+def boot_bg(w, h, title=True, corner=False, logo=None):
+    """Nền menu boot: đen + quầng đỏ rất mờ + logo. Mặc định theo BỐ CỤC CHUNG (logo giữa, phần trên màn hình);
+    corner=True: logo góc dưới phải — ảnh nền dự phòng của GRUB máy đã cài khi không nạp được theme."""
     if corner:
-        lx, ly = w - logo - 48, h - logo - 40
+        L = logo
+        lx, ly = w - L - 48, h - L - 40
     else:
-        lx, ly = (w - logo) / 2, top
-    glow_cx, glow_cy = lx + logo / 2, ly + logo * 0.55
+        L = logo or h * BOOT_LOGO
+        lx, ly = (w - L) / 2, h * BOOT_TOP
+    s = L / 160.0
+    glow_cx, glow_cy = lx + L / 2, ly + L * BOOT_HALO_CY
     text = ''
-    if title:
-        tx = lx + logo / 2 if not corner else lx - 18
-        anchor = 'middle' if not corner else 'end'
-        ty = ly + logo + logo * 0.28 if not corner else ly + logo * 0.62
-        fs = max(14, logo * 0.2)
-        text = ('<text x="{x:.0f}" y="{y:.0f}" text-anchor="{a}" font-family="Inter, sans-serif" font-weight="800" '
+    if title and not corner:
+        text = word(lx + L / 2, ly + L, L)
+    elif title:
+        fs = max(14, L * 0.2)
+        ty = ly + L * 0.62
+        text = ('<text x="{x:.0f}" y="{y:.0f}" text-anchor="end" font-family="Inter, sans-serif" font-weight="800" '
                 'font-size="{f:.0f}" letter-spacing="{ls:.1f}" fill="{fg}">DEPOT</text>'
-                '<text x="{x:.0f}" y="{y2:.0f}" text-anchor="{a}" font-family="Inter, sans-serif" font-size="{f2:.0f}" '
+                '<text x="{x:.0f}" y="{y2:.0f}" text-anchor="end" font-family="Inter, sans-serif" font-size="{f2:.0f}" '
                 'letter-spacing="1" fill="#8a90a2">by Wren<tspan fill="{red}">Evil</tspan></text>'
-                ).format(x=tx, y=ty, y2=ty + fs * 0.95, a=anchor, f=fs, f2=fs * 0.5, ls=fs * 0.16, fg=FG, red=RED)
+                ).format(x=lx - 18, y=ty, y2=ty + fs * 0.95, f=fs, f2=fs * 0.5, ls=fs * 0.16, fg=FG, red=RED)
     return ('<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
-            '<defs>{d}<radialGradient id="halo" gradientUnits="userSpaceOnUse" cx="{gx:.0f}" cy="{gy:.0f}" r="{gr:.0f}">'
-            '<stop offset="0" stop-color="{red}" stop-opacity=".10"/><stop offset="1" stop-color="{red}" stop-opacity="0"/>'
-            '</radialGradient></defs><rect width="{w}" height="{h}" fill="{bg}"/>'
+            '<defs>{d}<radialGradient id="halo" gradientUnits="userSpaceOnUse" cx="{gx:.2f}" cy="{gy:.2f}" r="{gr:.2f}">'
+            '{st}</radialGradient></defs><rect width="{w}" height="{h}" fill="{bg}"/>'
             '<rect width="{w}" height="{h}" fill="url(#halo)"/>'
-            '<g transform="translate({lx:.1f} {ly:.1f}) scale({s:.4f})">{m}</g>{t}</svg>\n'
-            ).format(w=w, h=h, d=defs(), gx=glow_cx, gy=glow_cy, gr=logo * 2.2, red=RED, bg=BG, lx=lx, ly=ly, s=s,
-                     m=mark(), t=text)
+            '<g transform="translate({lx:.2f} {ly:.2f}) scale({s:.5f})">{m}</g>{t}</svg>\n'
+            ).format(w=w, h=h, d=defs(), gx=glow_cx, gy=glow_cy, gr=L * BOOT_HALO_R, st=halo_stops(), bg=BG,
+                     lx=lx, ly=ly, s=s, m=mark(), t=text)
+
+
+def plymouth_assets(theme, ref=256):
+    """Phần đứng yên của animation Plymouth, cùng hình với ảnh menu boot: quầng đỏ (halo.png) và hai dòng chữ
+    (wordmark.png), PNG nền trong suốt vẽ cho logo cạnh `ref` px — depot.script co giãn theo màn hình."""
+    bw, bh = BOOT_WORD_BOX
+    jobs = {
+        'halo.png': ('<svg xmlns="http://www.w3.org/2000/svg" width="{r}" height="{r}" viewBox="0 0 {r} {r}"><defs>'
+                     '<radialGradient id="halo" gradientUnits="userSpaceOnUse" cx="{c}" cy="{c}" r="{c}">{st}'
+                     '</radialGradient></defs><rect width="{r}" height="{r}" fill="url(#halo)"/></svg>\n'
+                     ).format(r=ref, c=ref / 2.0, st=halo_stops()),
+        'wordmark.png': ('<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" '
+                         'viewBox="0 0 {w:.0f} {h:.0f}">{t}</svg>\n'
+                         ).format(w=ref * bw, h=ref * bh, t=word(ref * bw / 2.0, 0, ref)),
+    }
+    for name, svg_s in jobs.items():
+        tmp = os.path.join(theme, '.' + name + '.svg')
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(svg_s)
+        subprocess.run(['rsvg-convert', '-o', os.path.join(theme, name), tmp], check=True)
+        os.remove(tmp)
+        print('ghi', os.path.join(os.path.basename(theme), name))
+
+
+def grub_theme_installed(root):
+    """Theme GRUB cho MÁY ĐÃ CÀI (/boot/grub/themes/depot, /etc/default/grub: GRUB_THEME): cùng ảnh nền, cùng bố cục
+    với theme menu của ISO — chỉ khác đường dẫn ảnh (theme của ISO nằm trong live-theme/, ảnh ở thư mục cha)."""
+    lb = os.path.join(root, 'build', 'live-build', 'config')
+    src = os.path.join(lb, 'includes.binary', 'boot', 'grub')
+    dst = os.path.join(lb, 'includes.chroot', 'boot', 'grub', 'themes', 'depot')
+    os.makedirs(dst, exist_ok=True)
+    shutil.copyfile(os.path.join(src, 'splash.png'), os.path.join(dst, 'splash.png'))
+    for part in ('c', 'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'):
+        shutil.copyfile(os.path.join(src, 'live-theme', 'select_%s.png' % part), os.path.join(dst, 'select_%s.png' % part))
+    with open(os.path.join(src, 'live-theme', 'theme.txt'), encoding='utf-8') as f:
+        txt = f.read()
+    assert 'desktop-image: "../splash.png"' in txt
+    body = txt.split('\n', 4)[4] if txt.startswith('#') else txt
+    head = ('# Depot OS — theme menu GRUB của MÁY ĐÃ CÀI: cùng ảnh nền, cùng bố cục với menu boot của ISO và animation\n'
+            '# Plymouth (logo "Depot by WrenEvil" đứng nguyên một chỗ từ menu sang animation).\n'
+            '# FILE SINH RA bởi design/identity/wrenevil/wrenevil_logo.py từ includes.binary/boot/grub/live-theme/theme.txt\n'
+            '# — sửa file đó rồi chạy lại script. Bật bằng GRUB_THEME trong /etc/default/grub.\n')
+    with open(os.path.join(dst, 'theme.txt'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write(head + body.replace('desktop-image: "../splash.png"', 'desktop-image: "splash.png"'))
+    print('ghi', os.path.relpath(dst, root) + '/ (theme.txt, splash.png, select_*.png)')
 
 
 def boot_images(root, logo):
-    """Ảnh menu boot: GRUB của ISO (800x600, theme live-theme), isolinux BIOS (640x480), GRUB máy đã cài (1920x1080)."""
+    """Ảnh menu boot: GRUB của ISO và của máy đã cài (1280x720, GRUB co theo chiều cao màn hình), isolinux BIOS
+    (640x480), ảnh nền dự phòng của GRUB máy đã cài (1920x1080, logo ở góc)."""
     if not (shutil.which('rsvg-convert') and shutil.which('convert')):
         print('!! bỏ qua ảnh menu boot (thiếu rsvg-convert / convert)')
         return
     lb = os.path.join(root, 'build', 'live-build', 'config')
     jobs = [
-        # menu GRUB của ISO: boot_menu bắt đầu ở 50% — logo + chữ nằm phần trên
-        (boot_bg(800, 600, 128, 46), os.path.join(lb, 'includes.binary', 'boot', 'grub', 'splash.png')),
-        # isolinux: menu vshift 12 dòng (~ y 200) — logo nhỏ hơn, không chữ (chữ đã có ở tiêu đề menu)
-        (boot_bg(640, 480, 104, 26, title=False), os.path.join(lb, 'includes.binary', 'isolinux', 'splash.png')),
-        # GRUB máy đã cài: chữ menu chạy từ góc trên trái → logo góc dưới phải
-        (boot_bg(1920, 1080, 180, 0, corner=True), os.path.join(lb, 'includes.chroot', 'usr', 'share', 'images',
-                                                                 'depot', 'grub.png')),
+        # menu GRUB: ảnh 16:9, theme đặt desktop-image-scale-method "fitheight" → mọi tỉ lệ màn hình đều giữ đúng
+        # bố cục theo chiều cao; boot_menu bắt đầu ở BOOT_MENU_TOP
+        (boot_bg(1280, 720), os.path.join(lb, 'includes.binary', 'boot', 'grub', 'splash.png')),
+        # isolinux (vesamenu 640x480 cố định): cùng tỉ lệ, không chữ (chữ đã có ở tiêu đề menu, menu vshift 12 dòng ≈ y 192)
+        (boot_bg(640, 480, title=False), os.path.join(lb, 'includes.binary', 'isolinux', 'splash.png')),
+        # GRUB máy đã cài, khi KHÔNG nạp được theme: chữ menu chạy từ góc trên trái → logo góc dưới phải
+        (boot_bg(1920, 1080, corner=True, logo=180), os.path.join(lb, 'includes.chroot', 'usr', 'share', 'images',
+                                                                   'depot', 'grub.png')),
     ]
     tmp = os.path.join(logo, '.boot-tmp.svg')
     for svg_s, out in jobs:
@@ -139,6 +222,7 @@ def boot_images(root, logo):
         subprocess.run(['convert', '-size', '4x4', 'xc:#3a0f16', '-alpha', 'off',
                         'PNG24:' + os.path.join(d, 'select_%s.png' % part)], check=True)
     print('ghi', os.path.relpath(d, root) + '/select_*.png')
+    grub_theme_installed(root)
 
 
 def fastfetch_logo(root):

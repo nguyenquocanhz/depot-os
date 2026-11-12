@@ -2,8 +2,24 @@
 # Thay theme mặc định của live-build (theme.cfg nạp file này khi có ../splash.png).
 # Ảnh: ../splash.png + select_*.png sinh bằng design/identity/wrenevil/wrenevil_logo.py
 # Font: unicode.pf2 có sẵn trong ISO (Unifont) — đủ chữ tiếng Việt.
+# Bố cục chung với animation Plymouth (BOOT_* trong wrenevil_logo.py): ảnh 16:9 co theo CHIỀU CAO màn hình, canh giữa —
+# màn 4:3 / 16:10 bị cắt bớt hai bên, màn rộng hơn 16:9 lộ desktop-color (cùng màu nền ảnh); logo luôn ở 11% từ trên,
+# cao 21,3% màn hình; menu bắt đầu ở 50%, đúng chỗ thanh tiến trình của Plymouth hiện ra sau đó.
 desktop-image: "../splash.png"
+desktop-image-scale-method: "fitheight"
+desktop-image-h-align: "center"
 desktop-color: "#07080c"
+# Lúc chạy một mục (và khi bấm c / e), GRUB thay menu bằng ô dòng lệnh nền đen. Mặc định ô đó chiếm 10%–90% màn hình:
+# suốt mấy giây nạp nhân + initrd (USB chậm thì cả chục giây) nó che mất logo — thấy khi boot thử v0.24 trên VMware.
+# Đặt ô xuống sát đáy màn hình, chỗ của menu: logo ở nửa trên còn nguyên tới khi nhân Linux nhận màn hình.
+# GRUB đòi ô này tối thiểu 80 cột x 24 dòng chữ (640 x 384 điểm ảnh với Unifont 16) — nhỏ hơn là nó tự đưa ô về giữa
+# màn, lại che logo — nên cỡ ô ghi bằng điểm ảnh (85 cột x 25 dòng), vị trí neo theo đáy và theo tâm ngang.
+# Màn 768 trở lên: ô nằm hẳn dưới hai dòng chữ DEPOT. Màn 600: ô che hai dòng chữ, logo vẫn thấy đủ.
+terminal-left: "50%-340"
+terminal-top: "100%-416"
+terminal-width: "680"
+terminal-height: "400"
+terminal-border: "0"
 title-text: ""
 message-font: "Unifont Regular 16"
 message-color: "#c9cfdc"

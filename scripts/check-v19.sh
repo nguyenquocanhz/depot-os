@@ -35,10 +35,12 @@ xorriso -osirrox on -indev $ISO -extract /boot/grub/grub.cfg /tmp/isov19/grub.cf
 echo "== MENU BOOT (logo Bóng ma):"
 chk "GRUB: mục đầu = Chạy Depot OS (mặc định), còn Cài tự động + Chẩn đoán" "grep -m1 '^menuentry' /tmp/isov19/grub.cfg | grep -q 'Chạy Depot OS' && grep -q depot.autoinstall /tmp/isov19/grub.cfg && grep -q depot.bootdiag /tmp/isov19/grub.cfg"
 chk "GRUB: không còn tên 'Live system'" "! grep -q 'Live system' /tmp/isov19/grub.cfg"
-chk "GRUB: theme Depot (đếm ngược tiếng Việt) + nền 800x600 RGB" "grep -q 'Tự chạy mục đang chọn' /tmp/isov19/theme.txt && file /tmp/isov19/splash.png | grep -q '800 x 600, 8-bit/color RGB'"
+# từ v0.24 ảnh nền là 1280x720 (GRUB co theo chiều cao màn hình, cùng bố cục với Plymouth); trước đó 800x600
+chk "GRUB: theme Depot (đếm ngược tiếng Việt) + nền RGB 1280x720 (hoặc 800x600 ở ISO cũ)" "grep -q 'Tự chạy mục đang chọn' /tmp/isov19/theme.txt && file /tmp/isov19/splash.png | grep -qE '(1280 x 720|800 x 600), 8-bit/color RGB'"
 chk "isolinux: tiêu đề Depot OS by WrenEvil, mặc định vẫn live-amd64, nền 640x480" "grep -q 'menu title Depot OS by WrenEvil' /tmp/isov19/menu.cfg && awk '/^label /{l=\$2} /menu default/{print l}' /tmp/isov19/live.cfg | grep -qx live-amd64 && file /tmp/isov19/isosplash.png | grep -q '640 x 480'"
 chk "hook 1330 đã chạy" "grep -q '>> boot menu: đổi tên mục GRUB' build.log"
-chk "Plymouth: 90 khung logo mới" "[ \$(ls $S/usr/share/plymouth/themes/depot/frame-*.png 2>/dev/null | wc -l) = 90 ]"
+# số khung lấy theo FRAMES trong depot.script (v0.19–v0.23: 90 khung; từ v0.24: 70 khung nền trong suốt)
+chk "Plymouth: đủ khung logo mới theo depot.script" "n=\$(sed -n 's/^FRAMES = \\([0-9]*\\);.*/\\1/p' $S/usr/share/plymouth/themes/depot/depot.script); [ -n \"\$n\" ] && [ \$(ls $S/usr/share/plymouth/themes/depot/frame-*.png 2>/dev/null | wc -l) = \"\$n\" ]"
 chk "GRUB máy đã cài: nền Depot" "grep -q '^GRUB_BACKGROUND=\"/usr/share/images/depot/grub.png\"' $S/etc/default/grub && [ -s $S/usr/share/images/depot/grub.png ]"
 
 echo "== CALAMARES:"

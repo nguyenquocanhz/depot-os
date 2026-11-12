@@ -15,7 +15,7 @@ lb config noauto \
     --binary-images iso-hybrid \
     --chroot-squashfs-compression-type zstd \
     --chroot-squashfs-compression-level 15 \
-    --bootappend-live "boot=live components quiet splash locales=vi_VN.UTF-8 timezone=Asia/Ho_Chi_Minh username=depot user-fullname=Depot hostname=depot-os" \
+    --bootappend-live "boot=live components quiet splash locales=vi_VN.UTF-8 timezone=Asia/Ho_Chi_Minh username=depot user-fullname=Depot hostname=depot-os loglevel=3" \
     --iso-volume "DepotOS-amd64" \
     --iso-application "Depot OS Live" \
     --iso-publisher "Depot OS Project; https://depot-os.local" \
