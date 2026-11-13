@@ -8,20 +8,36 @@ Mỗi lần bấm Caps Lock, một ô vuông bo góc hiện trên màn hình hơ
 Ô báo vẽ bằng cairo (không cần bộ icon nào), không chiếm bàn phím, chuột bấm xuyên qua được.
 Đây là ô báo có sẵn trong Depot OS (`depot-notify`), tách ra để cài được trên máy Debian / Ubuntu bất kỳ.
 
+## Hình ảnh
+
+**Bật và tắt** — trái: Caps Lock bật (ổ khoá đóng, chữ `A`); phải: Caps Lock tắt (ổ khoá mở, chữ `a`).
+
+![Ô báo lúc Caps Lock bật và lúc tắt](screenshots/bat-tat.png)
+
+**Trên màn hình** — ô báo hiện giữa theo chiều ngang, phía trên, không che cửa sổ đang làm việc và tự tắt sau hơn một giây.
+
+![Cả màn hình XFCE lúc vừa bật Caps Lock](screenshots/man-hinh.png)
+
+**Chọn chỗ hiện** — `POSITION=top` (mặc định), `center`, `bottom` trong `~/.config/depot-capslock.conf`.
+
+![Ba vị trí của ô báo: trên, giữa, dưới](screenshots/vi-tri.png)
+
+Ảnh chụp bản 1.0.1 trong phiên XFCE của Depot OS v0.25 (màn hình ảo 1366×768).
+
 | | |
 |---|---|
-| Tệp cài | [`depot-capslock_1.0_all.deb`](depot-capslock_1.0_all.deb) (kèm [`.sha256`](depot-capslock_1.0_all.deb.sha256)) — cũng có ở [GitHub Releases, bản `depot-capslock-1.0`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0) |
+| Tệp cài | [`depot-capslock_1.0.1_all.deb`](depot-capslock_1.0.1_all.deb) (kèm [`.sha256`](depot-capslock_1.0.1_all.deb.sha256)) — cũng có ở [GitHub Releases, bản `depot-capslock-1.0.1`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0.1) |
 | Viết cho | Debian, Ubuntu và các bản dựa trên chúng có GTK 3.22 trở lên — phiên **X11**: XFCE, MATE, Cinnamon, LXQt, i3, Openbox (mới thử trên Debian 13 + XFCE, xem cuối trang) |
 | Cần | `python3`, `python3-gi`, `python3-gi-cairo`, `gir1.2-gtk-3.0` (apt tự kéo); nên có `fonts-inter` |
 | Không chạy | phiên Wayland (GNOME / KDE mặc định): Wayland không báo trạng thái Caps Lock cho chương trình X11 |
 
 ## Cài
 
-Tải `depot-capslock_1.0_all.deb` ở mục Assets của [bản phát hành `depot-capslock-1.0`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0)
+Tải `depot-capslock_1.0.1_all.deb` ở mục Assets của [bản phát hành `depot-capslock-1.0.1`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0.1)
 (hoặc lấy tệp nằm ngay trong thư mục này), rồi:
 
 ```bash
-sudo apt install ./depot-capslock_1.0_all.deb
+sudo apt install ./depot-capslock_1.0.1_all.deb
 ```
 
 Trên Depot OS: bấm đúp tệp `.deb` → **Chương trình và tính năng** → Cài.
@@ -74,6 +90,7 @@ pkg/DEBIAN/control                               tên gói, phiên bản, gói p
 pkg/DEBIAN/conffiles                             tệp tự khởi động là tệp cấu hình (xoá / sửa thì nâng cấp không ghi đè)
 pkg/usr/bin/depot-capslock                       chương trình (Python + GTK 3)
 pkg/etc/xdg/autostart/depot-capslock.desktop     tự chạy cùng phiên làm việc
+pkg/usr/share/doc/depot-capslock/copyright       bản quyền và giấy phép (GPL-3), theo khuôn của Debian
 ```
 
 Sửa xong thì tăng `Version` trong `control` và `VERSION` trong chương trình (script kiểm hai số phải khớp), rồi:
@@ -97,9 +114,20 @@ Các bản đã phát hành: <https://github.com/nguyenquocanhz/depot-os/release
 
 Mã vẽ ổ khoá chép từ lớp `LockOSD` trong `usr/bin/depot-notify` của Depot OS — đổi hình ở bên nào thì đổi luôn bên kia.
 
+## Giấy phép
+
+GNU General Public License phiên bản 3 — nguyên văn ở tệp [LICENSE](../../LICENSE) của kho; sau khi cài, xem
+`/usr/share/doc/depot-capslock/copyright`.
+
+## Các bản
+
+- **1.0.1** (13/11/2026) — gói mang theo tệp `copyright` (GPL-3) và trường `Homepage`; chương trình không đổi cách chạy.
+- **1.0** (13/11/2026) — bản đầu.
+
 ## Đã thử
 
-Trong phiên XFCE của ISO v0.25 (Xvfb, bấm phím bằng `xdotool`), 31 phép kiểm: cài bằng `apt-get install ./tệp.deb`,
-quyền tệp, `dpkg --verify`, bật / tắt Caps Lock → ô báo hiện đúng hình rồi tự tắt, `POSITION` / `HOLD` / `ENABLED`,
-có và không có compositor, chỉ một bản chạy nền, tự nhường trên Depot OS, gỡ và purge.
+Bản 1.0.1, trong phiên XFCE của ISO v0.25 (Xvfb, bấm phím bằng `xdotool`), 36 phép kiểm: nâng cấp từ bản 1.0 bằng
+`apt-get install ./tệp.deb`, quyền tệp, tệp `copyright`, `dpkg --verify`, bật / tắt Caps Lock → ô báo hiện đúng hình
+rồi tự tắt, `POSITION` / `HOLD` / `ENABLED`, có và không có compositor, chỉ một bản chạy nền, tự nhường trên Depot OS,
+gỡ và purge.
 **Chưa thử**: bàn phím thật, Ubuntu và Debian ngoài Depot, các môi trường khác XFCE, nhiều màn hình.

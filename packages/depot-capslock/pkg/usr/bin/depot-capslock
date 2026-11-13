@@ -1,4 +1,7 @@
 #!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright 2026 nguyenquocanhz — phát hành theo GNU GPL phiên bản 3, xem /usr/share/doc/depot-capslock/copyright
+#
 # depot-capslock — ô báo Caps Lock của Depot OS, tách thành gói riêng cho máy Debian / Ubuntu bất kỳ (phiên X11).
 #
 #   depot-capslock            chạy nền: mỗi lần Caps Lock đổi trạng thái thì hiện ô báo hơn một giây
@@ -24,7 +27,7 @@ import signal
 import sys
 import time
 
-VERSION = '1.0'
+VERSION = '1.0.1'
 CONF = os.path.expanduser('~/.config/depot-capslock.conf')
 
 OSD = 132                    # cạnh ô báo
