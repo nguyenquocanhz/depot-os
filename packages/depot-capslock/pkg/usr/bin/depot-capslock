@@ -27,7 +27,7 @@ import signal
 import sys
 import time
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 CONF = os.path.expanduser('~/.config/depot-capslock.conf')
 
 OSD = 132                    # cạnh ô báo
@@ -151,7 +151,7 @@ class LockOSD(Gtk.Window):
             self.set_visual(vis)
         self.connect('draw', self._clear)
         self.connect('size-allocate', lambda *_: self.round_shape())
-        scr.connect('composited-changed', lambda *_: self.round_shape())
+        scr.connect('composited-changed', lambda *_: self.on_composited())
         self.anim_id = None
         self.hide_id = None
         self.on = False
@@ -257,9 +257,16 @@ class LockOSD(Gtk.Window):
 
     # ---------------------------------------------------------------- hiện / tắt
     def fade(self, a):
+        """Độ mờ của cả cửa sổ. Cửa sổ dùng visual RGBA nên GTK nhân độ mờ vào chính hình vẽ: không có compositor
+        thì phải để 1.0 — không thì độ mờ còn sót từ lần mờ dần trước làm ô báo vẽ ra một ô đen trơn."""
         self.alpha = a
-        if self.composited():
-            Gtk.Widget.set_opacity(self, a)
+        Gtk.Widget.set_opacity(self, a if self.composited() else 1.0)
+
+    def on_composited(self):
+        """Compositor vừa bật / tắt (picom chết, người dùng tắt hiệu ứng): đổi cách bo góc và đặt lại độ mờ."""
+        self.round_shape()
+        self.fade(self.alpha)
+        self.queue_draw()
 
     def place(self):
         wa = workarea()

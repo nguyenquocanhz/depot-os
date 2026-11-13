@@ -276,8 +276,9 @@ class WinBase(Gtk.Window):
             self.set_visual(vis)
         self.connect('draw', self._clear)
         self.connect('size-allocate', lambda *_: self.round_shape())
-        scr.connect('composited-changed', lambda *_: self.round_shape())
+        scr.connect('composited-changed', lambda *_: self.on_composited())
         self.anim_id = None
+        self.alpha = 1.0
 
     def composited(self):
         scr = self.get_screen()
@@ -286,6 +287,18 @@ class WinBase(Gtk.Window):
     def anim_on(self):
         s = Gtk.Settings.get_default()
         return self.composited() and (s is None or s.get_property('gtk-enable-animations'))
+
+    def fade(self, a):
+        """Độ mờ của cả cửa sổ. Cửa sổ dùng visual RGBA nên GTK nhân độ mờ vào chính hình vẽ: không có compositor
+        thì phải để 1.0 — không thì độ mờ còn sót từ lần mờ dần trước làm cửa sổ vẽ ra một ô đen trơn."""
+        self.alpha = a
+        Gtk.Widget.set_opacity(self, a if self.composited() else 1.0)
+
+    def on_composited(self):
+        """Compositor vừa bật / tắt (picom chết, người dùng tắt hiệu ứng): đổi cách bo góc và đặt lại độ mờ."""
+        self.round_shape()
+        self.fade(self.alpha)
+        self.queue_draw()
 
     @staticmethod
     def _clear(_w, cr):
@@ -530,11 +543,6 @@ class Toast(WinBase):
         self.animate(step)
         self.arm()
 
-    def fade(self, a):
-        self.alpha = a
-        if self.composited():
-            Gtk.Widget.set_opacity(self, a)
-
     def glide(self, x, y):
         x0, y0 = self.pos
         self.pos = (x, y)
@@ -711,8 +719,7 @@ class Sidebar(WinBase):
 
         def step(k):
             self.move(int(x + off * (1 - k)), y)
-            if self.composited():
-                Gtk.Widget.set_opacity(self, 0.3 + 0.7 * k)
+            self.fade(0.3 + 0.7 * k)
         self.animate(step)
         self.grab(12)
 
@@ -729,8 +736,7 @@ class Sidebar(WinBase):
 
         def step(k):
             self.move(int(x + off * k), y)
-            if self.composited():
-                Gtk.Widget.set_opacity(self, 1 - 0.7 * k)
+            self.fade(1 - 0.7 * k)
         self.animate(step, self.hide, duration=ANIM * 0.8)
 
     # Giữ chuột + bàn phím như một menu: bấm ra ngoài hoặc Esc là đóng, không cần focus của trình quản lý cửa sổ.
@@ -821,11 +827,6 @@ class LockOSD(WinBase):
         cr.move_to(cx - tw / 2, by + (bh - th) / 2)
         PangoCairo.show_layout(cr, lay)
         return True
-
-    def fade(self, a):
-        self.alpha = a
-        if self.composited():
-            Gtk.Widget.set_opacity(self, a)
 
     def flash(self, on):
         self.on = on
