@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Depot Caps Lock
+Name[vi]=Ô báo Caps Lock
+Comment=Show an on-screen indicator whenever Caps Lock is switched on or off
+Comment[vi]=Hiện ô báo trên màn hình mỗi khi bật / tắt Caps Lock
+Exec=depot-capslock
+TryExec=depot-capslock
+Icon=input-keyboard
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

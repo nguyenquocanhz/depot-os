@@ -1,0 +1,19 @@
+Package: depot-capslock
+Version: 1.0
+Section: x11
+Priority: optional
+Architecture: all
+Depends: python3, python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-pango-1.0
+Recommends: fonts-inter
+Maintainer: nguyenquocanhz <nguyenquocanhz@users.noreply.github.com>
+Description: on-screen Caps Lock indicator from Depot OS
+ Shows a small rounded box with a padlock for a second each time Caps Lock
+ is switched: closed padlock and "A" when on, open padlock and "a" when off.
+ .
+ The box is drawn with cairo (no icon theme needed), never takes keyboard
+ focus and lets mouse clicks through. It starts with the desktop session
+ and works on any X11 desktop: XFCE, MATE, Cinnamon, LXQt, i3, Openbox.
+ .
+ Ô báo Caps Lock của Depot OS đóng thành gói riêng: ổ khoá đóng + chữ A khi
+ bật, ổ khoá mở + chữ a khi tắt. Trên Depot OS ô báo này đã có sẵn trong
+ depot-notify nên gói tự nhường, không hiện hai lần.

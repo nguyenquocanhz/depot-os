@@ -1,0 +1,353 @@
+#!/usr/bin/python3
+# depot-capslock — ô báo Caps Lock của Depot OS, tách thành gói riêng cho máy Debian / Ubuntu bất kỳ (phiên X11).
+#
+#   depot-capslock            chạy nền: mỗi lần Caps Lock đổi trạng thái thì hiện ô báo hơn một giây
+#   depot-capslock --test     hiện thử ô báo "bật" rồi "tắt", xong thoát
+#   depot-capslock --status   in "on" hoặc "off" rồi thoát
+#   depot-capslock --force    vẫn chạy trên Depot OS (ở đó depot-notify đã có sẵn ô báo này) và ở phiên Wayland
+#
+# Ô báo: ổ khoá đóng + chữ A khi Caps Lock bật, ổ khoá mở + chữ a khi tắt. Vẽ bằng cairo, không cần icon;
+# không nhận bàn phím, chuột bấm xuyên qua được; chạy giống nhau trên XFCE, i3, MATE, Cinnamon, LXQt, Openbox.
+#
+# Tuỳ chỉnh trong ~/.config/depot-capslock.conf, mỗi dòng KHOÁ=giá trị, đọc lại mỗi lần hiện:
+#   POSITION=top|center|bottom    chỗ hiện trên màn hình chính (mặc định top)
+#   HOLD=1.3                      số giây ô báo nằm trên màn hình
+#   ENABLED=0                     tạm tắt mà không phải gỡ gói
+#
+# Mã vẽ lấy từ lớp LockOSD trong /usr/bin/depot-notify của Depot OS — sửa bên nào thì sửa luôn bên kia.
+
+import fcntl
+import math
+import os
+import re
+import signal
+import sys
+import time
+
+VERSION = '1.0'
+CONF = os.path.expanduser('~/.config/depot-capslock.conf')
+
+OSD = 132                    # cạnh ô báo
+OSD_RADIUS = 26
+OSD_HOLD = 1.3               # giây ô báo nằm trên màn hình
+ANIM = 0.3                   # giây hiện / tắt
+
+USAGE = """depot-capslock %s — ô báo Caps Lock trên màn hình (X11)
+
+  depot-capslock            chạy nền, hiện ô báo mỗi khi bật / tắt Caps Lock
+  depot-capslock --test     hiện thử "bật" rồi "tắt", xong thoát
+  depot-capslock --status   in on / off
+  depot-capslock --force    vẫn chạy trên Depot OS và ở phiên Wayland
+  depot-capslock --version
+
+Tuỳ chỉnh: ~/.config/depot-capslock.conf — POSITION=top|center|bottom, HOLD=1.3, ENABLED=0""" % VERSION
+
+
+def conf_get(key, default=''):
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            for line in f:
+                k, _, v = line.strip().partition('=')
+                if k.strip() == key:
+                    return v.strip()
+    except OSError:
+        pass
+    return default
+
+
+def depot_builtin():
+    """Depot OS: depot-notify đã tự hiện ô báo này — chạy thêm thì ra hai ô chồng nhau."""
+    try:
+        with open('/usr/bin/depot-notify', 'rb') as f:
+            return b'class LockOSD' in f.read()
+    except OSError:
+        return False
+
+
+OPTS = ('--test', '--status', '--force', '--version', '--help', '-h')
+ARGS = sys.argv[1:]
+BAD = [a for a in ARGS if a not in OPTS]
+if BAD:
+    print('depot-capslock: không hiểu tham số %s\n\n%s' % (' '.join(BAD), USAGE), file=sys.stderr)
+    sys.exit(2)
+if '--help' in ARGS or '-h' in ARGS:
+    print(USAGE)
+    sys.exit(0)
+if '--version' in ARGS:
+    print('depot-capslock', VERSION)
+    sys.exit(0)
+ONESHOT = '--test' in ARGS or '--status' in ARGS
+if not ONESHOT and '--force' not in ARGS:
+    if depot_builtin():
+        print('depot-capslock: Depot OS đã có sẵn ô báo Caps Lock (depot-notify) — không chạy thêm. '
+              'Muốn chạy bằng được: depot-capslock --force')
+        sys.exit(0)
+    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+        print('depot-capslock: phiên Wayland không báo trạng thái Caps Lock cho chương trình X11 — không chạy. '
+              'Dùng phiên X11 (Xorg), hoặc thử: depot-capslock --force')
+        sys.exit(0)
+
+os.environ.setdefault('GDK_BACKEND', 'x11')
+
+import gi  # noqa: E402
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_foreign('cairo')
+import cairo  # noqa: E402
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+
+
+def rrect(cr, x, y, w, h, r):
+    r = max(0.0, min(r, w / 2, h / 2))
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def ease_out(t):
+    t = max(0.0, min(1.0, t))
+    return 1 - (1 - t) ** 3
+
+
+def workarea():
+    disp = Gdk.Display.get_default()
+    mon = disp.get_primary_monitor() or disp.get_monitor(0)
+    wa, g = mon.get_workarea(), mon.get_geometry()
+    if wa.width < 200 or wa.height < 200:          # không có trình quản lý cửa sổ: vùng làm việc rỗng
+        wa = mon.get_geometry()
+    if 'i3' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower() and wa.y == g.y:
+        wa.y += 30                                 # i3 không báo vùng làm việc: chừa i3bar ở trên
+        wa.height -= 30
+    return wa
+
+
+def hold_time():
+    try:
+        return max(0.3, min(10.0, float(conf_get('HOLD', str(OSD_HOLD)).replace(',', '.'))))
+    except ValueError:
+        return OSD_HOLD
+
+
+class LockOSD(Gtk.Window):
+    """Cửa sổ nổi không qua trình quản lý cửa sổ (override-redirect): chạy giống nhau trên xfwm4, i3…"""
+
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
+        self.set_title('Depot Caps Lock')
+        self.set_app_paintable(True)
+        self.set_resizable(False)
+        self.set_accept_focus(False)
+        scr = self.get_screen()
+        vis = scr.get_rgba_visual()
+        if vis:
+            self.set_visual(vis)
+        self.connect('draw', self._clear)
+        self.connect('size-allocate', lambda *_: self.round_shape())
+        scr.connect('composited-changed', lambda *_: self.round_shape())
+        self.anim_id = None
+        self.hide_id = None
+        self.on = False
+        self.alpha = 0.0
+        area = Gtk.DrawingArea()
+        area.set_size_request(OSD, OSD)
+        area.connect('draw', self.paint)
+        self.add(area)
+        area.show()
+
+    # ---------------------------------------------------------------- cửa sổ
+    def composited(self):
+        scr = self.get_screen()
+        return scr.is_composited() and scr.get_rgba_visual() is not None
+
+    def anim_on(self):
+        s = Gtk.Settings.get_default()
+        return self.composited() and (s is None or s.get_property('gtk-enable-animations'))
+
+    @staticmethod
+    def _clear(_w, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        return False
+
+    def round_shape(self):
+        """Không compositor thì không trong suốt được: cắt 4 góc tròn bằng shape X."""
+        if not self.get_realized():
+            return
+        if self.composited():
+            self.shape_combine_region(None)
+            return
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        surf = cairo.ImageSurface(cairo.FORMAT_A1, max(1, w), max(1, h))
+        cr = cairo.Context(surf)
+        rrect(cr, 0, 0, w, h, OSD_RADIUS)
+        cr.fill()
+        self.shape_combine_region(Gdk.cairo_region_create_from_surface(surf))
+
+    def animate(self, step, done=None, duration=ANIM):
+        """Gọi step(0..1 đã làm mượt) mỗi khung hình trong `duration` giây."""
+        if self.anim_id is not None:
+            GLib.source_remove(self.anim_id)
+            self.anim_id = None
+        if not self.anim_on():
+            step(1.0)
+            if done:
+                done()
+            return
+        t0 = time.monotonic()
+
+        def tick():
+            t = (time.monotonic() - t0) / duration
+            step(ease_out(t))
+            if t >= 1.0:
+                self.anim_id = None
+                if done:
+                    done()
+                return False
+            return True
+        step(0.0)
+        self.anim_id = GLib.timeout_add(16, tick)
+
+    # ---------------------------------------------------------------- hình vẽ
+    def paint(self, _w, cr):
+        s = OSD
+        rrect(cr, 0.5, 0.5, s - 1, s - 1, OSD_RADIUS)
+        cr.set_source_rgba(0.03, 0.03, 0.045, 0.90 if self.composited() else 1.0)
+        cr.fill_preserve()
+        cr.set_source_rgba(1, 1, 1, 0.10)
+        cr.set_line_width(1)
+        cr.stroke()
+        cx = s / 2
+        bw, bh, by = 62, 48, 62             # thân ổ khoá
+        r, lw = 19, 11                      # quai khoá
+        cr.set_source_rgba(1, 1, 1, 0.96)
+        cr.set_line_width(lw)
+        cr.set_line_cap(cairo.LINE_CAP_BUTT)
+        if self.on:                         # quai cắm cả hai chân vào thân
+            top = by - 10
+            cr.move_to(cx - r, by + 4)
+            cr.line_to(cx - r, top)
+            cr.arc(cx, top, r, math.pi, 2 * math.pi)
+            cr.line_to(cx + r, by + 4)
+        else:                               # quai nhấc lên, chân phải hở ra
+            top = by - 22
+            cr.move_to(cx - r, by + 4)
+            cr.line_to(cx - r, top)
+            cr.arc(cx, top, r, math.pi, 2 * math.pi)
+            cr.line_to(cx + r, top + 9)
+        cr.stroke()
+        rrect(cr, cx - bw / 2, by, bw, bh, 9)
+        cr.fill()
+        lay = self.create_pango_layout('A' if self.on else 'a')
+        lay.set_font_description(Pango.FontDescription('Inter,Sans Bold 25'))   # không có Inter thì chữ không chân nào cũng được
+        tw, th = lay.get_pixel_size()
+        cr.set_source_rgba(0.03, 0.03, 0.045, 1)
+        cr.move_to(cx - tw / 2, by + (bh - th) / 2)
+        PangoCairo.show_layout(cr, lay)
+        return True
+
+    # ---------------------------------------------------------------- hiện / tắt
+    def fade(self, a):
+        self.alpha = a
+        if self.composited():
+            Gtk.Widget.set_opacity(self, a)
+
+    def place(self):
+        wa = workarea()
+        x = wa.x + (wa.width - OSD) // 2
+        pos = conf_get('POSITION', 'top').lower()
+        if pos == 'center':
+            y = wa.y + (wa.height - OSD) // 2
+        elif pos == 'bottom':
+            y = wa.y + wa.height - OSD - 96
+        else:
+            y = wa.y + 48
+        self.resize(OSD, OSD)
+        self.move(x, max(wa.y, y))
+
+    def flash(self, on):
+        self.on = on
+        self.place()
+        if self.hide_id is not None:
+            GLib.source_remove(self.hide_id)
+        if not self.get_visible():
+            self.alpha = 0.0
+            self.show()
+            self.round_shape()
+            self.input_shape_combine_region(cairo.Region())      # chuột bấm xuyên qua ô báo
+        self.queue_draw()
+        a0 = self.alpha
+        self.animate(lambda k: self.fade(a0 + (1 - a0) * k), duration=ANIM / 2)
+        self.hide_id = GLib.timeout_add(int(hold_time() * 1000), self.fade_out)
+
+    def fade_out(self):
+        self.hide_id = None
+        a0 = self.alpha
+        self.animate(lambda k: self.fade(a0 * (1 - k)), self.hide)
+        return False
+
+
+def single_instance(disp_name):
+    """Mỗi màn hình X một bản chạy nền. Giữ file khoá mở suốt đời tiến trình; trả None nếu đã có bản khác."""
+    d = os.environ.get('XDG_RUNTIME_DIR')
+    if not d or not os.path.isdir(d):
+        d = '/tmp'
+    path = os.path.join(d, 'depot-capslock-%d-%s.lock' % (os.getuid(), re.sub(r'[^A-Za-z0-9]', '_', disp_name)))
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    return fd
+
+
+def main():
+    disp = Gdk.Display.get_default()
+    if disp is None:
+        print('depot-capslock: không mở được màn hình X (biến DISPLAY) — chạy trong phiên đồ hoạ X11.', file=sys.stderr)
+        return 1
+    keymap = Gdk.Keymap.get_for_display(disp)
+    if '--status' in ARGS:
+        print('on' if keymap.get_caps_lock_state() else 'off')
+        return 0
+
+    osd = LockOSD()
+    if '--test' in ARGS:
+        hold = int(hold_time() * 1000)
+        osd.flash(True)
+        GLib.timeout_add(hold + 400, lambda: osd.flash(False) or False)
+        GLib.timeout_add(2 * hold + 1200, lambda: Gtk.main_quit() or False)
+        Gtk.main()
+        return 0
+
+    lock = single_instance(disp.get_name())
+    if lock is None:
+        print('depot-capslock: đã có một bản đang chạy trên màn hình này.')
+        return 0
+
+    # X báo qua XKB mỗi khi đèn khoá đổi, không cần cửa sổ nào của mình đang được chọn
+    state = {'caps': keymap.get_caps_lock_state()}
+
+    def on_keymap(km):
+        caps = km.get_caps_lock_state()
+        if caps != state['caps']:
+            state['caps'] = caps
+            if conf_get('ENABLED', '1') != '0':
+                osd.flash(caps)
+
+    keymap.connect('state-changed', on_keymap)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: Gtk.main_quit() or False)
+    Gtk.main()
+    os.close(lock)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

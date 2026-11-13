@@ -185,6 +185,7 @@
 - **Đạt khi:** người quen Windows tự cài được mà không cần hướng dẫn.
 
 ## Phase 4 — Hệ sinh thái nhỏ của Depot OS
+- [x] **Gói `.deb` đầu tiên tách khỏi ISO: `depot-capslock` 1.0** (13/11/2026, `packages/depot-capslock/`) — ô báo Caps Lock của `depot-notify` (ổ khoá đóng + `A` / ổ khoá mở + `a`) thành chương trình riêng cho máy Debian / Ubuntu bất kỳ chạy X11; tệp `depot-capslock_1.0_all.deb` (sha256 `5954323b…39ed`) nằm trong kho git cạnh nguồn và `build.sh` (`dpkg-deb`, nén xz, không cần root). Tự chạy cùng phiên, một bản mỗi màn hình, tuỳ chỉnh `POSITION` / `HOLD` / `ENABLED` trong `~/.config/depot-capslock.conf`; trên Depot OS tự nhường `depot-notify`. ISO không đổi, không cài gói này vào ISO — *31 phép kiểm trong phiên XFCE overlay của ISO v0.25 (cài bằng `depot-programs-helper install-deb`, bật / tắt Caps Lock bằng `xdotool`, có và không có compositor, gỡ + purge); chưa thử bàn phím thật, Ubuntu / Debian ngoài Depot, môi trường khác XFCE*
 - [ ] APT repo riêng cho update của Depot (reprepro/repo.io)
 - [ ] Update Manager nhẹ với thông báo kiểu Windows
 - [ ] Timeshift/tự động snapshot trước nâng cấp
