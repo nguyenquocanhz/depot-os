@@ -1,4 +1,6 @@
 // Depot OS — sau mỗi lần cài/gỡ gói: gắn mục "Gỡ cài đặt" (chuột phải) vào app mới cài,
 // và giữ GNOME Software mở qua depot-software (tự tắt khi đóng cửa sổ) dù gói vừa được nâng cấp
 DPkg::Post-Invoke { "if [ -x /usr/bin/depot-uninstall ]; then /usr/bin/depot-uninstall --refresh >/dev/null 2>&1 || true; fi"; };
+// mục chuột phải "Ghim / bỏ ghim trên taskbar" cho app mới cài (depot-pin)
+DPkg::Post-Invoke { "if [ -x /usr/bin/depot-pin ]; then /usr/bin/depot-pin --refresh >/dev/null 2>&1 || true; fi"; };
 DPkg::Post-Invoke { "if [ -x /usr/bin/depot-software ]; then /usr/bin/depot-software --patch >/dev/null 2>&1 || true; fi"; };

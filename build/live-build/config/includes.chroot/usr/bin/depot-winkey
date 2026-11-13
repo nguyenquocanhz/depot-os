@@ -1,0 +1,15 @@
+#!/bin/sh
+# Depot OS — phím Windows hoạt động như trên Windows: CHẠM một mình = mở menu Start; giữ + phím khác = phím tắt
+# (Win+R hộp Chạy, Win+E tệp, Win+D desktop, Win+mũi tên xếp cửa sổ…).
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-winkey        chạy (autostart của phiên XFCE gọi)
+#   depot-winkey off    tắt trong phiên này
+# XFCE không tự làm được việc này: gán thẳng phím Super_L cho menu thì menu bật ngay lúc NHẤN phím, nên Win+R cũng bật
+# menu rồi gõ chữ "r" vào ô tìm. xcape theo dõi phím: nhấn rồi nhả phím Windows trong vòng 0,4 giây mà không bấm phím
+# nào khác thì nó phát Alt+F1 — phím đã gán cho xfce4-popup-whiskermenu (xfce4-keyboard-shortcuts.xml). Giữ lâu hơn,
+# hoặc có bấm phím khác, thì không phát gì: tổ hợp phím đi bình thường.
+# Phiên i3 không dùng (Super là phím điều khiển của i3): autostart chỉ chạy ở XFCE.
+command -v xcape >/dev/null 2>&1 || exit 0
+pkill -u "$(id -u)" -x xcape 2>/dev/null
+[ "${1:-}" = off ] && exit 0
+exec xcape -t 400 -e 'Super_L=Alt_L|F1;Super_R=Alt_L|F1'

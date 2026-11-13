@@ -25,6 +25,8 @@ rm -f "$K" "$L"
 apt-get update >/dev/null 2>&1 || true
 # mục "Gỡ cài đặt" (chuột phải) cho app trong ISO
 [ -x /usr/bin/depot-uninstall ] && /usr/bin/depot-uninstall --refresh
+# mục "Ghim / bỏ ghim trên taskbar" (chuột phải) cho app trong ISO
+[ -x /usr/bin/depot-pin ] && /usr/bin/depot-pin --refresh
 
 if dpkg -s google-chrome-stable >/dev/null 2>&1; then
     echo ">> App cài sẵn: Google Chrome $(dpkg-query -W -f='${Version}' google-chrome-stable)"

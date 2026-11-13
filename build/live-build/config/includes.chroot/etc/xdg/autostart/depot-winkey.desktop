@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Phím Windows (Depot OS)
+Comment=Chạm phím Windows mở menu Start; Win+R, Win+E, Win+D… vẫn là phím tắt
+Exec=depot-winkey
+TryExec=xcape
+OnlyShowIn=XFCE;
+Terminal=false
+NoDisplay=true

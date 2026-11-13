@@ -45,6 +45,11 @@ fonts-jetbrains-mono
 xfce4-genmon-plugin
 # Bộ nhớ tạm (Clipboard Manager): lịch sử sao chép, Win+V (depot-clipboard lo autostart + mặc định)
 xfce4-clipman
+# Phím Windows như Windows (depot-winkey): xcape đổi cú CHẠM phím Windows một mình thành Alt+F1 = mở menu Start,
+# còn Win+R / Win+E / Win+D… vẫn là tổ hợp phím bình thường
+xcape
+# Máy tính bỏ túi: người từ Windows sang gõ "calc" trong hộp Chạy (depot-run) là ra — trước đó ISO không có cái nào
+galculator
 xfce4-screenshooter
 thunar-archive-plugin
 xarchiver

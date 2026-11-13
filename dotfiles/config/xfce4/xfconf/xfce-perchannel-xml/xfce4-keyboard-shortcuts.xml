@@ -4,8 +4,8 @@
   PHẢI có "override" = true và ghi ĐỦ cả bộ: thiếu cờ này thì lần đăng nhập đầu xfsettingsd xoá hết /commands/custom
   rồi chép bộ mặc định của XFCE vào — tới v0.20.2 file chỉ có 2 dòng, không có cờ, nên phím tắt riêng của Depot
   (Ctrl+Alt+T = xfce4-terminal) chưa bao giờ có hiệu lực. Có cờ rồi thì XFCE không tự thêm mặc định nữa, nên các phím
-  mặc định muốn giữ cũng ghi ở đây. Phím của cửa sổ (/xfwm4/custom: Alt+Tab, Alt+F4, Super+mũi tên…) không ghi ở đây:
-  XFCE tự chép bộ mặc định cho phần đó.
+  mặc định muốn giữ cũng ghi ở đây. Phím của cửa sổ (/xfwm4/custom: Alt+Tab, Alt+F4, Win+mũi tên…) nằm ở nửa dưới file,
+  cũng có cờ "override" và ghi đủ bộ (từ v0.25; trước đó để XFCE tự chép mặc định nên không thêm được Win+D, Win+mũi tên).
 -->
 <channel name="xfce4-keyboard-shortcuts" version="1.0">
   <property name="commands" type="empty">
@@ -13,10 +13,18 @@
       <property name="override" type="bool" value="true"/>
 
       <!-- Kiểu Windows (phím Windows = Super) -->
-      <!-- Win+R = hộp Chạy -->
-      <property name="&lt;Super&gt;r" type="string" value="xfce4-appfinder --collapsed">
-        <property name="startup-notify" type="bool" value="true"/>
-      </property>
+      <!-- Chạm phím Windows MỘT MÌNH = menu Start: xcape (autostart depot-winkey) đổi cú chạm thành Alt+F1, nên ở đây
+           không gán gì cho Super_L — gán thẳng Super_L thì Win+R, Win+E… đều bật menu trước rồi mới tới phím kia. -->
+      <!-- Win+R = hộp Chạy kiểu Windows (depot-run: hiểu cả cmd, explorer, control, notepad, calc…) -->
+      <property name="&lt;Super&gt;r" type="string" value="depot-run"/>
+      <!-- Win+S = tìm kiếm (mở menu Start, gõ là tìm) -->
+      <property name="&lt;Super&gt;s" type="string" value="xfce4-popup-whiskermenu"/>
+      <!-- Win+A = trung tâm thông báo (khung Thông báo bên cạnh) -->
+      <property name="&lt;Super&gt;a" type="string" value="depot-notify toggle"/>
+      <!-- Win+Pause = thông tin máy -->
+      <property name="&lt;Super&gt;Pause" type="string" value="depot-about"/>
+      <!-- Win+PrtSc = chụp cả màn hình, lưu thẳng vào thư mục Hình ảnh -->
+      <property name="&lt;Super&gt;Print" type="string" value="sh -c 'xfce4-screenshooter -f -s &quot;$(xdg-user-dir PICTURES)&quot;'"/>
       <!-- Win+E = trình quản lý tệp -->
       <property name="&lt;Super&gt;e" type="string" value="thunar"/>
       <!-- Win+I = Cài đặt (Settings Manager) -->
@@ -61,6 +69,83 @@
       <property name="XF86WWW" type="string" value="exo-open --launch WebBrowser"/>
       <property name="HomePage" type="string" value="exo-open --launch WebBrowser"/>
       <property name="XF86Mail" type="string" value="exo-open --launch MailReader"/>
+    </property>
+  </property>
+
+  <!-- Phím của cửa sổ (xfwm4). Cùng luật với phần trên: có "override" thì phải ghi ĐỦ cả bộ — 60 phím mặc định của
+       XFCE 4.20 chép nguyên ở dưới, cộng các phím kiểu Windows mà mặc định không có (XFCE chỉ gán Win + phím SỐ BÊN
+       PHẢI để xếp cửa sổ; bàn phím laptop không có cụm phím đó). -->
+  <property name="xfwm4" type="empty">
+    <property name="custom" type="empty">
+      <property name="override" type="bool" value="true"/>
+
+      <!-- Kiểu Windows -->
+      <!-- xfwm4 chỉ nhận MỘT phím cho mỗi việc (gán hai phím thì phím nào thắng là hên xui): mỗi việc dưới đây
+           chỉ còn phím kiểu Windows, phím mặc định trùng việc (Ctrl+Alt+D, Alt+F9, Alt+F10, Win+KP_4/6) đã bỏ -->
+      <!-- Win+D = hiện desktop (bấm lần nữa: hiện lại cửa sổ) -->
+      <property name="&lt;Super&gt;d" type="string" value="show_desktop_key"/>
+      <!-- Win+← / Win+→ = xếp cửa sổ nửa trái / nửa phải; Win+↑ = phóng to (bấm lần nữa: về cỡ cũ); Win+↓ = thu nhỏ -->
+      <property name="&lt;Super&gt;Left" type="string" value="tile_left_key"/>
+      <property name="&lt;Super&gt;Right" type="string" value="tile_right_key"/>
+      <property name="&lt;Super&gt;Up" type="string" value="maximize_window_key"/>
+      <property name="&lt;Super&gt;Down" type="string" value="hide_window_key"/>
+
+      <!-- Mặc định XFCE 4.20 -->
+      <property name="&lt;Alt&gt;Insert" type="string" value="add_workspace_key"/>
+      <property name="Escape" type="string" value="cancel_key"/>
+      <property name="Left" type="string" value="left_key"/>
+      <property name="Right" type="string" value="right_key"/>
+      <property name="Up" type="string" value="up_key"/>
+      <property name="Down" type="string" value="down_key"/>
+      <property name="&lt;Alt&gt;Tab" type="string" value="cycle_windows_key"/>
+      <property name="&lt;Alt&gt;&lt;Shift&gt;Tab" type="string" value="cycle_reverse_windows_key"/>
+      <property name="&lt;Alt&gt;Delete" type="string" value="del_workspace_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Down" type="string" value="down_workspace_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Left" type="string" value="left_workspace_key"/>
+      <property name="&lt;Shift&gt;&lt;Alt&gt;Page_Down" type="string" value="lower_window_key"/>
+      <property name="&lt;Alt&gt;F4" type="string" value="close_window_key"/>
+      <property name="&lt;Alt&gt;F6" type="string" value="stick_window_key"/>
+      <property name="&lt;Alt&gt;F7" type="string" value="move_window_key"/>
+      <property name="&lt;Alt&gt;F8" type="string" value="resize_window_key"/>
+      <property name="&lt;Alt&gt;F11" type="string" value="fullscreen_key"/>
+      <property name="&lt;Alt&gt;F12" type="string" value="above_key"/>
+      <property name="&lt;Primary&gt;&lt;Shift&gt;&lt;Alt&gt;Left" type="string" value="move_window_left_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;End" type="string" value="move_window_next_workspace_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Home" type="string" value="move_window_prev_workspace_key"/>
+      <property name="&lt;Primary&gt;&lt;Shift&gt;&lt;Alt&gt;Right" type="string" value="move_window_right_key"/>
+      <property name="&lt;Primary&gt;&lt;Shift&gt;&lt;Alt&gt;Up" type="string" value="move_window_up_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_1" type="string" value="move_window_workspace_1_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_2" type="string" value="move_window_workspace_2_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_3" type="string" value="move_window_workspace_3_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_4" type="string" value="move_window_workspace_4_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_5" type="string" value="move_window_workspace_5_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_6" type="string" value="move_window_workspace_6_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_7" type="string" value="move_window_workspace_7_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_8" type="string" value="move_window_workspace_8_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;KP_9" type="string" value="move_window_workspace_9_key"/>
+      <property name="&lt;Alt&gt;space" type="string" value="popup_menu_key"/>
+      <property name="&lt;Shift&gt;&lt;Alt&gt;Page_Up" type="string" value="raise_window_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Right" type="string" value="right_workspace_key"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Up" type="string" value="up_workspace_key"/>
+      <property name="&lt;Super&gt;Tab" type="string" value="switch_window_key"/>
+      <property name="&lt;Primary&gt;F1" type="string" value="workspace_1_key"/>
+      <property name="&lt;Primary&gt;F2" type="string" value="workspace_2_key"/>
+      <property name="&lt;Primary&gt;F3" type="string" value="workspace_3_key"/>
+      <property name="&lt;Primary&gt;F4" type="string" value="workspace_4_key"/>
+      <property name="&lt;Primary&gt;F5" type="string" value="workspace_5_key"/>
+      <property name="&lt;Primary&gt;F6" type="string" value="workspace_6_key"/>
+      <property name="&lt;Primary&gt;F7" type="string" value="workspace_7_key"/>
+      <property name="&lt;Primary&gt;F8" type="string" value="workspace_8_key"/>
+      <property name="&lt;Primary&gt;F9" type="string" value="workspace_9_key"/>
+      <property name="&lt;Primary&gt;F10" type="string" value="workspace_10_key"/>
+      <property name="&lt;Primary&gt;F11" type="string" value="workspace_11_key"/>
+      <property name="&lt;Primary&gt;F12" type="string" value="workspace_12_key"/>
+      <property name="&lt;Super&gt;KP_Down" type="string" value="tile_down_key"/>
+      <property name="&lt;Super&gt;KP_Up" type="string" value="tile_up_key"/>
+      <property name="&lt;Super&gt;KP_Page_Up" type="string" value="tile_up_right_key"/>
+      <property name="&lt;Super&gt;KP_Home" type="string" value="tile_up_left_key"/>
+      <property name="&lt;Super&gt;KP_End" type="string" value="tile_down_left_key"/>
+      <property name="&lt;Super&gt;KP_Next" type="string" value="tile_down_right_key"/>
     </property>
   </property>
 </channel>

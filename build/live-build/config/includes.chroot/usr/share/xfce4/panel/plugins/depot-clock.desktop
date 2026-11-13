@@ -1,0 +1,12 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Encoding=UTF-8
+Name=Depot Clock
+Name[vi]=Đồng hồ kiểu Windows (Depot)
+Comment=Time above, date below; click for the calendar, right-click to adjust date and time
+Comment[vi]=Giờ trên, ngày dưới; bấm mở lịch, chuột phải mở Điều chỉnh ngày giờ
+Icon=x-office-calendar
+X-XFCE-Module=depot-clock
+X-XFCE-Internal=false
+X-XFCE-Unique=false
+X-XFCE-API=2.0

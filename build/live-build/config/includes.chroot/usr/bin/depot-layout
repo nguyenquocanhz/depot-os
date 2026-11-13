@@ -3,18 +3,28 @@
 #   depot-layout                            mở cửa sổ chọn
 #   depot-layout macos|windows|windows11    chuyển ngay
 #   depot-layout current                    in bố cục đang dùng
-# macos     = thanh menu mỏng trên + dock Plank dưới, nút cửa sổ bên trái
+#   depot-layout align [left|center]        bố cục Windows 11: icon taskbar dồn TRÁI (như Windows 10) hoặc ở GIỮA;
+#                                           không đối số: in lựa chọn đang lưu
+# macos     = thanh menu mỏng trên + dock Plank dưới, nút cửa sổ tròn bên trái, icon WhiteSur
 # windows   = kiểu Windows 10: taskbar dưới, Start + app ghim bên trái, menu Start dạng danh sách
-# windows11 = kiểu Windows 11: Start + app ghim ở GIỮA taskbar, menu Start dạng lưới icon
-# Hai kiểu Windows: không Plank, nút cửa sổ bên phải.
+# windows11 = kiểu Windows 11: Start + app ghim ở GIỮA taskbar (hoặc dồn trái — depot-layout align), menu Start dạng lưới
+# Hai kiểu Windows dành cho người vừa chuyển từ Windows sang (viết lại ở v0.25):
+#   - khung cửa sổ "Depot-Win11": thanh tiêu đề phẳng, nút — ☐ ✕ bên phải, nút đóng đỏ khi rê chuột (scripts/gen-win-xfwm.py);
+#   - bộ icon Papirus thay cho WhiteSur (icon WhiteSur nhại macOS: trình quản lý tệp mang mặt Finder…);
+#   - đồng hồ taskbar giờ trên / ngày dưới, chuột phải có "Điều chỉnh ngày giờ" (plugin depot-clock);
+#   - Win+1…9 mở app ghim thứ 1…9 (docklike); ghim app: chuột phải app > "Ghim / bỏ ghim trên taskbar" (depot-pin);
+#   - phím Windows, Win+R, Win+D, Win+mũi tên… dùng chung cho mọi bố cục (depot-winkey, xfce4-keyboard-shortcuts.xml).
+# Không Plank ở hai kiểu Windows.
 # Cách đổi panel giống xfce4-panel-profiles: tắt panel, tắt xfconfd, chép XML, bật lại panel.
 STATE="$HOME/.config/depot/layout"
+ALIGN="$HOME/.config/depot/taskbar-align"
 SHARE=/usr/share/depot-os
 XFCONF="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
 # cùng danh sách app với dock Plank (depot-plank)
-APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop zalo discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
+APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
 
 current() { cat "$STATE" 2>/dev/null || echo macos; }
+align() { case "$(cat "$ALIGN" 2>/dev/null)" in left) echo left ;; *) echo center ;; esac; }
 
 xml_of() {
     case $1 in
@@ -31,15 +41,21 @@ name_of() {
     esac
 }
 
-# docklike đọc app ghim từ file rc theo id plugin (plugin-3 trong cả hai bố cục Windows)
+# docklike đọc cấu hình từ file rc theo id plugin (plugin-3 trong cả hai bố cục Windows).
+# App ghim: chỉ ghi danh sách mặc định khi CHƯA có — người dùng đã ghim / bỏ ghim (depot-pin, hoặc mục "Pinned" của
+# docklike) thì đổi bố cục qua lại không làm mất. keyComboActive: Win+1…9 mở app ghim thứ 1…9 như Windows.
 write_docklike() {
-    pinned=""
-    for a in $APPS; do
-        f=/usr/share/applications/$a.desktop
-        [ -f "$f" ] && pinned="$pinned$f;"
-    done
+    rc="$HOME/.config/xfce4/panel/docklike-3.rc"
     mkdir -p "$HOME/.config/xfce4/panel"
-    printf '[user]\npinned=%s\n' "$pinned" > "$HOME/.config/xfce4/panel/docklike-3.rc"
+    if ! grep -qs '^pinned=.' "$rc"; then
+        pinned=""
+        for a in $APPS; do
+            f=/usr/share/applications/$a.desktop
+            [ -f "$f" ] && pinned="$pinned$f;"
+        done
+        printf '[user]\npinned=%s\n' "$pinned" > "$rc"
+    fi
+    grep -q '^keyComboActive=' "$rc" || printf 'keyComboActive=true\n' >> "$rc"
 }
 
 # nút chuông thông báo = genmon chạy depot-notify-bell; genmon đọc lệnh từ file rc theo id plugin
@@ -50,12 +66,18 @@ write_bell() {
     printf 'Command=depot-notify-bell\nUseLabel=0\nText=\nUpdatePeriod=5000\n' > "$HOME/.config/xfce4/panel/genmon-$id.rc"
 }
 
-swap_panel() {
+swap_panel() {   # $1 file XML, $2 bố cục
     xfce4-panel --quit 2>/dev/null
     pkill -x xfconfd
     sleep 0.5
     mkdir -p "$XFCONF"
     cp "$1" "$XFCONF/xfce4-panel.xml"
+    # Windows 11, icon dồn trái: bỏ vạch co giãn bên trái nút Start (plugin-11) khỏi panel-1 — Start + app ghim
+    # bắt đầu từ góc dưới trái như Windows 10; vạch co giãn bên phải (plugin-4) vẫn đẩy phần trống về bên phải
+    if [ "$2" = windows11 ] && [ "$(align)" = left ]; then
+        # (số 11 chỉ xuất hiện một lần dưới dạng <value> trong file: xoá lần khớp đầu tiên)
+        sed -i '0,/<value type="int" value="11"\/>/{//d}' "$XFCONF/xfce4-panel.xml"
+    fi
     # xfconfd có thể đã tự bật lại giữa chừng với cấu hình cũ trong bộ nhớ: tắt lần nữa cho chắc
     pkill -x xfconfd
     sleep 0.3
@@ -64,47 +86,86 @@ swap_panel() {
     (setsid xfce4-panel >/dev/null 2>&1 &)
 }
 
+# Diện mạo đi theo bố cục: khung cửa sổ, bộ icon, phông tiêu đề, phía đặt nút. Khung và icon chỉ đổi khi máy đang
+# dùng đúng bộ mặc định của một bố cục Depot — người dùng đã tự chọn bộ khác trong Cài đặt thì giữ nguyên.
+apply_look() {
+    case $1 in
+        windows*) wm=Depot-Win11; icons=Papirus-Dark; font="Inter 10"; buttons="|HMC"; talign=left ;;
+        *) wm=WhiteSur-Dark; icons=WhiteSur; font="Inter Bold 10"; buttons="CHM|"; talign=center ;;
+    esac
+    xfconf-query -c xfwm4 -p /general/button_layout -n -t string -s "$buttons"
+    xfconf-query -c xfwm4 -p /general/title_alignment -n -t string -s "$talign"
+    cur=$(xfconf-query -c xfwm4 -p /general/theme 2>/dev/null)
+    case "$cur" in
+        '' | Default | WhiteSur-Dark | WhiteSur-Dark-solid | Depot-Win11)
+            if [ -r "/usr/share/themes/$wm/xfwm4/themerc" ]; then
+                xfconf-query -c xfwm4 -p /general/theme -n -t string -s "$wm"
+                xfconf-query -c xfwm4 -p /general/title_font -n -t string -s "$font"
+            fi ;;
+    esac
+    cur=$(xfconf-query -c xsettings -p /Net/IconThemeName 2>/dev/null)
+    case "$cur" in
+        '' | WhiteSur | WhiteSur-dark | WhiteSur-light | Papirus-Dark)
+            [ -d "/usr/share/icons/$icons" ] && xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s "$icons" ;;
+    esac
+}
+
 switch() {
     xml=$(xml_of "$1")
     [ -r "$xml" ] || { echo "!! thiếu $xml" >&2; exit 1; }
     case $1 in
         windows*)
             write_docklike
-            pkill -x plank 2>/dev/null
-            buttons="|HMC"; align=left ;;
-        macos)
-            buttons="CHM|"; align=center ;;
+            pkill -x plank 2>/dev/null ;;
     esac
     # ghi trước khi đổi panel: depot-clock apply đọc bố cục mới
     mkdir -p "$(dirname "$STATE")"
     echo "$1" > "$STATE"
     write_bell "$1"
-    swap_panel "$xml"
+    swap_panel "$xml" "$1"
     sleep 1
     # XML bố cục mới không mang cấu hình Clipman (cùng kênh xfce4-panel): đặt lại mặc định còn thiếu
     command -v depot-clipboard >/dev/null && depot-clipboard defaults
-    xfconf-query -c xfwm4 -p /general/button_layout -n -t string -s "$buttons"
-    xfconf-query -c xfwm4 -p /general/title_alignment -n -t string -s "$align"
+    apply_look "$1"
     # Plank tự thoát khi bố cục là Windows (depot-plank đọc $STATE)
     [ "$1" = macos ] && (setsid depot-plank >/dev/null 2>&1 &)
     return 0
 }
 
+set_align() {
+    case "$1" in left | center) ;; *) echo "dùng: depot-layout align [left|center]" >&2; exit 2 ;; esac
+    mkdir -p "$(dirname "$ALIGN")"
+    echo "$1" > "$ALIGN"
+    # chỉ bố cục Windows 11 có hai kiểu căn; đang ở bố cục khác thì lưu lại, lần chuyển sang Windows 11 sẽ dùng
+    if [ "$(current)" = windows11 ]; then
+        swap_panel "$(xml_of windows11)" windows11
+        sleep 1
+        command -v depot-clipboard >/dev/null && depot-clipboard defaults
+    fi
+    return 0
+}
+
 gui() {
     cur=$(current)
-    yad --title="Bố cục desktop" --window-icon=preferences-desktop --width=500 --borders=16 \
+    if [ "$(align)" = left ]; then al="bên trái"; other=center; albtn="Icon taskbar: ra giữa"; else al="ở giữa"; other=left; albtn="Icon taskbar: dồn trái"; fi
+    yad --title="Bố cục desktop" --window-icon=preferences-desktop --borders=16 --center --fixed \
         --image=preferences-desktop --text="<b>Đang dùng: $(name_of "$cur")</b>
 
-<b>Kiểu macOS</b>: thanh menu mỏng ở trên, dock ở dưới, nút đóng/thu nhỏ/phóng to bên trái.
+<b>Kiểu macOS</b>: thanh menu mỏng ở trên, dock ở dưới, nút đóng / thu nhỏ / phóng to bên trái.
 <b>Kiểu Windows 10</b>: taskbar dưới, nút Start và app ghim bên trái, menu Start dạng danh sách.
-<b>Kiểu Windows 11</b>: nút Start và app ghim ở giữa taskbar, menu Start dạng lưới icon.
+<b>Kiểu Windows 11</b>: nút Start và app ghim trên taskbar (đang đặt <b>$al</b>), menu Start dạng lưới icon.
+
+Hai kiểu Windows: cửa sổ có nút — ☐ ✕ bên phải, đồng hồ giờ trên ngày dưới (chuột phải: Điều chỉnh ngày giờ).
+Vừa chuyển từ Windows sang: phím <b>Windows</b> mở Start, <b>Win+R</b> hộp Chạy, <b>Win+E</b> tệp, <b>Win+D</b> desktop,
+<b>Win+mũi tên</b> xếp cửa sổ, <b>Win+1…9</b> mở app ghim. Ghim app: chuột phải vào app, chọn “Ghim / bỏ ghim trên taskbar”.
 
 Đổi bố cục không đóng app nào đang mở." \
-        --button="macOS:2" --button="Windows 10:3" --button="Windows 11:4" --button="Đóng:1"
+        --button="$albtn:5" --button="macOS:2" --button="Windows 10:3" --button="Windows 11:4" --button="Đóng:1"
     case $? in
         2) new=macos ;;
         3) new=windows ;;
         4) new=windows11 ;;
+        5) set_align "$other"; exec "$0" ;;
         *) return ;;
     esac
     [ "$cur" = "$new" ] || switch "$new"
@@ -112,12 +173,14 @@ gui() {
 
 case "${XDG_CURRENT_DESKTOP:-}" in
     *XFCE*) ;;
-    *) [ "${1:-}" = current ] || { echo "Bố cục chỉ áp dụng cho phiên XFCE (i3 dùng i3bar)." >&2; exit 1; } ;;
+    *) case "${1:-}" in current) ;; align) [ -n "${2:-}" ] && { echo "Bố cục chỉ áp dụng cho phiên XFCE (i3 dùng i3bar)." >&2; exit 1; } ;;
+           *) echo "Bố cục chỉ áp dụng cho phiên XFCE (i3 dùng i3bar)." >&2; exit 1 ;; esac ;;
 esac
 
 case "${1:-}" in
     macos | windows | windows11) switch "$1" ;;
     current) current ;;
+    align) if [ -n "${2:-}" ]; then set_align "$2"; else align; fi ;;
     '') gui ;;
-    *) echo "dùng: depot-layout [macos|windows|windows11|current]" >&2; exit 2 ;;
+    *) echo "dùng: depot-layout [macos|windows|windows11|current|align [left|center]]" >&2; exit 2 ;;
 esac

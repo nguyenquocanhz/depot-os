@@ -39,7 +39,7 @@ q() { xfconf-query -c $CH "$@" 2>/dev/null; }
 # id plugin đồng hồ (tìm theo loại, không đoán số)
 clock_id() {
     q -l | grep -E '^/plugins/plugin-[0-9]+$' | while read -r p; do
-        [ "$(q -p "$p")" = clock ] && echo "${p##*-}" && break
+        case "$(q -p "$p")" in clock | depot-clock) echo "${p##*-}"; break ;; esac
     done
 }
 

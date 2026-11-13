@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+# Depot OS — hộp "Chạy" (Win+R) như Run của Windows: gõ tên chương trình, thư mục, tệp hoặc địa chỉ web rồi Enter.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-run                 mở hộp thoại
+#   depot-run --resolve CHUỖI in ra việc sẽ làm với CHUỖI (không chạy) — để kiểm thử
+#   depot-run --exec CHUỖI    làm luôn, không mở hộp thoại
+# Người vừa chuyển từ Windows gõ theo thói quen cũ vẫn ra đúng chỗ: cmd → Terminal, explorer → trình quản lý tệp,
+# control → Cài đặt, notepad → Mousepad, calc → Máy tính, taskmgr → Quản lý tác vụ, ncpa.cpl → Kết nối mạng,
+# devmgmt.msc → Driver phần cứng, appwiz.cpl → Phần mềm, winver → Giới thiệu máy này, %temp%, %userprofile%…
+# Thứ tự hiểu một chuỗi: (1) lệnh quen của Windows; (2) địa chỉ web; (3) đường dẫn có thật (~, /…, tên thư mục cá nhân);
+# (4) lệnh có trong PATH; (5) tên app trong menu. Không ra cái nào thì báo ngay trong hộp, không đóng.
+# Lịch sử 20 dòng gần nhất: ~/.local/state/depot/run-history (mũi tên ↓ hoặc bấm ô để chọn lại).
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+HIST = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')), 'depot', 'run-history')
+HIST_MAX = 20
+
+
+def first(*names):
+    """Lệnh đầu tiên có trong máy (mỗi tên có thể kèm đối số)."""
+    for n in names:
+        if shutil.which(n.split()[0]):
+            return n
+    return None
+
+
+def terminal():
+    return first('xfce4-terminal', 'x-terminal-emulator', 'xterm')
+
+
+def filemgr():
+    return first('thunar', 'exo-open --launch FileManager', 'xdg-open')
+
+
+# Lệnh quen của Windows → việc tương ứng trên Depot. Giá trị: hàm trả về lệnh (hoặc None nếu máy chưa có app đó),
+# kèm tên app nên cài để báo cho người dùng.
+ALIASES = {
+    'cmd': (terminal, 'Terminal'), 'cmd.exe': (terminal, 'Terminal'), 'powershell': (terminal, 'Terminal'),
+    'pwsh': (terminal, 'Terminal'), 'wt': (terminal, 'Terminal'), 'terminal': (terminal, 'Terminal'),
+    'explorer': (filemgr, 'trình quản lý tệp'), 'explorer.exe': (filemgr, 'trình quản lý tệp'),
+    'control': (lambda: first('xfce4-settings-manager'), 'Cài đặt'),
+    'control panel': (lambda: first('xfce4-settings-manager'), 'Cài đặt'),
+    'ms-settings:': (lambda: first('xfce4-settings-manager'), 'Cài đặt'),
+    'settings': (lambda: first('xfce4-settings-manager'), 'Cài đặt'),
+    'notepad': (lambda: first('mousepad', 'gedit', 'xed'), 'Mousepad'),
+    'notepad.exe': (lambda: first('mousepad', 'gedit', 'xed'), 'Mousepad'),
+    'write': (lambda: first('libreoffice --writer', 'mousepad'), 'trình soạn thảo'),
+    'wordpad': (lambda: first('libreoffice --writer', 'mousepad'), 'trình soạn thảo'),
+    'calc': (lambda: first('galculator', 'gnome-calculator', 'mate-calc', 'xcalc'), 'Máy tính (galculator)'),
+    'calc.exe': (lambda: first('galculator', 'gnome-calculator', 'mate-calc', 'xcalc'), 'Máy tính (galculator)'),
+    'taskmgr': (lambda: first('xfce4-taskmanager'), 'Quản lý tác vụ'),
+    'regedit': (lambda: first('xfce4-settings-editor'), 'Trình sửa thiết lập'),
+    'msconfig': (lambda: first('xfce4-session-settings'), 'Phiên và khởi động'),
+    'devmgmt.msc': (lambda: first('depot-drivers'), 'Driver phần cứng'),
+    'ncpa.cpl': (lambda: first('nm-connection-editor'), 'Kết nối mạng'),
+    'appwiz.cpl': (lambda: first('depot-programs', 'depot-software', 'gnome-software'), 'Chương trình và tính năng'),
+    'programs': (lambda: first('depot-programs'), 'Chương trình và tính năng'),
+    'desk.cpl': (lambda: first('xfce4-display-settings'), 'Màn hình'),
+    'mmsys.cpl': (lambda: first('pavucontrol'), 'Âm lượng'), 'sndvol': (lambda: first('pavucontrol'), 'Âm lượng'),
+    'main.cpl': (lambda: first('xfce4-mouse-settings'), 'Chuột và touchpad'),
+    'timedate.cpl': (lambda: first('depot-region'), 'Ngôn ngữ và ngày giờ'),
+    'intl.cpl': (lambda: first('depot-region'), 'Ngôn ngữ và ngày giờ'),
+    'powercfg.cpl': (lambda: first('depot-power', 'xfce4-power-manager-settings'), 'Chế độ pin'),
+    'bthprops.cpl': (lambda: first('blueman-manager'), 'Bluetooth'),
+    'winver': (lambda: first('depot-about'), 'Giới thiệu máy này'),
+    'msinfo32': (lambda: first('depot-about'), 'Giới thiệu máy này'),
+    'dxdiag': (lambda: first('depot-about'), 'Giới thiệu máy này'),
+    'diskmgmt.msc': (lambda: first('gparted', 'gnome-disks'), 'GParted'),
+    'snippingtool': (lambda: first('xfce4-screenshooter'), 'Chụp màn hình'),
+    'charmap': (lambda: first('gucharmap'), 'Bảng ký tự (gucharmap)'),
+    'osk': (lambda: first('onboard'), 'Bàn phím ảo (onboard)'),
+    'mspaint': (lambda: first('drawing', 'pinta', 'kolourpaint', 'gimp'), 'ứng dụng vẽ (Drawing)'),
+    'chrome': (lambda: first('google-chrome', 'chromium'), 'Google Chrome'),
+    'firefox': (lambda: first('firefox-esr', 'firefox'), 'Firefox'),
+    'msedge': (lambda: first('exo-open --launch WebBrowser', 'xdg-open about:blank'), 'trình duyệt'),
+    'iexplore': (lambda: first('exo-open --launch WebBrowser', 'xdg-open about:blank'), 'trình duyệt'),
+    'logoff': (lambda: first('xfce4-session-logout --logout'), 'Đăng xuất'),
+    'shutdown': (lambda: first('xfce4-session-logout'), 'Tắt máy'),
+    'shutdown /s': (lambda: first('xfce4-session-logout --halt'), 'Tắt máy'),
+    'shutdown /r': (lambda: first('xfce4-session-logout --reboot'), 'Khởi động lại'),
+    'shutdown /l': (lambda: first('xfce4-session-logout --logout'), 'Đăng xuất'),
+    'lock': (lambda: first('xflock4'), 'Khoá màn hình'),
+    'wuapp': (lambda: first('depot-software', 'gnome-software'), 'Phần mềm'),
+    'ms-settings:windowsupdate': (lambda: first('depot-software', 'gnome-software'), 'Phần mềm'),
+    'unikey': (lambda: first('depot-unikey'), 'Unikey'),
+    'layout': (lambda: first('depot-layout'), 'Bố cục desktop'),
+}
+
+# biến môi trường và thư mục kiểu Windows
+WINVARS = {
+    '%temp%': '/tmp', '%tmp%': '/tmp', '%userprofile%': '~', '%homepath%': '~', '%appdata%': '~/.config',
+    '%localappdata%': '~/.local/share', '%programfiles%': '/usr/share/applications', '%windir%': '/', '%systemroot%': '/',
+}
+USERDIRS = {
+    'desktop': 'DESKTOP', 'downloads': 'DOWNLOAD', 'documents': 'DOCUMENTS', 'pictures': 'PICTURES', 'music': 'MUSIC',
+    'videos': 'VIDEOS', 'tải về': 'DOWNLOAD', 'tài liệu': 'DOCUMENTS', 'hình ảnh': 'PICTURES', 'nhạc': 'MUSIC',
+    'video': 'VIDEOS', 'màn hình nền': 'DESKTOP',
+}
+URL_RE = re.compile(r'^(https?://|ftp://|mailto:|www\.)\S+$|^[\w-]+(\.[\w-]+)*\.(com|net|org|vn|io|dev|app|edu|gov|info|me|tv|co)(/\S*)?$', re.I)
+
+
+def user_dir(kind):
+    try:
+        out = subprocess.run(['xdg-user-dir', kind], capture_output=True, text=True, timeout=3).stdout.strip()
+        return out if out and os.path.isdir(out) else None
+    except Exception:
+        return None
+
+
+def find_app(text):
+    """App trong menu có tên chứa chuỗi gõ vào (không phân biệt hoa thường). Trả (tên, id .desktop)."""
+    try:
+        import gi
+        gi.require_version('Gio', '2.0')
+        from gi.repository import Gio
+    except Exception:
+        return None
+    t = text.casefold()
+    best = None
+    for a in Gio.AppInfo.get_all():
+        if not a.should_show():
+            continue
+        names = [a.get_display_name() or '', a.get_name() or '', (a.get_id() or '').rsplit('.desktop', 1)[0]]
+        low = [n.casefold() for n in names]
+        if t in low:
+            return names[0], a.get_id()
+        if best is None and any(t in n for n in low):
+            best = (names[0], a.get_id())
+    return best
+
+
+def resolve(text):
+    """Trả (loại, giá trị, mô tả). loại: 'cmd' (list argv) | 'open' (đường dẫn / URL) | 'app' (id .desktop) | 'none'."""
+    raw = text.strip()
+    if not raw:
+        return 'none', None, 'Chưa gõ gì.'
+    low = raw.casefold()
+    # (1) lệnh quen của Windows — khớp cả chuỗi, rồi khớp từ đầu tiên (bỏ đuôi .exe)
+    for cand in (low, low.split()[0], re.sub(r'\.exe$', '', low.split()[0])):
+        if cand in ALIASES:
+            fn, label = ALIASES[cand]
+            cmd = fn()
+            if cmd:
+                return 'cmd', shlex.split(cmd), '%s → %s' % (cand, label)
+            return 'none', None, 'Máy chưa có %s. Mở “Phần mềm” để cài.' % label
+    if low in WINVARS:
+        return 'open', os.path.expanduser(WINVARS[low]), raw
+    if low in USERDIRS:
+        d = user_dir(USERDIRS[low])
+        if d:
+            return 'open', d, raw
+    # ổ kiểu Windows: C: hoặc C:\ → gốc hệ thống tệp; \\máy\thư-mục → smb://
+    if re.match(r'^[a-z]:[\\/]?$', low):
+        return 'open', '/', 'Linux không chia ổ C:, D: — mở thư mục gốc /'
+    if raw.startswith('\\\\'):
+        return 'open', 'smb://' + raw[2:].replace('\\', '/'), raw
+    # (2) địa chỉ web
+    if URL_RE.match(raw):
+        url = raw if re.match(r'^[a-z][a-z0-9+.-]*:', raw, re.I) else 'https://' + raw
+        return 'open', url, url
+    # (3) đường dẫn có thật
+    p = os.path.expanduser(os.path.expandvars(raw))
+    if raw.startswith(('~', '/', './', '../')) or os.path.sep in raw:
+        if os.path.exists(p):
+            return 'open', os.path.abspath(p), p
+        if raw.startswith(('~', '/')):
+            return 'none', None, 'Không có đường dẫn “%s”.' % raw
+    if raw == '.':
+        return 'open', os.path.expanduser('~'), '~'
+    # (4) lệnh có trong PATH
+    try:
+        argv = shlex.split(raw)
+    except ValueError:
+        argv = raw.split()
+    if argv and shutil.which(argv[0]):
+        return 'cmd', argv, raw
+    # (5) tên app trong menu
+    app = find_app(raw)
+    if app:
+        return 'app', app[1], app[0]
+    return 'none', None, 'Không tìm thấy “%s”. Kiểm tra lại tên, hoặc bấm phím Windows rồi tìm trong menu Start.' % raw
+
+
+def run(kind, value):
+    env = dict(os.environ)
+    if kind == 'cmd':
+        subprocess.Popen(value, start_new_session=True, env=env, cwd=os.path.expanduser('~'),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif kind == 'open':
+        subprocess.Popen(['xdg-open', value], start_new_session=True, env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif kind == 'app':
+        subprocess.Popen(['gtk-launch', value], start_new_session=True, env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        return False
+    return True
+
+
+def load_history():
+    try:
+        with open(HIST, encoding='utf-8') as f:
+            return [l.rstrip('\n') for l in f if l.strip()][:HIST_MAX]
+    except OSError:
+        return []
+
+
+def save_history(text):
+    items = [text] + [h for h in load_history() if h != text]
+    try:
+        os.makedirs(os.path.dirname(HIST), exist_ok=True)
+        with open(HIST, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(items[:HIST_MAX]) + '\n')
+    except OSError:
+        pass
+
+
+def gui():
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('Gdk', '3.0')
+    from gi.repository import Gdk, GLib, Gtk
+
+    win = Gtk.Window(title='Chạy')
+    win.set_icon_name('system-run')
+    win.set_resizable(False)
+    win.set_border_width(16)
+    win.set_keep_above(True)
+    win.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    win.add(box)
+
+    top = Gtk.Box(spacing=14)
+    icon = Gtk.Image.new_from_icon_name('system-run', Gtk.IconSize.DIALOG)
+    icon.set_valign(Gtk.Align.START)
+    top.pack_start(icon, False, False, 0)
+    intro = Gtk.Label(label='Gõ tên chương trình, thư mục, tệp hoặc địa chỉ web,\nDepot sẽ mở giúp bạn.', xalign=0)
+    top.pack_start(intro, True, True, 0)
+    box.pack_start(top, False, False, 0)
+
+    row = Gtk.Box(spacing=10)
+    row.pack_start(Gtk.Label(label='Mở:'), False, False, 0)
+    combo = Gtk.ComboBoxText.new_with_entry()
+    for h in load_history():
+        combo.append_text(h)
+    entry = combo.get_child()
+    entry.set_width_chars(38)
+    entry.set_activates_default(True)
+    hist = load_history()
+    if hist:
+        entry.set_text(hist[0])
+        entry.select_region(0, -1)
+    row.pack_start(combo, True, True, 0)
+    box.pack_start(row, False, False, 0)
+
+    note = Gtk.Label(xalign=0)
+    note.set_line_wrap(True)
+    note.set_max_width_chars(52)
+    note.get_style_context().add_class('dim-label')
+    note.set_markup('<small>Lệnh quen của Windows cũng dùng được: cmd, explorer, control, notepad, calc, taskmgr…</small>')
+    box.pack_start(note, False, False, 0)
+
+    btns = Gtk.Box(spacing=8)
+    btns.set_halign(Gtk.Align.END)
+    b_ok = Gtk.Button(label='OK')
+    b_cancel = Gtk.Button(label='Huỷ')
+    b_browse = Gtk.Button(label='Duyệt…')
+    for b in (b_ok, b_cancel, b_browse):
+        b.set_size_request(88, -1)
+        btns.pack_start(b, False, False, 0)
+    b_ok.set_can_default(True)
+    box.pack_start(btns, False, False, 0)
+
+    def go(*_):
+        text = entry.get_text().strip()
+        kind, value, desc = resolve(text)
+        if kind == 'none':
+            note.set_markup('<span foreground="#ff6b6b">%s</span>' % GLib.markup_escape_text(desc))
+            entry.grab_focus()
+            return
+        save_history(text)
+        try:
+            run(kind, value)
+        except OSError as e:
+            note.set_markup('<span foreground="#ff6b6b">Không chạy được: %s</span>' % GLib.markup_escape_text(str(e)))
+            return
+        Gtk.main_quit()
+
+    def browse(*_):
+        d = Gtk.FileChooserDialog(title='Duyệt', parent=win, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons('Huỷ', Gtk.ResponseType.CANCEL, 'Mở', Gtk.ResponseType.OK)
+        d.set_current_folder(os.path.expanduser('~'))
+        if d.run() == Gtk.ResponseType.OK:
+            entry.set_text(d.get_filename() or '')
+            entry.set_position(-1)
+        d.destroy()
+        entry.grab_focus()
+
+    def on_key(_w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        return False
+
+    b_ok.connect('clicked', go)
+    b_cancel.connect('clicked', lambda *_: Gtk.main_quit())
+    b_browse.connect('clicked', browse)
+    win.connect('key-press-event', on_key)
+    win.connect('destroy', Gtk.main_quit)
+    win.show_all()
+    b_ok.grab_default()
+    entry.grab_focus()
+
+    # như Windows: hộp nằm góc dưới trái, ngay trên taskbar (bố cục Windows); bố cục macOS thì giữa màn
+    try:
+        with open(os.path.expanduser('~/.config/depot/layout')) as f:
+            lay = f.read().strip()
+    except OSError:
+        lay = 'macos'
+    if lay.startswith('windows'):
+        def place(*_):
+            # đặt sau khi cửa sổ đã có kích thước thật (kể cả khung của trình quản lý cửa sổ): get_size trước lúc hiện
+            # trả chiều cao thiếu, hộp sẽ lấn xuống taskbar
+            disp = Gdk.Display.get_default()
+            mon = disp.get_primary_monitor() or disp.get_monitor(0)
+            area = mon.get_workarea()
+            gw = win.get_window()
+            if gw is None:
+                return False
+            fr = gw.get_frame_extents()
+            win.move(area.x + 12, area.y + area.height - fr.height - 12)
+            return False
+        win.connect('map-event', lambda *_: GLib.timeout_add(60, place) and False)
+        GLib.timeout_add(250, place)
+    else:
+        win.set_position(Gtk.WindowPosition.CENTER)
+    win.present()
+    Gtk.main()
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] == '--resolve':
+        kind, value, desc = resolve(' '.join(a[1:]))
+        print('%s\t%s\t%s' % (kind, ' '.join(value) if isinstance(value, list) else (value or ''), desc))
+        return 0 if kind != 'none' else 1
+    if a and a[0] == '--exec':
+        kind, value, desc = resolve(' '.join(a[1:]))
+        if kind == 'none':
+            print(desc, file=sys.stderr)
+            return 1
+        run(kind, value)
+        return 0
+    if a and a[0] in ('-h', '--help'):
+        print('dùng: depot-run [--resolve CHUỖI | --exec CHUỖI]')
+        return 0
+    gui()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

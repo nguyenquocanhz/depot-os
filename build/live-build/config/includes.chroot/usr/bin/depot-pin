@@ -1,0 +1,147 @@
+#!/bin/sh
+# Depot OS — ghim / bỏ ghim app trên taskbar (bố cục Windows) hoặc dock (bố cục macOS), từ menu chuột phải của app
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-pin ID.desktop        đang ghim thì bỏ ghim, chưa ghim thì ghim (mục chuột phải "Ghim / bỏ ghim trên taskbar")
+#   depot-pin add|remove ID.desktop
+#   depot-pin list              in các app đang ghim
+#   depot-pin --refresh         (root) gắn mục chuột phải vào file .desktop của mọi app hiện trong menu;
+#                               apt tự gọi sau mỗi lần cài/gỡ (/etc/apt/apt.conf.d/90depot-uninstall)
+# Bố cục Windows 10 / 11: app ghim nằm trong ~/.config/xfce4/panel/docklike-3.rc (plugin docklike của taskbar).
+#   Docklike chỉ đọc file này lúc khởi động và ghi đè lúc thoát, nên: tắt panel → sửa file → bật lại panel
+#   (taskbar chớp khoảng một giây; app đang mở không bị đóng). Chuột phải vào icon app đang chạy trên taskbar
+#   cũng có mục "Pinned" của chính docklike — hai đường ghi cùng một file.
+# Bố cục macOS: dock Plank — mỗi app ghim là một file ~/.config/plank/dock1/launchers/TÊN.dockitem; Plank tự thấy
+#   file mới / file bị xoá, không phải chạy lại.
+APPS=/usr/share/applications
+ACTION=depot-pin
+RC="$HOME/.config/xfce4/panel/docklike-3.rc"
+PLANK="$HOME/.config/plank/dock1/launchers"
+
+layout() { cat "$HOME/.config/depot/layout" 2>/dev/null || echo macos; }
+
+key() {
+    awk -v k="$1" '/^\[/ { g = $0 } g == "[Desktop Entry]" && index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$2"
+}
+
+listed() {
+    awk '/^\[/ { g = $0 } g == "[Desktop Entry]" && /^(NoDisplay|Hidden)=true/ { bad = 1 }
+         g == "[Desktop Entry]" && /^Type=/ && $0 != "Type=Application" { bad = 1 }
+         END { exit bad }' "$1"
+}
+
+# file .desktop của ID: bản của người dùng đứng trước bản hệ thống
+file_of() {
+    for d in "$HOME/.local/share/applications" /usr/local/share/applications "$APPS" /var/lib/flatpak/exports/share/applications; do
+        [ -f "$d/$1" ] && { echo "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+name_of() { n=$(key 'Name[vi]' "$1"); [ -n "$n" ] || n=$(key Name "$1"); echo "${n:-$(basename "$1" .desktop)}"; }
+
+# ---- docklike (bố cục Windows): dòng "pinned=…" trong nhóm [user]. depot-layout ghi đường dẫn đầy đủ
+# (/usr/share/applications/a.desktop;…) nhưng docklike lúc thoát tự ghi lại thành ID trần (a;b;…) — nên mọi phép so
+# và mọi lần ghi ở đây đều dùng ID trần: tên file bỏ thư mục, bỏ đuôi .desktop, không phân biệt hoa thường.
+id_of() { b=${1##*/}; echo "${b%.desktop}"; }
+pinned_docklike() { sed -n 's/^pinned=//p' "$RC" 2>/dev/null | tr ';' '\n' | grep . | while read -r e; do id_of "$e"; done; }
+
+write_docklike() {   # đọc danh sách (mỗi dòng một đường dẫn) từ stdin, ghi lại RC, giữ các khoá khác
+    new=$(tr '\n' ';')
+    mkdir -p "$(dirname "$RC")"
+    if grep -qs '^pinned=' "$RC"; then
+        awk -v p="$new" '/^pinned=/ { print "pinned=" p; next } { print }' "$RC" > "$RC.tmp" && mv "$RC.tmp" "$RC"
+    elif [ -s "$RC" ]; then
+        printf 'pinned=%s\n' "$new" >> "$RC"
+    else
+        printf '[user]\npinned=%s\n' "$new" > "$RC"
+    fi
+}
+
+# sửa RC khi panel đã tắt (docklike ghi đè file lúc thoát), rồi bật lại
+with_panel_off() {
+    running=$(pgrep -x xfce4-panel)
+    [ -n "$running" ] && { xfce4-panel --quit 2>/dev/null; sleep 0.6; }
+    "$@"
+    [ -n "$running" ] && (setsid xfce4-panel >/dev/null 2>&1 &)
+    return 0
+}
+
+is_pinned() {   # $1 đường dẫn file .desktop
+    case "$(layout)" in
+        windows*) pinned_docklike | grep -qixF "$(id_of "$1")" ;;
+        *) [ -e "$PLANK/$(basename "$1" .desktop).dockitem" ] ;;
+    esac
+}
+
+# write_docklike đọc hết danh sách vào bộ nhớ rồi mới ghi file, nên đọc và ghi cùng một file trong một ống lệnh là an toàn
+add_docklike() { { pinned_docklike; id_of "$1"; } | awk '!seen[tolower($0)]++' | write_docklike; }
+remove_docklike() { pinned_docklike | grep -vixF "$(id_of "$1")" | write_docklike; }
+
+do_add() {
+    case "$(layout)" in
+        windows*) with_panel_off add_docklike "$1" ;;
+        *) mkdir -p "$PLANK"; printf '[PlankDockItemPreferences]\nLauncher=file://%s\n' "$1" > "$PLANK/$(basename "$1" .desktop).dockitem" ;;
+    esac
+}
+
+do_remove() {
+    case "$(layout)" in
+        windows*) with_panel_off remove_docklike "$1" ;;
+        *) rm -f "$PLANK/$(basename "$1" .desktop).dockitem" ;;
+    esac
+}
+
+where() { case "$(layout)" in windows*) echo taskbar ;; *) echo dock ;; esac; }
+
+say() { command -v notify-send >/dev/null && notify-send -a "Depot OS" -i "${3:-view-pin}" -t 4000 "$1" "$2" 2>/dev/null; echo "$1"; }
+
+toggle() {   # $1 add|remove|toggle, $2 ID
+    id=$(basename "$2"); id=${id%.desktop}.desktop
+    f=$(file_of "$id") || { say "Không tìm thấy app $id" "" dialog-error; exit 1; }
+    name=$(name_of "$f"); icon=$(key Icon "$f")
+    act=$1
+    if [ "$act" = toggle ]; then if is_pinned "$f"; then act=remove; else act=add; fi; fi
+    case "$act" in
+        add)
+            if is_pinned "$f"; then say "$name đã ghim trên $(where) rồi" "" "$icon"; return 0; fi
+            do_add "$f"; say "Đã ghim $name lên $(where)" "Chuột phải vào app, chọn lại mục này để bỏ ghim." "$icon" ;;
+        remove)
+            if ! is_pinned "$f"; then say "$name chưa ghim trên $(where)" "" "$icon"; return 0; fi
+            do_remove "$f"; say "Đã bỏ ghim $name khỏi $(where)" "" "$icon" ;;
+    esac
+}
+
+# ---- gắn mục chuột phải (cùng cách với depot-uninstall): thêm "depot-pin;" vào Actions= + nhóm [Desktop Action depot-pin]
+tag() {
+    f=$1; id=$(basename "$f")
+    grep -q "^\[Desktop Action $ACTION\]" "$f" && return
+    awk -v a="$ACTION" '
+        function add() { if (!done) { print "Actions=" a ";"; done = 1 } }
+        /^\[/ { if (g == "[Desktop Entry]" && !done) add(); g = $0 }
+        g == "[Desktop Entry]" && /^Actions=/ { sub(/;?[ \t]*$/, ";" a ";"); done = 1 }
+        { print }
+        END { if (!done) add() }' "$f" > "$f.depot-tmp" || { rm -f "$f.depot-tmp"; return; }
+    printf '\n[Desktop Action %s]\nName=Pin / unpin on taskbar\nName[vi]=Ghim / bỏ ghim trên taskbar\nIcon=view-pin\nExec=depot-pin %s\n' \
+        "$ACTION" "$id" >> "$f.depot-tmp"
+    cat "$f.depot-tmp" > "$f"; rm -f "$f.depot-tmp"
+}
+
+refresh() {
+    [ "$(id -u)" = 0 ] || { echo "!! cần root" >&2; exit 1; }
+    for f in "$APPS"/*.desktop; do
+        [ -f "$f" ] && listed "$f" && tag "$f"
+    done
+    return 0
+}
+
+case "${1:-}" in
+    --refresh) refresh ;;
+    list)
+        case "$(layout)" in
+            windows*) pinned_docklike ;;
+            *) for d in "$PLANK"/*.dockitem; do [ -f "$d" ] && sed -n 's|^Launcher=file://||p' "$d"; done ;;
+        esac ;;
+    add | remove) [ -n "${2:-}" ] || { echo "dùng: depot-pin $1 ID.desktop" >&2; exit 2; }; toggle "$1" "$2" ;;
+    '' | -h | --help) echo "dùng: depot-pin ID.desktop | add ID | remove ID | list | --refresh" >&2; exit 2 ;;
+    *) toggle toggle "$1" ;;
+esac
