@@ -104,6 +104,15 @@ chk "mục chạy mặc định: quiet splash + loglevel=3 (không lọt dòng l
 chk "máy đã cài: GRUB_CMDLINE_LINUX_DEFAULT có loglevel=3" "grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash loglevel=3\"' $S/etc/default/grub"
 chk "GRUB máy đã cài: vẫn có ảnh nền dự phòng khi không nạp được theme" "grep -q '^GRUB_BACKGROUND=\"/usr/share/images/depot/grub.png\"' $S/etc/default/grub"
 
+echo "== WEBKITGTK trong ISO (v0.24.1: Telegram ở phiên USB báo 'Please install WebKitGTK' khi mở Mini Game):"
+unsquashfs -f -d $S $SQ usr/lib/x86_64-linux-gnu/webkit2gtk-4.1 >/dev/null 2>&1
+LS=$(unsquashfs -l $SQ usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0 usr/lib/x86_64-linux-gnu/libjavascriptcoregtk-4.1.so.0 usr/lib/x86_64-linux-gnu/libgtk-3.so.0 2>/dev/null)
+chk "thư viện Telegram tự nạp có trong ISO: libwebkit2gtk-4.1.so.0 (+ javascriptcore, gtk-3)" "echo \"\$LS\" | grep -q 'libwebkit2gtk-4.1.so.0\$' && echo \"\$LS\" | grep -q 'libjavascriptcoregtk-4.1.so.0\$' && echo \"\$LS\" | grep -q 'libgtk-3.so.0\$'"
+for p in libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 bubblewrap xdg-dbus-proxy gstreamer1.0-libav gstreamer1.0-plugins-good; do chk "gói $p (WebKitGTK cần)" "installed $p"; done
+chk "tiến trình con của WebKit (WebKitWebProcess, WebKitNetworkProcess) chạy được" "[ -x $S/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess ] && [ -x $S/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess ]"
+chk "cài gọn: không kéo gstreamer1.0-plugins-bad, không thêm bản GTK 4 (libwebkitgtk-6.0-4)" "! installed gstreamer1.0-plugins-bad && ! installed libwebkitgtk-6.0-4"
+chk "hook 0728 có trong repo, đúng cú pháp" "sh -n config/hooks/normal/0728-depot-webkit.hook.chroot && grep -q 'no-install-recommends' config/hooks/normal/0728-depot-webkit.hook.chroot"
+
 echo
 echo "v0.24: $PASS đạt, $FAIL lỗi"
 [ $FAIL = 0 ]

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Depot OS — WebKitGTK có sẵn trong ISO: Mini App / Mini Game, thanh toán, đăng nhập web của Telegram chạy được
+# ngay cả ở phiên USB và với bản Telegram tải từ telegram.org.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#
+# Telegram Desktop không mang theo trình duyệt: lúc mở Mini App nó tự nạp (dlopen) libwebkit2gtk-4.1.so.0 của hệ thống
+# (hoặc libwebkitgtk-6.0.so.4 / libwebkit2gtk-4.0.so.37); không có thì báo
+#   "Please install WebKitGTK (webkit2gtk-4.1/webkit2gtk-4.0) from your package manager."
+# Trước v0.24.1 thư viện này chỉ tới máy ĐÃ CÀI, nhờ gói telegram-desktop của Debian "Recommends" nó
+# (depot-install-apps); phiên USB không có — người dùng chạy Telegram từ USB báo lỗi trên (12/11/2026).
+# Cũng dùng được cho mọi app GTK nhúng trang web (đăng nhập tài khoản mạng, trợ giúp…).
+#
+# Cài KHÔNG kèm Recommends: bộ gstreamer1.0-plugins-bad mà WebKit gợi ý kéo thêm ~50 gói (onnxruntime, imagemagick,
+# ghostscript…), gấp đôi dung lượng. Chỉ thêm gstreamer1.0-libav (0,1 MB — libav đã có trong ISO) để trang phát
+# được video / âm thanh H.264, AAC, MP3. Tổng ~33 MB tải, ~138 MB trên đĩa.
+# Chọn bản 4.1 (GTK 3), không thêm bản 6.0 (GTK 4): đúng bản gói Telegram của Debian kéo về lúc cài, nên phiên USB và
+# máy đã cài chạy cùng một đường; có cả hai thì Telegram ưu tiên 6.0 và đi đường nhúng khác (qua compositor Wayland lồng).
+# Lỗi tải gói KHÔNG làm hỏng build: ISO ra thiếu WebKitGTK, scripts/check-v24.sh báo trượt để biết mà build lại.
+set -u
+PKGS="libwebkit2gtk-4.1-0 gstreamer1.0-libav"
+export DEBIAN_FRONTEND=noninteractive
+# shellcheck disable=SC2086
+if ! apt-get install -y --no-install-recommends $PKGS; then
+    echo "!! Depot webkit: cài $PKGS lỗi — ISO này KHÔNG có WebKitGTK (Telegram Mini App sẽ báo thiếu)"
+    exit 0
+fi
+lib=$(ls /usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0 2>/dev/null)
+if [ -z "$lib" ]; then
+    echo "!! Depot webkit: cài xong nhưng không thấy libwebkit2gtk-4.1.so.0"
+    exit 0
+fi
+echo ">> Depot webkit: WebKitGTK $(dpkg-query -W -f='${Version}' libwebkit2gtk-4.1-0) có trong ISO ($lib)"
