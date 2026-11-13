@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+# Depot OS — "Chương trình và tính năng": xem chương trình đã cài, gỡ, cài bằng tên gói, cài từ tệp .deb —
+# một chỗ như Programs and Features của Windows, thay cho việc gõ sudo apt install / apt list / dpkg -i.
+# By WrenEvil.tech & nguyenquocanhz (nqatech)
+#   depot-programs                 mở cửa sổ
+#   depot-programs TỆP.deb         hộp cài tệp .deb (bấm đúp tệp .deb trong trình quản lý tệp gọi lệnh này)
+#   depot-programs list [--all]    in bảng ra terminal: tên, gói, phiên bản, dung lượng, ngày cài
+#                                  (mặc định: chương trình trong menu; --all: thêm các ô Cài đặt, công cụ của Depot,
+#                                  và mọi gói người dùng tự cài)
+# Việc cần quyền quản trị đi qua pkexec /usr/libexec/depot-programs-helper (cài gói, cài .deb, gỡ gói).
+# Gỡ một app có trong menu thì gọi depot-uninstall — cùng hộp hỏi và cùng danh sách gói hệ thống được bảo vệ với mục
+# chuột phải "Gỡ cài đặt". Nhẹ: không chạy nền, không PackageKit; GNOME Software ("Phần mềm", ~250 MB RAM) vẫn là chỗ
+# duyệt kho app có hình ảnh và Flatpak, còn đây là chỗ quản lý nhanh và chạy được cả ở phiên USB.
+import glob
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+
+APPS = '/usr/share/applications'
+HELPER = '/usr/libexec/depot-programs-helper'
+C_ENV = dict(os.environ, LC_ALL='C')
+
+
+def out(cmd, env=None, timeout=60):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout).stdout
+    except Exception:
+        return ''
+
+
+def human(kb):
+    kb = int(kb or 0)
+    if kb >= 1024 * 1024:
+        return '%.1f GB' % (kb / 1048576.0)
+    if kb >= 1024:
+        return '%.1f MB' % (kb / 1024.0)
+    return '%d KB' % kb if kb else ''
+
+
+def dpkg_packages():
+    """{gói: (phiên bản, KB, mô tả ngắn)} của các gói đang cài."""
+    res = {}
+    fmt = '${Package}\t${Version}\t${Installed-Size}\t${db:Status-Abbrev}\t${binary:Summary}\n'
+    for line in out(['dpkg-query', '-W', '-f=' + fmt]).splitlines():
+        p = line.split('\t')
+        if len(p) >= 5 and p[3].startswith('ii'):
+            res.setdefault(p[0], (p[1], int(p[2] or 0), p[4]))
+    return res
+
+
+def desktop_owners():
+    """{đường dẫn .desktop: gói} — đọc danh sách file của dpkg, không gọi dpkg -S từng file."""
+    res = {}
+    pat = re.compile(r'^' + re.escape(APPS) + r'/[^/]+\.desktop$')
+    for lst in glob.glob('/var/lib/dpkg/info/*.list'):
+        pkg = os.path.basename(lst)[:-5].split(':')[0]
+        try:
+            with open(lst, encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line.startswith(APPS) and pat.match(line):
+                        res[line] = pkg
+        except OSError:
+            pass
+    return res
+
+
+def install_time(pkg):
+    for cand in ('/var/lib/dpkg/info/%s.list' % pkg, '/var/lib/dpkg/info/%s:amd64.list' % pkg):
+        try:
+            return int(os.path.getmtime(cand))
+        except OSError:
+            continue
+    return 0
+
+
+def protect_re():
+    """Danh sách gói hệ thống không cho gỡ: lấy đúng dòng PROTECT của depot-uninstall để hai nơi luôn khớp."""
+    try:
+        with open('/usr/bin/depot-uninstall', encoding='utf-8') as f:
+            m = re.search(r"^PROTECT='(.*)'\s*$", f.read(), re.M)
+        if m:
+            return re.compile(m.group(1))
+    except OSError:
+        pass
+    return re.compile(r'^(xfce4.*|xfwm4|thunar.*|lightdm.*|network-manager.*|apt|dpkg|systemd.*|sudo|pkexec|linux-image-.*|grub.*)$')
+
+
+def collect(show_all=False):
+    """Danh sách dòng: dict(kind, id, name, icon, pkg, version, kb, ts, summary)."""
+    import gi
+    gi.require_version('Gio', '2.0')
+    from gi.repository import Gio
+    pkgs = dpkg_packages()
+    owners = desktop_owners()
+    rows, seen_pkgs = [], set()
+    for app in Gio.AppInfo.get_all():
+        if not app.should_show():
+            continue
+        fn = app.get_filename() or ''
+        if not (fn.startswith(APPS + '/') or fn.startswith('/usr/local/share/applications/')):
+            continue        # app Flatpak / app riêng của người dùng: không phải gói dpkg
+        real = APPS + '/' + os.path.basename(fn)
+        pkg = owners.get(real, '')
+        ver, kb, summ = pkgs.get(pkg, ('', 0, ''))
+        if pkg:
+            seen_pkgs.add(pkg)
+        # Như Programs and Features của Windows: mặc định chỉ hiện CHƯƠNG TRÌNH. Các ô của Cài đặt (Bàn phím, Âm thanh…)
+        # và công cụ riêng của Depot (file .desktop không thuộc gói nào, không phải web app) là phần của hệ thống —
+        # chỉ hiện khi bật "Hiện cả…".
+        cats = (app.get_categories() or '').split(';') if hasattr(app, 'get_categories') else []
+        webapp = 'depot-webapp' in (app.get_commandline() or '')
+        system = 'Settings' in cats or 'X-XFCE-SettingsDialog' in cats or (not pkg and not webapp)
+        if system and not show_all:
+            continue
+        note = '' if pkg else ('(web app)' if webapp else '(thành phần của Depot OS)')
+        rows.append(dict(kind='app', id=app.get_id() or os.path.basename(fn), name=app.get_display_name() or app.get_name(),
+                         icon=app.get_icon(), pkg=pkg, note=note, version=ver, kb=kb, ts=install_time(pkg) if pkg else 0,
+                         summary=app.get_description() or summ))
+    # một gói có thể mang nhiều mục menu (Thunar + "Đổi tên hàng loạt", Rofi + "Rofi Theme Selector"…): mỗi gói một
+    # dòng như Windows — giữ mục có ID trùng tên gói, không có thì mục đứng đầu theo tên
+    best = {}
+    for r in sorted(rows, key=lambda r: r['name'].casefold()):
+        if r['pkg']:
+            score = 0 if r['pkg'].lower() in r['id'].lower() else 1
+            if r['pkg'] not in best or score < best[r['pkg']][0]:
+                best[r['pkg']] = (score, r)
+    rows = [r for r in rows if not r['pkg'] or best[r['pkg']][1] is r]
+    if show_all:
+        manual = set(out(['apt-mark', 'showmanual']).split())
+        for pkg in sorted(manual - seen_pkgs):
+            if pkg not in pkgs:
+                continue
+            ver, kb, summ = pkgs[pkg]
+            rows.append(dict(kind='pkg', id=pkg, name=pkg, icon=None, pkg=pkg, note='', version=ver, kb=kb,
+                             ts=install_time(pkg), summary=summ))
+    rows.sort(key=lambda r: r['name'].casefold())
+    return rows
+
+
+def cmd_list(show_all):
+    rows = collect(show_all)
+    for r in rows:
+        day = time.strftime('%d/%m/%Y', time.localtime(r['ts'])) if r['ts'] else ''
+        print('\t'.join([r['name'], r['pkg'] or r['note'], r['version'], human(r['kb']), day]))
+    print('%d mục' % len(rows), file=sys.stderr)
+    return 0
+
+
+def deb_info(path):
+    fields = ['Package', 'Version', 'Architecture', 'Maintainer', 'Installed-Size', 'Description']
+    info = {}
+    for f in fields:
+        info[f] = out(['dpkg-deb', '-f', path, f]).strip()
+    return info if info['Package'] else None
+
+
+# ------------------------------------------------------------------ giao diện
+def gui(deb=None):
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('Gio', '2.0')
+    from gi.repository import Gio, GLib, Gtk, Pango
+
+    TITLE = 'Chương trình và tính năng'
+
+    def message(parent, kind, text, secondary='', buttons=Gtk.ButtonsType.OK):
+        d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=kind, buttons=buttons, text=text)
+        if secondary:
+            d.format_secondary_markup(secondary)
+        r = d.run()
+        d.destroy()
+        return r
+
+    def run_helper(parent, title, args, on_done=None):
+        """Chạy helper bằng quyền quản trị, đổ chữ ra cửa sổ theo dõi. on_done(mã_thoát) gọi khi xong."""
+        d = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+        d.set_default_size(760, 420)
+        close = d.add_button('Đóng', Gtk.ResponseType.CLOSE)
+        close.set_sensitive(False)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+        state = Gtk.Label(label='Đang làm… đừng tắt máy.', xalign=0)
+        box.pack_start(state, False, False, 0)
+        tv = Gtk.TextView(editable=False, cursor_visible=False, monospace=True)
+        tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        sw = Gtk.ScrolledWindow()
+        sw.set_shadow_type(Gtk.ShadowType.IN)
+        sw.add(tv)
+        box.pack_start(sw, True, True, 0)
+        buf = tv.get_buffer()
+        cmd = ([] if os.geteuid() == 0 else ['pkexec']) + [HELPER] + list(args)
+        result = {'rc': None}
+
+        def append(text):
+            buf.insert(buf.get_end_iter(), text)
+            tv.scroll_to_mark(buf.create_mark(None, buf.get_end_iter(), False), 0, False, 0, 1)
+            return False
+
+        def finished(rc):
+            result['rc'] = rc
+            if rc == 0:
+                state.set_markup('<b>Xong.</b>')
+            elif rc in (126, 127):
+                state.set_markup('<b>Chưa làm gì</b>: chưa được cấp quyền quản trị.')
+            else:
+                state.set_markup('<b>Có lỗi</b> (mã %d) — xem các dòng phía dưới.' % rc)
+            close.set_sensitive(True)
+            close.grab_focus()
+            return False
+
+        def worker():
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+                for line in p.stdout:
+                    GLib.idle_add(append, line)
+                rc = p.wait()
+            except OSError as e:
+                GLib.idle_add(append, 'Không chạy được: %s\n' % e)
+                rc = 1
+            GLib.idle_add(finished, rc)
+
+        threading.Thread(target=worker, daemon=True).start()
+        d.show_all()
+        while True:
+            r = d.run()
+            if result['rc'] is not None:      # chưa xong thì không cho đóng: apt đang chạy dở
+                break
+        d.destroy()
+        if on_done:
+            on_done(result['rc'])
+        return result['rc']
+
+    def install_deb(parent, path):
+        path = os.path.abspath(path)
+        info = deb_info(path) if os.path.isfile(path) else None
+        if not info:
+            message(parent, Gtk.MessageType.ERROR, 'Không đọc được tệp .deb', GLib.markup_escape_text(path))
+            return None
+        cur = out(['dpkg-query', '-W', '-f=${db:Status-Abbrev}${Version}', info['Package']]).strip()
+        cur = cur[3:] if cur.startswith('ii ') else ''
+        desc = info['Description'].split('\n')[0]
+        lines = ['<b>%s</b>  %s' % (GLib.markup_escape_text(info['Package']), GLib.markup_escape_text(info['Version'])),
+                 GLib.markup_escape_text(desc), '',
+                 'Nhà phát hành: %s' % GLib.markup_escape_text(info['Maintainer'] or 'không ghi'),
+                 'Dung lượng sau khi cài: %s' % (human(info['Installed-Size']) or 'không ghi'),
+                 'Tệp: %s' % GLib.markup_escape_text(path)]
+        if cur:
+            lines.append('Máy đang có bản <b>%s</b> — cài sẽ thay bằng bản trong tệp.' % GLib.markup_escape_text(cur))
+        lines += ['', 'Tệp .deb chạy lệnh bằng quyền quản trị lúc cài. Chỉ cài tệp tải từ nguồn bạn tin.']
+        d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE, text='Cài chương trình này?')
+        d.format_secondary_markup('\n'.join(lines))
+        d.add_button('Thôi', Gtk.ResponseType.CANCEL)
+        d.add_button('Cài', Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        d.set_title(TITLE)
+        r = d.run()
+        d.destroy()
+        if r != Gtk.ResponseType.OK:
+            return None
+        return run_helper(parent, 'Đang cài %s' % info['Package'], ['install-deb', path])
+
+    if deb:                               # bấm đúp tệp .deb: chỉ hộp cài, không mở cửa sổ danh sách
+        install_deb(None, deb)
+        return 0
+
+    win = Gtk.Window(title=TITLE)
+    win.set_icon_name('system-software-install')
+    win.set_default_size(940, 600)
+    root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    root.set_border_width(14)
+    win.add(root)
+
+    head = Gtk.Label(xalign=0)
+    head.set_markup('<span size="large"><b>Gỡ hoặc thay đổi chương trình</b></span>\n'
+                    'Chọn một chương trình rồi bấm <b>Gỡ cài đặt</b>. Cài thêm: bằng tên gói, hoặc từ tệp .deb đã tải về.')
+    root.pack_start(head, False, False, 0)
+
+    bar = Gtk.Box(spacing=8)
+    search = Gtk.SearchEntry()
+    search.set_placeholder_text('Tìm chương trình…')
+    search.set_width_chars(28)
+    bar.pack_start(search, False, False, 0)
+    show_all = Gtk.CheckButton(label='Hiện cả mục Cài đặt, thành phần hệ thống và gói tự cài')
+    bar.pack_start(show_all, False, False, 6)
+    b_deb = Gtk.Button(label='Cài từ tệp .deb…')
+    b_name = Gtk.Button(label='Cài bằng tên gói…')
+    bar.pack_end(b_deb, False, False, 0)
+    bar.pack_end(b_name, False, False, 0)
+    root.pack_start(bar, False, False, 0)
+
+    # cột: icon, tên, gói, phiên bản, dung lượng (chữ), KB, ngày (chữ), giây, loại, id, mô tả
+    store = Gtk.ListStore(Gio.Icon, str, str, str, str, int, str, int, str, str, str)
+    flt = store.filter_new()
+    needle = {'t': ''}
+    flt.set_visible_func(lambda m, it, _d: not needle['t'] or needle['t'] in (m[it][1] or '').casefold()
+                         or needle['t'] in (m[it][2] or '').casefold())
+    srt = Gtk.TreeModelSort(model=flt)
+    view = Gtk.TreeView(model=srt)
+    view.set_tooltip_column(10)
+    view.set_search_column(1)
+
+    col = Gtk.TreeViewColumn('Tên')
+    r_icon = Gtk.CellRendererPixbuf()
+    r_icon.set_property('stock-size', Gtk.IconSize.LARGE_TOOLBAR)
+    col.pack_start(r_icon, False)
+    col.add_attribute(r_icon, 'gicon', 0)
+    r_name = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
+    col.pack_start(r_name, True)
+    col.add_attribute(r_name, 'text', 1)
+    col.set_expand(True)
+    col.set_sort_column_id(1)
+    col.set_resizable(True)
+    view.append_column(col)
+    for title, text_col, sort_col, width in (('Gói', 2, 2, 190), ('Phiên bản', 3, 3, 150),
+                                             ('Dung lượng', 4, 5, 100), ('Ngày cài', 6, 7, 100)):
+        r = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
+        if text_col == 4:
+            r.set_property('xalign', 1.0)
+        c = Gtk.TreeViewColumn(title, r, text=text_col)
+        c.set_sort_column_id(sort_col)
+        c.set_resizable(True)
+        c.set_min_width(width)
+        view.append_column(c)
+    sw = Gtk.ScrolledWindow()
+    sw.set_shadow_type(Gtk.ShadowType.IN)
+    sw.add(view)
+    root.pack_start(sw, True, True, 0)
+
+    foot = Gtk.Box(spacing=8)
+    status = Gtk.Label(xalign=0)
+    status.get_style_context().add_class('dim-label')
+    foot.pack_start(status, True, True, 0)
+    b_refresh = Gtk.Button(label='Làm mới')
+    b_remove = Gtk.Button(label='Gỡ cài đặt')
+    b_remove.get_style_context().add_class('destructive-action')
+    b_remove.set_sensitive(False)
+    foot.pack_end(b_remove, False, False, 0)
+    foot.pack_end(b_refresh, False, False, 0)
+    root.pack_start(foot, False, False, 0)
+
+    fallback = Gio.ThemedIcon.new('package-x-generic')
+
+    def reload(*_):
+        store.clear()
+        total = 0
+        rows = collect(show_all.get_active())
+        seen = set()
+        for r in rows:
+            day = time.strftime('%d/%m/%Y', time.localtime(r['ts'])) if r['ts'] else ''
+            store.append([r['icon'] or fallback, r['name'], r['pkg'] or r['note'], r['version'], human(r['kb']),
+                          r['kb'], day, r['ts'], r['kind'], r['id'], GLib.markup_escape_text(r['summary'] or r['name'])])
+            if r['pkg'] and r['pkg'] not in seen:
+                seen.add(r['pkg'])
+                total += r['kb']
+        status.set_text('%d chương trình đã cài — tổng %s' % (len(rows), human(total) or '0 KB'))
+        b_remove.set_sensitive(False)
+
+    def selected():
+        model, it = view.get_selection().get_selected()
+        return (model, it) if it else (None, None)
+
+    def on_sel(*_):
+        b_remove.set_sensitive(selected()[1] is not None)
+
+    def remove(*_):
+        model, it = selected()
+        if not it:
+            return
+        name, pkg, kind, ident = model[it][1], model[it][2], model[it][8], model[it][9]
+        if kind == 'app':
+            # app trong menu: depot-uninstall lo phần hỏi + bảo vệ gói hệ thống + pkexec; xong thì nạp lại danh sách
+            def waiter():
+                subprocess.call(['depot-uninstall', ident])
+                time.sleep(1.5)
+                for _ in range(120):          # depot-uninstall để apt chạy nền: chờ dpkg nhả khoá rồi mới đọc lại
+                    if subprocess.call(['sh', '-c', 'pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null']) != 0:
+                        break
+                    time.sleep(1)
+                GLib.idle_add(reload)
+            threading.Thread(target=waiter, daemon=True).start()
+            return
+        gone = [l.split()[1] for l in out(['apt-get', '-s', 'remove', pkg], env=C_ENV).splitlines() if l.startswith('Remv ')]
+        prot = protect_re()
+        bad = [g for g in gone if prot.match(g)]
+        if bad or prot.match(pkg):
+            message(win, Gtk.MessageType.WARNING, 'Không gỡ được %s' % name,
+                    'Đây là phần của hệ thống, hoặc gỡ nó sẽ kéo theo phần của hệ thống:\n<tt>%s</tt>'
+                    % GLib.markup_escape_text(' '.join((bad or [pkg])[:10])))
+            return
+        more = [g for g in gone if g != pkg]
+        text = 'Gói: <tt>%s</tt>' % GLib.markup_escape_text(pkg)
+        if more:
+            text += '\nGỡ kèm (phụ thuộc vào nó): <tt>%s</tt>' % GLib.markup_escape_text(' '.join(more[:12]))
+        if message(win, Gtk.MessageType.QUESTION, 'Gỡ %s khỏi máy?' % name, text, Gtk.ButtonsType.OK_CANCEL) != Gtk.ResponseType.OK:
+            return
+        run_helper(win, 'Đang gỡ %s' % name, ['remove', pkg], lambda rc: reload())
+
+    def by_name(*_):
+        d = Gtk.Dialog(title='Cài bằng tên gói', transient_for=win, modal=True)
+        d.add_button('Thôi', Gtk.ResponseType.CANCEL)
+        d.add_button('Cài', Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(14)
+        lab = Gtk.Label(xalign=0)
+        lab.set_markup('Gõ tên gói — như khi gõ <tt>sudo apt install TÊN</tt>. Nhiều gói thì cách nhau bằng dấu cách.\n'
+                       'Chưa biết tên chính xác? Gõ một từ rồi bấm Cài: Depot sẽ gợi ý các gói có tên gần giống.')
+        box.pack_start(lab, False, False, 0)
+        ent = Gtk.Entry()
+        ent.set_activates_default(True)
+        ent.set_placeholder_text('ví dụ: vlc   gimp   libreoffice-writer')
+        box.pack_start(ent, False, False, 0)
+        hint = Gtk.Label(xalign=0)
+        hint.set_line_wrap(True)
+        hint.set_max_width_chars(70)
+        hint.set_selectable(True)
+        box.pack_start(hint, False, False, 0)
+        d.show_all()
+        names = None
+        while d.run() == Gtk.ResponseType.OK:
+            words = ent.get_text().split()
+            bad = [w for w in words if not re.match(r'^[a-z0-9][a-z0-9.+:-]*$', w)]
+            if not words or bad:
+                hint.set_markup('<span foreground="#ff6b6b">Tên gói chỉ gồm chữ thường, số và các dấu . + - (ví dụ: vlc).</span>')
+                continue
+            missing = [w for w in words if not re.search(r'Candidate: [0-9a-z]', out(['apt-cache', 'policy', w], env=C_ENV))]
+            if missing:
+                sug = [l.split(' - ')[0] for l in out(['apt-cache', 'search', '--names-only', missing[0]], env=C_ENV).splitlines()[:12]]
+                hint.set_markup('<span foreground="#ff6b6b">Kho không có gói “%s”.</span>%s' % (
+                    GLib.markup_escape_text(' '.join(missing)),
+                    ('\nGói có tên gần giống: <tt>%s</tt>' % GLib.markup_escape_text('  '.join(sug))) if sug else
+                    '\nKiểm tra lại tên, hoặc tìm trong “Phần mềm”.'))
+                continue
+            names = words
+            break
+        d.destroy()
+        if not names:
+            return
+        new = [l.split()[1] for l in out(['apt-get', '-s', 'install'] + names, env=C_ENV).splitlines() if l.startswith('Inst ')]
+        if not new:
+            message(win, Gtk.MessageType.INFO, 'Đã cài sẵn', GLib.markup_escape_text(' '.join(names)) + ' đang ở bản mới nhất.')
+            return
+        text = 'Sẽ cài %d gói: <tt>%s%s</tt>' % (len(new), GLib.markup_escape_text(' '.join(new[:14])), ' …' if len(new) > 14 else '')
+        if message(win, Gtk.MessageType.QUESTION, 'Cài %s?' % ' '.join(names), text, Gtk.ButtonsType.OK_CANCEL) != Gtk.ResponseType.OK:
+            return
+        run_helper(win, 'Đang cài %s' % ' '.join(names), ['install'] + names, lambda rc: reload())
+
+    def from_deb(*_):
+        d = Gtk.FileChooserDialog(title='Chọn tệp .deb', transient_for=win, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons('Thôi', Gtk.ResponseType.CANCEL, 'Mở', Gtk.ResponseType.OK)
+        f = Gtk.FileFilter()
+        f.set_name('Gói Debian (*.deb)')
+        f.add_pattern('*.deb')
+        d.add_filter(f)
+        dl = out(['xdg-user-dir', 'DOWNLOAD']).strip()
+        d.set_current_folder(dl if os.path.isdir(dl) else os.path.expanduser('~'))
+        path = d.get_filename() if d.run() == Gtk.ResponseType.OK else None
+        d.destroy()
+        if path and install_deb(win, path) is not None:
+            reload()
+
+    def on_search(*_):
+        needle['t'] = search.get_text().strip().casefold()
+        flt.refilter()
+
+    view.get_selection().connect('changed', on_sel)
+    view.connect('row-activated', remove)
+    search.connect('search-changed', on_search)
+    show_all.connect('toggled', reload)
+    b_refresh.connect('clicked', reload)
+    b_remove.connect('clicked', remove)
+    b_name.connect('clicked', by_name)
+    b_deb.connect('clicked', from_deb)
+    win.connect('destroy', Gtk.main_quit)
+    reload()
+    srt.set_sort_column_id(1, Gtk.SortType.ASCENDING)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ('-h', '--help'):
+        print('dùng: depot-programs [TỆP.deb | list [--all]]')
+        return 0
+    if a and a[0] == 'list':
+        return cmd_list('--all' in a[1:])
+    if a and a[0].endswith('.deb'):
+        return gui(deb=a[0])
+    return gui()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

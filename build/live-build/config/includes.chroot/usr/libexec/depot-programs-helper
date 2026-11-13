@@ -1,0 +1,60 @@
+#!/bin/sh
+# Depot OS — phần chạy bằng root của "Chương trình và tính năng" (depot-programs), gọi qua pkexec
+# (polkit: tech.wrenevil.depot.programs). Chỉ nhận đúng mấy việc dưới, tên gói và đường dẫn đều kiểm trước khi dùng.
+#   depot-programs-helper install GÓI…        apt-get install (như gõ: sudo apt install GÓI)
+#   depot-programs-helper install-deb TỆP.deb apt-get install ./tệp.deb (apt tự kéo gói phụ thuộc — dpkg -i thì không)
+#   depot-programs-helper remove GÓI…         apt-get remove (giữ file cấu hình; không autoremove)
+#   depot-programs-helper update              apt-get update
+# Chữ in ra đi thẳng vào cửa sổ theo dõi của depot-programs. Mã thoát 0 = xong.
+export DEBIAN_FRONTEND=noninteractive
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+[ "$(id -u)" = 0 ] || { echo "!! cần quyền quản trị (chạy qua pkexec)" >&2; exit 1; }
+
+valid_pkg() {
+    case "$1" in
+        '' | -* | *[!a-z0-9.+:-]*) return 1 ;;
+    esac
+    return 0
+}
+
+check_pkgs() {
+    [ $# -gt 0 ] || { echo "!! chưa nêu gói nào" >&2; exit 2; }
+    for p in "$@"; do
+        valid_pkg "$p" || { echo "!! tên gói không hợp lệ: $p" >&2; exit 2; }
+    done
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    install)
+        check_pkgs "$@"
+        echo ">> Cập nhật danh sách gói…"
+        apt-get update || echo "!! Không tải được danh sách gói mới, thử với danh sách đang có."
+        echo ">> Cài: $*"
+        apt-get install -y "$@" ;;
+    install-deb)
+        f=${1:-}
+        case "$f" in /*.deb) ;; *) echo "!! cần đường dẫn đầy đủ tới tệp .deb" >&2; exit 2 ;; esac
+        [ -f "$f" ] && [ ! -L "$f" ] || { echo "!! không có tệp: $f" >&2; exit 2; }
+        pkg=$(dpkg-deb -f "$f" Package 2>/dev/null)
+        valid_pkg "$pkg" || { echo "!! tệp này không phải gói .deb hợp lệ" >&2; exit 2; }
+        # chép vào chỗ root sở hữu rồi mới cài: tệp gốc nằm trong thư mục người dùng, có thể bị đổi giữa lúc kiểm và lúc cài;
+        # apt (tài khoản _apt) cũng thường không đọc được thư mục cá nhân
+        d=$(mktemp -d /var/cache/depot-programs.XXXXXX) || exit 1
+        cp -- "$f" "$d/$pkg.deb" && chmod 644 "$d/$pkg.deb" && chmod 755 "$d"
+        echo ">> Cài $pkg $(dpkg-deb -f "$d/$pkg.deb" Version) từ tệp $(basename "$f")…"
+        apt-get update >/dev/null 2>&1
+        apt-get install -y "$d/$pkg.deb"; rc=$?
+        rm -f "$d/$pkg.deb"; rmdir "$d" 2>/dev/null
+        exit $rc ;;
+    remove)
+        check_pkgs "$@"
+        echo ">> Gỡ: $*"
+        apt-get remove -y "$@" ;;
+    update)
+        apt-get update ;;
+    *)
+        echo "dùng: depot-programs-helper install GÓI… | install-deb TỆP.deb | remove GÓI… | update" >&2; exit 2 ;;
+esac

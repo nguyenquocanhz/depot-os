@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Depot OS — "Chương trình và tính năng" (depot-programs): cài gói theo tên, cài tệp .deb, gỡ chương trình.
+     Hỏi mật khẩu quản trị; nhớ vài phút trong cùng phiên (cài / gỡ liền mấy thứ không phải gõ lại mỗi lần). -->
+<policyconfig>
+  <vendor>Depot OS by WrenEvil</vendor>
+  <action id="tech.wrenevil.depot.programs">
+    <description>Cài hoặc gỡ chương trình</description>
+    <message>Cài hoặc gỡ chương trình cần quyền quản trị</message>
+    <icon_name>system-software-install</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/depot-programs-helper</annotate>
+  </action>
+</policyconfig>

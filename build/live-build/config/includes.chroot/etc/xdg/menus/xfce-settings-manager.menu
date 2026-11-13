@@ -128,6 +128,7 @@
     <Name>Apps</Name>
     <Directory>depot-settings-apps.directory</Directory>
     <Include>
+      <Filename>depot-programs.desktop</Filename>
       <Filename>xfce4-mime-settings.desktop</Filename>
       <Filename>thunar-settings.desktop</Filename>
       <Filename>xfce4-terminal-settings.desktop</Filename>
@@ -155,6 +156,7 @@
         <Not>
           <Or>
             <Filename>depot-dns-proxy.desktop</Filename>
+            <Filename>depot-programs.desktop</Filename>
             <Filename>xfce4-mime-settings.desktop</Filename>
           </Or>
         </Not>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Programs and Features
+Name[vi]=Chương trình và tính năng
+Comment=See installed programs, uninstall, install by package name or from a .deb file
+Comment[vi]=Xem chương trình đã cài, gỡ cài đặt, cài bằng tên gói hoặc từ tệp .deb
+Exec=depot-programs %f
+Icon=system-software-install
+Terminal=false
+MimeType=application/vnd.debian.binary-package;application/x-deb;application/x-debian-package;
+Categories=Settings;System;PackageManager;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;
+Keywords=program;feature;uninstall;install;deb;apt;gỡ;cài;chương trình;phần mềm;appwiz;
