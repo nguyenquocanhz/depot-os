@@ -84,3 +84,15 @@ sudo ./auto/build     # tự sync dotfiles + chmod hooks rồi build; ~30–60 p
 - Boot đến desktop (SSD): **< 40 giây**
 - Video YouTube 1080p: giải mã bằng VA-API, CPU < 40%
 - Size ISO: **~1.5–2GB**
+
+## Giấy phép
+
+Mã của Depot OS trong kho này — script, công cụ `depot-*`, hook và cấu hình live-build, dotfiles, tài liệu — phát hành theo
+**GNU General Public License phiên bản 3** (GPL-3.0); nguyên văn ở tệp [LICENSE](LICENSE).
+
+Phần của bên thứ ba chép sẵn vào kho giữ giấy phép của tác giả gốc:
+
+- Theme **WhiteSur** (`usr/share/themes/WhiteSur-Dark*`) — của vinceliuice, GPL-3.0.
+- Tệp chạy **`picom-animated`** (`usr/bin/picom-animated`) — bản picom của pijulius, MPL-2.0 và MIT.
+
+Các gói Debian và ứng dụng mà ISO cài thêm lúc build không nằm trong kho này và theo giấy phép riêng của từng gói.
