@@ -18,7 +18,10 @@ unsquashfs -f -d $S $SQ usr/bin/depot-nvidia usr/bin/depot-drivers usr/share/app
   etc/xdg/autostart/depot-nvidia.desktop usr/share/polkit-1/actions/tech.wrenevil.depot.nvidia.policy \
   etc/xdg/menus/xfce-settings-manager.menu etc/skel/.config/i3/config etc/apt/sources.list \
   usr/share/depot-os/driver-pool/kernel usr/share/depot-os/driver-pool/base var/lib/dpkg/status >/dev/null 2>&1
-same() { cmp -s "$S/$1" "$INC/$1"; }
+# Từ v0.25 depot-pin gắn mục chuột phải "Ghim / bỏ ghim trên taskbar" vào mọi file .desktop có trong menu lúc build:
+# file .desktop trong ISO dài hơn bản trong repo đúng phần đó — so thì bỏ phần đó ra.
+nopin() { awk '/^\[Desktop Action depot-pin\]/ { skip = 1 } !skip' "$1" | sed -e 's/^\(Actions=.*\)depot-pin;$/\1/' -e '/^Actions=$/d'; }
+same() { cmp -s "$S/$1" "$INC/$1" && return 0; case "$1" in *.desktop) [ "$(nopin "$S/$1")" = "$(cat "$INC/$1")" ] ;; *) return 1 ;; esac; }
 installed() { awk -v p="$1" '$0 == "Package: " p { f = 1; next } /^Package:/ { f = 0 } f && /^Status: install ok installed/ { ok = 1 } END { exit !ok }' $S/var/lib/dpkg/status; }
 N=$S/usr/bin/depot-nvidia
 

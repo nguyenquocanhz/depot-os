@@ -20,7 +20,10 @@ usr/share/depot-os/layouts/windows/xfce4-panel.xml usr/share/depot-os/layouts/wi
 unsquashfs -f -d $S $SQ etc/skel etc/xdg/autostart etc/xdg/menus usr/share/applications usr/local/share/applications \
   usr/share/desktop-directories usr/share/depot-os/settings-names.conf usr/share/depot-os/layouts \
   var/lib/dpkg/status $FILES >/dev/null 2>&1
-same() { cmp -s "$S/$1" "$INC/$1"; }
+# Từ v0.25 depot-pin gắn mục chuột phải "Ghim / bỏ ghim trên taskbar" vào mọi file .desktop có trong menu lúc build:
+# file .desktop trong ISO dài hơn bản trong repo đúng phần đó — so thì bỏ phần đó ra.
+nopin() { awk '/^\[Desktop Action depot-pin\]/ { skip = 1 } !skip' "$1" | sed -e 's/^\(Actions=.*\)depot-pin;$/\1/' -e '/^Actions=$/d'; }
+same() { cmp -s "$S/$1" "$INC/$1" && return 0; case "$1" in *.desktop) [ "$(nopin "$S/$1")" = "$(cat "$INC/$1")" ] ;; *) return 1 ;; esac; }
 installed() { awk -v p="$1" '$0 == "Package: " p { f = 1; next } /^Package:/ { f = 0 } f && /^Status: install ok installed/ { ok = 1 } END { exit !ok }' $S/var/lib/dpkg/status; }
 SK=$S/etc/skel/.config
 XF=$SK/xfce4/xfconf/xfce-perchannel-xml
@@ -61,7 +64,8 @@ chk "mọi mục có tên trong menu đều có trong ISO hoặc là mục tuỳ
 
 echo "== PHÍM TẮT:"
 chk "skel: bộ phím tắt có cờ override (không thì XFCE xoá phím của Depot ở lần đăng nhập đầu)" "grep -q 'name=\"override\" type=\"bool\" value=\"true\"' $XF/xfce4-keyboard-shortcuts.xml"
-chk "Win+R = hộp Chạy, có gói xfce4-appfinder" "grep -q 'Super&gt;r\" type=\"string\" value=\"xfce4-appfinder --collapsed\"' $XF/xfce4-keyboard-shortcuts.xml && installed xfce4-appfinder"
+# từ v0.25 Win+R mở depot-run (hộp Chạy kiểu Windows); xfce4-appfinder vẫn còn cho Alt+F2 / Alt+F3
+chk "Win+R = hộp Chạy (depot-run từ v0.25, trước đó xfce4-appfinder), có gói xfce4-appfinder" "grep -qE 'Super&gt;r\" type=\"string\" value=\"(xfce4-appfinder --collapsed|depot-run)\"' $XF/xfce4-keyboard-shortcuts.xml && installed xfce4-appfinder"
 chk "Win+E, Win+I, Win+L, Win+Shift+S, Ctrl+Alt+T" "for k in 'Super&gt;e\" type=\"string\" value=\"thunar\"' 'Super&gt;i\" type=\"string\" value=\"xfce4-settings-manager\"' 'Super&gt;l\" type=\"string\" value=\"xflock4\"' 'Shift&gt;&lt;Super&gt;s\" type=\"string\" value=\"xfce4-screenshooter -r\"' 'Alt&gt;t\" type=\"string\" value=\"xfce4-terminal\"'; do grep -q \"\$k\" $XF/xfce4-keyboard-shortcuts.xml || exit 1; done"
 chk "file phím tắt là XML hợp lệ" "xmllint --noout $XF/xfce4-keyboard-shortcuts.xml"
 

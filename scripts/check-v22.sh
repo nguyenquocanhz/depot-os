@@ -17,7 +17,10 @@ FILES="usr/bin/depot-persist usr/libexec/depot-persist-helper usr/bin/depot-live
 DATA="usr/share/polkit-1/actions/tech.wrenevil.depot.persist.policy etc/polkit-1/rules.d/50-depot-persist.rules
 usr/share/applications/depot-persist.desktop"
 unsquashfs -f -d $S $SQ $FILES $DATA usr/lib/live/boot/9990-misc-helpers.sh var/lib/dpkg/status >/dev/null 2>&1
-same() { cmp -s "$S/$1" "$INC/$1"; }
+# Từ v0.25 depot-pin gắn mục chuột phải "Ghim / bỏ ghim trên taskbar" vào mọi file .desktop có trong menu lúc build:
+# file .desktop trong ISO dài hơn bản trong repo đúng phần đó — so thì bỏ phần đó ra.
+nopin() { awk '/^\[Desktop Action depot-pin\]/ { skip = 1 } !skip' "$1" | sed -e 's/^\(Actions=.*\)depot-pin;$/\1/' -e '/^Actions=$/d'; }
+same() { cmp -s "$S/$1" "$INC/$1" && return 0; case "$1" in *.desktop) [ "$(nopin "$S/$1")" = "$(cat "$INC/$1")" ] ;; *) return 1 ;; esac; }
 installed() { awk -v p="$1" '$0 == "Package: " p { f = 1; next } /^Package:/ { f = 0 } f && /^Status: install ok installed/ { ok = 1 } END { exit !ok }' $S/var/lib/dpkg/status; }
 INITRD=$(ls binary/live/initrd.img* 2>/dev/null | head -1)
 LIST=/tmp/sqv22-initrd.list; lsinitramfs "$INITRD" > $LIST 2>/dev/null

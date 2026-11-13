@@ -1,7 +1,7 @@
 #!/bin/sh
 # Depot OS — mở một trang web thành cửa sổ app riêng, bằng Firefox ESR có sẵn
-#   depot-webapp TÊN URL      vd: depot-webapp Zalo https://chat.zalo.me
-# Dùng cho app không có bản Linux (Zalo). Mỗi app một hồ sơ Firefox riêng ở ~/.local/share/depot-webapp/TÊN:
+#   depot-webapp TÊN URL      vd: depot-webapp Lich https://calendar.google.com
+# Dùng cho dịch vụ chỉ có bản web, không có app Linux. (Depot từng ghim sẵn Zalo Web bằng lệnh này; bỏ từ v0.25.) Mỗi app một hồ sơ Firefox riêng ở ~/.local/share/depot-webapp/TÊN:
 # đăng nhập giữ riêng, không lẫn với Firefox thường; userChrome.css ẩn thanh tab + thanh địa chỉ.
 # --class TÊN đặt WM_CLASS: dock/taskbar coi là app riêng, khớp StartupWMClass trong file .desktop.
 [ $# -eq 2 ] || { echo "Dùng: depot-webapp TÊN URL" >&2; exit 2; }

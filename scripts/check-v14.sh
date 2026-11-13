@@ -103,14 +103,15 @@ if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
 else
     echo "  (từ v0.16 cài lúc cài đặt bằng depot-install-apps — check-v16.sh kiểm)"
 fi
-chk "Zalo: web app (depot-webapp) + icon" "sh -n $S/usr/bin/depot-webapp && grep -q 'depot-webapp Zalo' $A/zalo.desktop && [ -f $S/usr/share/icons/hicolor/scalable/apps/zalo.svg ]"
+# Zalo Web bỏ từ v0.25 (người dùng yêu cầu 13/11/2026): công cụ depot-webapp vẫn còn, mục Zalo và icon thì không
+chk "depot-webapp còn dùng được; không còn mục Zalo Web (bỏ từ v0.25)" "sh -n $S/usr/bin/depot-webapp && [ ! -e $A/zalo.desktop ] && [ ! -e $S/usr/share/icons/hicolor/scalable/apps/zalo.svg ]"
 if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
     chk "icon Claude (claude-desktop → WhiteSur) + Antigravity" "[ -L $S/usr/share/icons/WhiteSur/apps/scalable/claude-desktop.svg ] && [ -f $S/usr/share/icons/WhiteSur/apps/scalable/claude.svg ] && [ -f $S/usr/share/icons/WhiteSur/apps/scalable/antigravity.svg ]"
     chk "Antigravity: StartupWMClass khớp cửa sổ (antigravity)" "grep -qx 'StartupWMClass=antigravity' $A/antigravity.desktop"
 else
     echo "  (từ v0.16 cài lúc cài đặt bằng depot-install-apps — check-v16.sh kiểm)"
 fi
-chk "dock + taskbar + menu Start ghim đủ 5 app" "( for a in com.anthropic.Claude org.telegram.desktop zalo discord antigravity; do grep -q \" \$a \" $S/usr/bin/depot-plank && grep -q \"\$a.desktop\" $W && grep -q \"\$a.desktop\" $W11 || exit 1; done )"
+chk "dock + taskbar + menu Start ghim đủ 4 app chat/AI (Zalo Web bỏ từ v0.25)" "( for a in com.anthropic.Claude org.telegram.desktop discord antigravity; do grep -q \" \$a \" $S/usr/bin/depot-plank && grep -q \"\$a.desktop\" $W && grep -q \"\$a.desktop\" $W11 || exit 1; done )"
 if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
     chk "hook 1210 cài đủ 4 app" "[ \$(grep -c '>> App cài sẵn:' build.log) -ge 4 ] && ! grep -q 'App cài sẵn: .* KHÔNG cài được' build.log"
 else

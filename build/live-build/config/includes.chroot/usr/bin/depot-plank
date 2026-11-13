@@ -8,7 +8,7 @@
 P=net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/
 MARK="$HOME/.config/depot/plank-v1"
 L="$HOME/.config/plank/dock1/launchers"
-APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop zalo discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
+APPS="thunar firefox-esr google-chrome com.anthropic.Claude org.telegram.desktop discord antigravity xfce4-terminal-emulator org.xfce.mousepad vlc localsend_app org.gnome.Software xfce4-taskmanager xfce-settings-manager"
 
 # bố cục Windows 10/11 (depot-layout) dùng taskbar, không có dock
 case "$(cat "$HOME/.config/depot/layout" 2>/dev/null)" in windows*) exit 0 ;; esac

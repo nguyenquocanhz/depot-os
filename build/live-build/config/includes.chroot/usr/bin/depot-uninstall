@@ -55,7 +55,7 @@ refresh() {
         echo "$pkg" | grep -Eq "$PROTECT" && continue
         [ -f "$f" ] && listed "$f" && tag "$f"
     done
-    # web app của Depot (Zalo...) không thuộc gói nào: gỡ = ẩn khỏi menu của user
+    # web app tạo bằng depot-webapp không thuộc gói nào: gỡ = ẩn khỏi menu của user
     for f in "$APPS"/*.desktop; do
         grep -q '^Exec=depot-webapp ' "$f" 2>/dev/null && tag "$f"
     done

@@ -37,7 +37,7 @@ fi
 chk "depot-software chạy được, cú pháp sh, không CRLF" "[ -x $S/usr/bin/depot-software ] && sh -n $S/usr/bin/depot-software && ! grep -q \$'\r' $S/usr/bin/depot-software"
 if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
     chk "menu mở GNOME Software qua depot-software (tự tắt khi đóng)" "grep -qx 'Exec=depot-software %U' $A/org.gnome.Software.desktop && ! grep -q '^DBusActivatable' $A/org.gnome.Software.desktop"
-    chk "nhấp đúp .deb → GNOME Software" "grep -qx 'application/vnd.debian.binary-package=gnome-software-local-file-packagekit.desktop' $S/etc/xdg/mimeapps.list && grep -q '^Exec=depot-software --local-filename' $A/gnome-software-local-file-packagekit.desktop"
+    chk "nhấp đúp .deb → hộp cài (depot-programs từ v0.25, GNOME Software là lựa chọn thứ hai)" "grep -qE '^application/vnd.debian.binary-package=(depot-programs.desktop;)?gnome-software-local-file-packagekit.desktop$' $S/etc/xdg/mimeapps.list && grep -q '^Exec=depot-software --local-filename' $A/gnome-software-local-file-packagekit.desktop"
 else
     echo "  (từ v0.16 cài lúc cài đặt bằng depot-install-apps — check-v16.sh kiểm)"
 fi
@@ -48,13 +48,13 @@ echo "== GỠ APP (chuột phải):"
 chk "depot-uninstall chạy được, cú pháp sh, không CRLF" "[ -x $S/usr/bin/depot-uninstall ] && sh -n $S/usr/bin/depot-uninstall && ! grep -q \$'\r' $S/usr/bin/depot-uninstall"
 chk "apt tự gắn mục gỡ cho app mới cài" "grep -q 'depot-uninstall --refresh' $S/etc/apt/apt.conf.d/90depot-uninstall && grep -q 'depot-software --patch' $S/etc/apt/apt.conf.d/90depot-uninstall"
 if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
-    chk "mục Gỡ cài đặt: 5 app chat/AI + VLC + LocalSend" "( for f in com.anthropic.Claude.desktop org.telegram.desktop.desktop zalo.desktop discord.desktop antigravity.desktop vlc.desktop localsend_app.desktop; do action \$f || exit 1; done )"
+    chk "mục Gỡ cài đặt: 4 app chat/AI + VLC + LocalSend" "( for f in com.anthropic.Claude.desktop org.telegram.desktop.desktop discord.desktop antigravity.desktop vlc.desktop localsend_app.desktop; do action \$f || exit 1; done )"
 else
     echo "  (từ v0.16 cài lúc cài đặt bằng depot-install-apps — check-v16.sh kiểm)"
 fi
 chk "không gắn cho phần hệ thống (Thunar, Firefox, Terminal, Phần mềm)" "( for f in thunar.desktop firefox-esr.desktop xfce4-terminal.desktop org.gnome.Software.desktop; do [ -f $A/\$f ] || continue; action \$f && exit 1; done; exit 0 )"
 if command -v desktop-file-validate >/dev/null; then
-    chk "file .desktop đã sửa vẫn hợp lệ" "( for f in vlc.desktop zalo.desktop discord.desktop org.gnome.Software.desktop localsend_app.desktop google-chrome.desktop; do [ -f $A/\$f ] || continue; desktop-file-validate $A/\$f 2>&1 | grep -q 'error:' && exit 1; done; exit 0 )"
+    chk "file .desktop đã sửa vẫn hợp lệ" "( for f in vlc.desktop discord.desktop org.gnome.Software.desktop localsend_app.desktop google-chrome.desktop; do [ -f $A/\$f ] || continue; desktop-file-validate $A/\$f 2>&1 | grep -q 'error:' && exit 1; done; exit 0 )"
 fi
 if [ -z "${DEPOT_APPS_AT_INSTALL:-}" ]; then
     chk "Antigravity là gói .deb (gỡ được)" "installed antigravity && grep -qx '/opt/antigravity/chrome-sandbox' $S/var/lib/dpkg/info/antigravity.list"
