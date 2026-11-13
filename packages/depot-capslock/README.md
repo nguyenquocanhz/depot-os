@@ -10,12 +10,15 @@ Mỗi lần bấm Caps Lock, một ô vuông bo góc hiện trên màn hình hơ
 
 | | |
 |---|---|
-| Tệp cài | [`depot-capslock_1.0_all.deb`](depot-capslock_1.0_all.deb) (kèm [`.sha256`](depot-capslock_1.0_all.deb.sha256)) |
+| Tệp cài | [`depot-capslock_1.0_all.deb`](depot-capslock_1.0_all.deb) (kèm [`.sha256`](depot-capslock_1.0_all.deb.sha256)) — cũng có ở [GitHub Releases, bản `depot-capslock-1.0`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0) |
 | Viết cho | Debian, Ubuntu và các bản dựa trên chúng có GTK 3.22 trở lên — phiên **X11**: XFCE, MATE, Cinnamon, LXQt, i3, Openbox (mới thử trên Debian 13 + XFCE, xem cuối trang) |
 | Cần | `python3`, `python3-gi`, `python3-gi-cairo`, `gir1.2-gtk-3.0` (apt tự kéo); nên có `fonts-inter` |
 | Không chạy | phiên Wayland (GNOME / KDE mặc định): Wayland không báo trạng thái Caps Lock cho chương trình X11 |
 
 ## Cài
+
+Tải `depot-capslock_1.0_all.deb` ở mục Assets của [bản phát hành `depot-capslock-1.0`](https://github.com/nguyenquocanhz/depot-os/releases/tag/depot-capslock-1.0)
+(hoặc lấy tệp nằm ngay trong thư mục này), rồi:
 
 ```bash
 sudo apt install ./depot-capslock_1.0_all.deb
@@ -82,6 +85,15 @@ sh packages/depot-capslock/build.sh
 Chạy trên Debian / Ubuntu hoặc trong WSL, không cần root. Script dựng cây gói ở thư mục tạm trên đĩa Linux
 (để quyền file đúng dù nguồn nằm trên ổ Windows), từ chối tệp dính CRLF, tính `Installed-Size` và `md5sums`,
 nén xz, ghi tệp `.deb` và `.sha256` cạnh script.
+
+Phát hành bản mới: commit, đẩy lên `main`, rồi tạo bản phát hành với thẻ `depot-capslock-<phiên bản>` kèm hai tệp đó
+(thẻ đặt theo tên gói để không lẫn với thẻ phiên bản ISO):
+
+```bash
+gh release create depot-capslock-1.1 packages/depot-capslock/depot-capslock_1.1_all.deb packages/depot-capslock/depot-capslock_1.1_all.deb.sha256 --target main --title "depot-capslock 1.1"
+```
+
+Các bản đã phát hành: <https://github.com/nguyenquocanhz/depot-os/releases>
 
 Mã vẽ ổ khoá chép từ lớp `LockOSD` trong `usr/bin/depot-notify` của Depot OS — đổi hình ở bên nào thì đổi luôn bên kia.
 
