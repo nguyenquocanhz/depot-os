@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+# Depot OS — depot-tray: bảng nổi "icon ẩn" của khay hệ thống, kiểu nút ^ trên taskbar Windows 11
+#
+#   depot-tray            mở bảng ngay trên thanh panel, chỗ con trỏ chuột; gọi lần nữa là đóng
+#   depot-tray button     in nút mũi tên cho plugin genmon của xfce4-panel (<icon> + <iconclick>)
+#   depot-tray list       in các icon đang nằm trong bảng
+#   depot-tray --daemon   bản thường trú (nút trên panel tự gọi; không cần autostart riêng)
+#   depot-tray quit       dừng bản thường trú
+#   Đóng bảng: Esc, bấm ra ngoài, hoặc bấm lại nút mũi tên.
+#
+# Bấm là hiện ngay: bản thường trú giữ sẵn GTK trong bộ nhớ; lệnh "depot-tray" (nút trên panel gọi) chỉ là một lời
+# gọi D-Bus tới nó, không nạp GTK — khởi động lại từ đầu mỗi lần bấm thì mất hơn một giây mới thấy bảng.
+#
+# Bảng chứa đúng những icon đã đánh dấu "ẩn" trong khay của xfce4-panel (thuộc tính hidden-items /
+# hidden-legacy-items của plugin systray — cũng là danh sách ở Panel › Khay trạng thái › Mục). Khay của XFCE tự có
+# một mũi tên bung các icon ẩn NGANG ngay trên thanh; bảng này thay kiểu bung đó bằng một bảng nổi bo góc.
+#   Bấm trái một icon   = Activate của app (mở / ẩn cửa sổ); app không nhận Activate thì hiện menu của nó
+#   Bấm phải            = menu của app (đọc qua com.canonical.dbusmenu, không cần thư viện dbusmenu-gtk)
+# Icon lấy qua D-Bus StatusNotifierItem (IconName hoặc IconPixmap) nên luôn đúng trạng thái lúc mở bảng.
+# Icon kiểu cũ (XEmbed) không vẽ lại được ở cửa sổ khác: riêng Bộ nhớ tạm (clipman) có mục thay thế gọi
+# xfce4-popup-clipman; các icon kiểu cũ khác vẫn nằm sau mũi tên của khay XFCE.
+
+import os
+import sys
+
+APP_ID = 'tech.depot.Tray'
+SELF = os.path.realpath(sys.argv[0])
+GDBUS = 'gdbus call --session --dest %s --object-path /tech/depot/Tray --method ' % APP_ID
+
+# Các lệnh dưới đây trả lời ngay: chưa nạp gì ngoài os, sys — phía gọi chỉ là một lời gọi D-Bus bằng gdbus.
+if sys.argv[1:2] == ['button']:      # genmon gọi lúc panel khởi động và mỗi phút: tiện thể dựng bản thường trú nếu chưa có
+    os.system(GDBUS + 'org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 || '
+              '(setsid "$0" --daemon >/dev/null 2>&1 </dev/null &)'.replace('"$0"', "'%s'" % SELF))
+    print('<icon>go-up-symbolic</icon><iconclick>%s</iconclick>\n<txt></txt>\n<tool>Hiện icon ẩn</tool>' % SELF)
+    sys.exit(0)
+if not sys.argv[1:]:                 # bấm nút: bảo bản thường trú mở / đóng bảng; nó chưa chạy thì dựng lên và mở luôn
+    os.execvp('sh', ['sh', '-c', GDBUS + 'org.gtk.Application.Activate "{}" >/dev/null 2>&1 || '
+                     'exec setsid "$0" --daemon --show >/dev/null 2>&1 </dev/null', SELF])
+if sys.argv[1:2] == ['quit']:
+    os.execvp('sh', ['sh', '-c', GDBUS + 'org.gtk.Actions.Activate quit "[]" "{}" >/dev/null 2>&1; true'])
+
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import gi  # noqa: E402
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
+
+RUN = os.environ.get('XDG_RUNTIME_DIR') or '/tmp'
+STAMP = os.path.join(RUN, 'depot-tray.closed')       # lúc bảng tự đóng vì bấm ra ngoài (chống mở lại ngay)
+WATCHER = 'org.kde.StatusNotifierWatcher'
+SNI = 'org.kde.StatusNotifierItem'
+DBUSMENU = 'com.canonical.dbusmenu'
+
+CELL = 40            # ô chứa một icon
+ICON = 20            # cỡ icon
+COLS = 5             # số ô mỗi hàng
+EDGE = 10            # cách mép trên của thanh panel
+SHADOW = 16          # lề bóng đổ quanh bảng
+
+CSS = '''
+window.tray-win { background-color: transparent; }
+window.tray-win decoration {
+    margin: SHADOWpx; border-radius: 8px; border: none; background: none;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.tray-root {
+    background-color: rgba(43, 52, 66, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 8px;
+    padding: 6px;
+    color: #ffffff;
+}
+.tray-root.flat { border-radius: 0; background-color: #2b3442; }
+.tray-win button.tray-cell {
+    background-image: none; background-color: transparent; box-shadow: none; border: none;
+    min-width: CELLpx; min-height: CELLpx; padding: 0; margin: 0; border-radius: 4px; color: #ffffff;
+    outline-width: 0; -gtk-icon-shadow: none; transition: background-color 120ms ease;
+}
+.tray-win button.tray-cell:hover { background-color: rgba(255, 255, 255, 0.09); }
+.tray-win button.tray-cell:active { background-color: rgba(255, 255, 255, 0.05); }
+.tray-empty { font-family: Inter, "Noto Sans", sans-serif; font-size: 9.5pt; color: rgba(255, 255, 255, 0.72);
+    padding: 8px 12px; }
+'''.replace('SHADOW', str(SHADOW)).replace('CELL', str(CELL))
+
+
+# ------------------------------------------------------------------ khay của xfce4-panel
+
+def xfconf(*args):
+    try:
+        p = subprocess.run(['xfconf-query', '-c', 'xfce4-panel'] + list(args), capture_output=True, text=True,
+                           timeout=4, stdin=subprocess.DEVNULL)
+        return p.stdout if p.returncode == 0 else ''
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def hidden_names():
+    """(tên icon StatusNotifier đang ẩn, tên icon kiểu cũ đang ẩn) — gộp mọi plugin systray của mọi panel."""
+    sn, legacy = set(), set()
+    for line in xfconf('-lv').splitlines():
+        prop, _, val = line.partition(' ')
+        if val.strip() != 'systray':
+            continue
+        for key, bag in (('hidden-items', sn), ('hidden-legacy-items', legacy)):
+            # mảng in ra: hai dòng đầu là tiêu đề, sau đó mỗi dòng một giá trị
+            for v in xfconf('-p', '%s/%s' % (prop, key)).splitlines()[2:]:
+                if v.strip():
+                    bag.add(v.strip())
+    return sn, legacy
+
+
+# ------------------------------------------------------------------ StatusNotifierItem
+
+class Item:
+    def __init__(self, bus, service):
+        self.bus = bus
+        self.name, _, path = service.partition('/')
+        self.path = '/' + path if path else '/StatusNotifierItem'
+        try:
+            r = bus.call_sync(self.name, self.path, 'org.freedesktop.DBus.Properties', 'GetAll',
+                              GLib.Variant('(s)', (SNI,)), None, Gio.DBusCallFlags.NONE, 1500, None)
+            self.props = r.unpack()[0]
+        except GLib.Error:
+            self.props = None
+
+    @property
+    def ok(self):
+        return self.props is not None and self.props.get('Status', 'Active') != 'Passive'
+
+    @property
+    def id(self):
+        return self.props.get('Id', '')
+
+    @property
+    def title(self):
+        tip = self.props.get('ToolTip')
+        text = tip[2] if isinstance(tip, tuple) and len(tip) > 2 and tip[2] else ''
+        return text or self.props.get('Title') or self.id
+
+    def pixbuf(self, size):
+        """Icon của app: theo tên (kèm thư mục theme riêng nếu app khai) hoặc theo ảnh ARGB app gửi qua D-Bus."""
+        name = self.props.get('IconName') or ''
+        if name:
+            theme = Gtk.IconTheme.get_default()
+            extra = self.props.get('IconThemePath') or ''
+            if extra and os.path.isdir(extra) and extra not in theme.get_search_path():
+                theme.append_search_path(extra)          # app mang icon riêng ngoài theme
+            try:
+                if os.path.isabs(name) and os.path.exists(name):
+                    return GdkPixbuf.Pixbuf.new_from_file_at_size(name, size, size)
+                info = theme.lookup_icon(name, size, Gtk.IconLookupFlags.FORCE_SIZE)
+                if info:
+                    if name.endswith('-symbolic'):
+                        white = Gdk.RGBA(1, 1, 1, 1)
+                        return info.load_symbolic(white, None, None, None)[0]
+                    return info.load_icon()
+            except GLib.Error:
+                pass
+        best = None
+        for w, h, data in self.props.get('IconPixmap') or []:
+            if w > 0 and h > 0 and len(data) >= w * h * 4 and (
+                    best is None or (best[0] < size <= w) or (w >= size and w < best[0]) or
+                    (best[0] < size and w > best[0])):
+                best = (w, h, bytes(data))
+        if best is None:
+            return None
+        w, h, data = best
+        rgba = bytearray(w * h * 4)                 # ARGB (byte lớn trước) → RGBA
+        rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = data[1:w * h * 4:4], data[2:w * h * 4:4], \
+            data[3:w * h * 4:4], data[0:w * h * 4:4]
+        pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(rgba)), GdkPixbuf.Colorspace.RGB, True, 8,
+                                             w, h, w * 4)
+        return pb if (w, h) == (size, size) else pb.scale_simple(size, size, GdkPixbuf.InterpType.HYPER)
+
+    def call(self, method, x, y):
+        try:
+            self.bus.call_sync(self.name, self.path, SNI, method, GLib.Variant('(ii)', (x, y)), None,
+                               Gio.DBusCallFlags.NONE, 1500, None)
+            return True
+        except GLib.Error:
+            return False
+
+    # ---- menu của app (com.canonical.dbusmenu)
+    def menu_call(self, method, args, reply=True):
+        path = self.props.get('Menu') or ''
+        if not path or path == '/NO_DBUSMENU':
+            return None
+        try:
+            r = self.bus.call_sync(self.name, path, DBUSMENU, method, args, None, Gio.DBusCallFlags.NONE, 2000, None)
+            return r.unpack() if reply and r is not None else ()
+        except GLib.Error:
+            return None
+
+    def build_menu(self, on_done):
+        self.menu_call('AboutToShow', GLib.Variant('(i)', (0,)))
+        r = self.menu_call('GetLayout', GLib.Variant('(iias)', (0, -1, [])))
+        if not r:
+            return None
+        menu = self._submenu(r[1][2])
+        if menu is not None:
+            menu.connect('deactivate', lambda *_: on_done())
+        return menu
+
+    def _submenu(self, children):
+        menu = Gtk.Menu()
+        count = 0
+        for cid, props, kids in children:
+            if props.get('visible', True) is False:
+                continue
+            if props.get('type') == 'separator':
+                menu.append(Gtk.SeparatorMenuItem())
+                continue
+            text = (props.get('label') or '').replace('__', '\0').replace('_', '').replace('\0', '_')
+            if props.get('toggle-type') in ('checkmark', 'radio'):
+                it = Gtk.CheckMenuItem(label=text)
+                it.set_draw_as_radio(props.get('toggle-type') == 'radio')
+                it.set_active(props.get('toggle-state', 0) == 1)
+            else:
+                it = Gtk.MenuItem(label=text)
+            it.set_sensitive(props.get('enabled', True) is not False)
+            if props.get('children-display') == 'submenu' and kids:
+                sub = self._submenu(kids)
+                if sub is not None:
+                    it.set_submenu(sub)
+            else:
+                it.connect('activate', lambda _i, cid=cid: self.menu_call(
+                    'Event', GLib.Variant('(isvu)', (cid, 'clicked', GLib.Variant('i', 0), int(time.time()))),
+                    reply=False))
+            menu.append(it)
+            count += 1
+        if not count:
+            return None
+        menu.show_all()
+        return menu
+
+
+def tray_items():
+    """[Item] các icon StatusNotifier đang ẩn trong khay XFCE, theo thứ tự đăng ký; và có mục Bộ nhớ tạm không."""
+    hidden, legacy = hidden_names()
+    items = []
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        r = bus.call_sync(WATCHER, '/StatusNotifierWatcher', 'org.freedesktop.DBus.Properties', 'Get',
+                          GLib.Variant('(ss)', (WATCHER, 'RegisteredStatusNotifierItems')), None,
+                          Gio.DBusCallFlags.NONE, 1500, None)
+        for service in r.unpack()[0]:
+            it = Item(bus, service)
+            if it.ok and it.id in hidden:
+                items.append(it)
+    except GLib.Error:
+        pass
+    clipman = 'clipman' in legacy and shutil.which('xfce4-popup-clipman') is not None
+    return items, clipman
+
+
+# ------------------------------------------------------------------ bảng nổi
+
+class Flyout(Gtk.Window):
+    def __init__(self, app, data):
+        super().__init__(application=app, title='Icon ẩn')
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_keep_above(True)
+        self.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
+        self.stick()
+        self.get_style_context().add_class('tray-win')
+        scr = self.get_screen()
+        vis = scr.get_rgba_visual()
+        self.rgba = bool(vis and scr.is_composited())
+        if self.rgba:
+            self.set_visual(vis)
+            self.set_titlebar(Gtk.Box())             # cửa sổ tự vẽ bóng đổ (CSD), không viền của trình quản lý cửa sổ
+        self.was_active = False
+        self.closing = False
+        self.hold = False                            # menu của một app đang mở: chưa đóng bảng
+        self.anchor = self.pointer()
+
+        root = Gtk.Box()
+        root.get_style_context().add_class('tray-root')
+        if not self.rgba:
+            root.get_style_context().add_class('flat')
+        self.root = root
+        self.sig = None
+        self.add(root)
+        self.fill(data)
+        self.connect('key-press-event', self.on_key)
+        self.connect('notify::is-active', self.on_active)
+        self.connect('size-allocate', lambda *_: self.place())
+        self.connect('map-event', lambda *_: (self.place(), False)[1])
+
+    def fill(self, data):
+        """Dựng (lại) các ô icon. data = ([(Item, pixbuf, tên)], có mục Bộ nhớ tạm) — bản thường trú đọc sẵn."""
+        cells, clipman = data
+        sig = ([(it.id, tip, pb.get_byte_length() if pb else 0, it.props.get('IconName')) for it, pb, tip in cells],
+               clipman)
+        if sig == self.sig:
+            return
+        self.sig = sig
+        root = self.root
+        for w in root.get_children():
+            root.remove(w)
+        grid = Gtk.Grid()
+        n = 0
+        for it, pb, tip in cells:
+            grid.attach(self.cell(pb, tip, lambda b, e, it=it: self.on_item(it, b, e)), n % COLS, n // COLS, 1, 1)
+            n += 1
+        if clipman:
+            theme = Gtk.IconTheme.get_default()
+            name = next((i for i in ('xfce4-clipman-plugin-symbolic', 'edit-paste-symbolic') if theme.has_icon(i)),
+                        'edit-paste')
+            img = Gtk.Image.new_from_icon_name(name, Gtk.IconSize.MENU)
+            img.set_pixel_size(ICON)
+            grid.attach(self.cell(img, 'Bộ nhớ tạm — lịch sử sao chép', self.on_clipman), n % COLS, n // COLS, 1, 1)
+            n += 1
+        if n:
+            root.add(grid)
+        else:
+            lab = Gtk.Label(label='Không có icon ẩn nào')
+            lab.get_style_context().add_class('tray-empty')
+            root.add(lab)
+        root.show_all()
+
+    def cell(self, icon, tip, on_click):
+        b = Gtk.Button()
+        b.get_style_context().add_class('tray-cell')
+        b.set_can_focus(False)
+        b.set_tooltip_text(tip)
+        if isinstance(icon, Gtk.Widget):
+            img = icon
+        elif icon is not None:
+            img = Gtk.Image.new_from_pixbuf(icon)
+        else:
+            img = Gtk.Image.new_from_icon_name('application-x-executable-symbolic', Gtk.IconSize.MENU)
+            img.set_pixel_size(ICON)
+        b.add(img)
+        b.connect('button-release-event', on_click)
+        return b
+
+    @staticmethod
+    def pointer():
+        seat = Gdk.Display.get_default().get_default_seat()
+        _scr, x, y = seat.get_pointer().get_position()
+        return x, y
+
+    def place(self):
+        """Đáy bảng nằm ngay trên thanh panel, giữa bảng thẳng với chỗ đã bấm nút mũi tên."""
+        disp = Gdk.Display.get_default()
+        mon = disp.get_monitor_at_point(*self.anchor) or disp.get_primary_monitor() or disp.get_monitor(0)
+        wa = mon.get_workarea()
+        w, h = self.get_size()
+        x = self.anchor[0] - w // 2                  # (GTK tự trừ lề bóng đổ: toạ độ là của phần bảng nhìn thấy)
+        x = max(wa.x + EDGE, min(x, wa.x + wa.width - w - EDGE))
+        if self.anchor[1] < wa.y + wa.height // 2:   # panel ở cạnh trên: bảng nằm dưới nó
+            y = wa.y + EDGE
+        else:
+            y = wa.y + wa.height - h - EDGE
+        self.move(x, y)
+
+    # ---- bấm
+    def on_item(self, it, _b, e):
+        x, y = int(e.x_root), int(e.y_root)
+        if e.button == 1 and it.call('Activate', x, y):
+            self.close_flyout()
+            return True
+        if e.button == 2 and it.call('SecondaryActivate', x, y):
+            self.close_flyout()
+            return True
+        menu = it.build_menu(self.menu_done)
+        if menu is not None:
+            self.hold = True
+            menu.attach_to_widget(self, None)
+            menu.popup_at_pointer(e)
+        elif it.call('ContextMenu', x, y):
+            self.close_flyout()
+        return True
+
+    def menu_done(self):
+        self.hold = False
+        GLib.timeout_add(200, lambda: (self.close_flyout(), False)[1])     # để mục vừa bấm kịp gửi đi
+
+    def on_clipman(self, _b, _e):
+        self.close_flyout()
+        subprocess.Popen(['xfce4-popup-clipman'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+
+    # ---- đóng
+    def on_key(self, _w, e):
+        if e.keyval == Gdk.KEY_Escape:
+            self.close_flyout()
+            return True
+        return False
+
+    def on_active(self, *_):
+        if self.is_active():
+            self.was_active = True
+        elif self.was_active and not self.closing:
+            GLib.timeout_add(150, self.lost_focus)
+
+    def lost_focus(self):
+        if not self.closing and not self.is_active() and not self.hold:
+            self.close_flyout(stamp=True)
+        return False
+
+    def close_flyout(self, stamp=False):
+        if self.closing:
+            return
+        self.closing = True
+        if stamp:
+            try:
+                with open(STAMP, 'w') as f:
+                    f.write(str(time.time()))
+            except OSError:
+                pass
+        self.get_application().win = None
+        self.destroy()
+
+
+class App(Gtk.Application):
+    """Bản thường trú: giữ GTK sẵn trong bộ nhớ, mỗi lần được gọi (Activate qua D-Bus) thì mở / đóng bảng."""
+
+    def __init__(self, show):
+        super().__init__(application_id=APP_ID)
+        self.win = None
+        self.booting = True
+        self.show_first = show
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10)
+        quit_action = Gio.SimpleAction.new('quit', None)
+        quit_action.connect('activate', lambda *_: self.quit())
+        self.add_action(quit_action)
+        self.hold()                                  # không có cửa sổ vẫn sống
+        self.data = None                             # icon đọc sẵn cho lần mở tới
+        self.prefetch()
+
+    @staticmethod
+    def cells(found):
+        items, clipman = found
+        return [(it, it.pixbuf(ICON), it.title) for it in items], clipman
+
+    def prefetch(self):
+        """Đọc danh sách icon ẩn ở luồng phụ (xfconf-query + hỏi từng app qua D-Bus mất ~0,15 giây), vẽ icon ở luồng
+        giao diện. Bảng đang mở mà icon đã đổi (Telegram có tin mới…) thì dựng lại ô ngay."""
+        def work():
+            found = tray_items()
+
+            def done():
+                self.data = self.cells(found)
+                if self.win is not None and not self.win.closing:
+                    self.win.fill(self.data)
+                return False
+            GLib.idle_add(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def do_activate(self):
+        if self.booting:                             # lần kích hoạt của chính lúc khởi động
+            self.booting = False
+            if not self.show_first:
+                return
+        if self.win is not None:                     # đang mở: bấm nút lần nữa là đóng
+            self.win.close_flyout()
+            return
+        try:                                         # vừa tự đóng vì chính cú bấm vào nút này: không mở lại
+            if time.time() - os.path.getmtime(STAMP) < 0.45:
+                return
+        except OSError:
+            pass
+        if self.data is None:                        # chưa kịp đọc sẵn: đọc ngay
+            self.data = self.cells(tray_items())
+        self.win = Flyout(self, self.data)           # hiện ngay bằng dữ liệu đọc sẵn…
+        self.win.present_with_time(Gdk.CURRENT_TIME)
+        self.prefetch()                              # …rồi đọc lại: bảng tự cập nhật nếu có gì đổi
+        GLib.timeout_add(250, lambda: (self.win is not None and not self.win.is_active()
+                                       and self.win.present_with_time(Gdk.CURRENT_TIME), False)[1])
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if cmd == 'list':
+        items, clipman = tray_items()
+        for it in items:
+            print('%s\t%s' % (it.id, it.title))
+        if clipman:
+            print('clipman\tBộ nhớ tạm')
+        return 0
+    if cmd in ('-h', '--help'):
+        print('dùng: depot-tray [button | list | quit]')
+        return 0
+    if cmd == '--daemon':
+        return App('--show' in sys.argv[2:]).run([sys.argv[0]])
+    print('depot-tray: không hiểu "%s"' % cmd, file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

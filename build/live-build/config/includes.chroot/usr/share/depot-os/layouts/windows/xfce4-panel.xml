@@ -21,6 +21,7 @@
         <value type="int" value="2"/>
         <value type="int" value="3"/>
         <value type="int" value="4"/>
+        <value type="int" value="12"/>
         <value type="int" value="5"/>
         <value type="int" value="6"/>
         <value type="int" value="7"/>
@@ -83,7 +84,24 @@
       <property name="expand" type="bool" value="true"/>
       <property name="style" type="uint" value="0"/>
     </property>
-    <property name="plugin-5" type="string" value="systray"/>
+    <!-- nút ^ "icon ẩn": genmon chạy "depot-tray button" (genmon-12.rc do depot-layout ghi); bấm bung bảng nổi chứa các
+         icon khay đánh dấu ẩn bên dưới, như taskbar Windows 11 -->
+    <property name="plugin-12" type="string" value="genmon"/>
+    <!-- khay gọn: icon 18px một hàng; icon app nằm sau nút ^ (hidden-items = tên StatusNotifier, hidden-legacy-items =
+         tên icon kiểu cũ). Wi-Fi, bộ gõ và icon app lạ vẫn hiện trên thanh; đổi ở Panel › Khay trạng thái › Mục -->
+    <property name="plugin-5" type="string" value="systray">
+      <property name="icon-size" type="int" value="18"/>
+      <property name="single-row" type="bool" value="true"/>
+      <property name="square-icons" type="bool" value="false"/>
+      <property name="hidden-items" type="array">
+        <value type="string" value="TelegramDesktop"/>
+        <value type="string" value="blueman"/>
+        <value type="string" value="Claude_status_icon_1"/>
+      </property>
+      <property name="hidden-legacy-items" type="array">
+        <value type="string" value="clipman"/>
+      </property>
+    </property>
     <property name="plugin-6" type="string" value="pulseaudio"/>
     <property name="plugin-7" type="string" value="power-manager-plugin"/>
     <!-- đồng hồ kiểu Windows (plugin depot-clock, mã nguồn ở tools/depot-clock-plugin): giờ trên, ngày dưới;

@@ -13,7 +13,9 @@
 #   - bộ icon Papirus thay cho WhiteSur (icon WhiteSur nhại macOS: trình quản lý tệp mang mặt Finder…);
 #   - đồng hồ taskbar giờ trên / ngày dưới, chuột phải có "Điều chỉnh ngày giờ" (plugin depot-clock);
 #   - Win+1…9 mở app ghim thứ 1…9 (docklike); ghim app: chuột phải app > "Ghim / bỏ ghim trên taskbar" (depot-pin);
-#   - phím Windows, Win+R, Win+D, Win+mũi tên… dùng chung cho mọi bố cục (depot-winkey, xfce4-keyboard-shortcuts.xml).
+#   - phím Windows, Win+R, Win+D, Win+mũi tên… dùng chung cho mọi bố cục (depot-winkey, xfce4-keyboard-shortcuts.xml);
+#   - khay hệ thống gọn: icon khay 18px, icon app (Telegram, Bluetooth, Claude, bộ nhớ tạm) nằm sau nút ^ và bung thành
+#     bảng nổi (depot-tray) như "icon ẩn" của Windows 11 — write_tray ghi nút, write_panel_css ghi phần CSS theo bố cục.
 # Không Plank ở hai kiểu Windows.
 # Cách đổi panel giống xfce4-panel-profiles: tắt panel, tắt xfconfd, chép XML, bật lại panel.
 STATE="$HOME/.config/depot/layout"
@@ -64,6 +66,51 @@ write_bell() {
     case $1 in macos) id=7 ;; *) id=9 ;; esac
     mkdir -p "$HOME/.config/xfce4/panel"
     printf 'Command=depot-notify-bell\nUseLabel=0\nText=\nUpdatePeriod=5000\n' > "$HOME/.config/xfce4/panel/genmon-$id.rc"
+}
+
+# nút ^ "icon ẩn" trước khay hệ thống ở hai bố cục Windows = genmon chạy "depot-tray button" (plugin-12);
+# bấm mở bảng nổi chứa các icon khay đã đánh dấu ẩn. Một phút gọi lại một lần: lệnh ấy cũng dựng bản thường trú
+# của depot-tray nếu nó chưa chạy. Bố cục macOS không có nút này.
+write_tray() {
+    case $1 in windows*) ;; *) return 0 ;; esac
+    mkdir -p "$HOME/.config/xfce4/panel"
+    printf 'Command=depot-tray button\nUseLabel=0\nText=\nUpdatePeriod=60000\n' > "$HOME/.config/xfce4/panel/genmon-12.rc"
+}
+
+# CSS của thanh panel KHÁC nhau theo bố cục, nên nằm ở file riêng ~/.config/gtk-3.0/depot-panel.css mà gtk.css nạp
+# bằng @import (panel đọc lại khi khởi động — swap_panel chạy ngay sau). Selector theo id plugin của bố cục:
+# systray-5 = khay, genmon-9 = chuông, genmon-12 = nút ^.
+#   macos      để trống (thanh menu 28px, icon vốn đã nhỏ, không có nút ^)
+#   windows    một panel 40px, icon-size tự động: nút âm lượng / pin / chuông / ^ vẽ icon 24–32px, to hơn hẳn icon
+#              khay 18px — thu lại bằng -gtk-icon-transform (đặt icon-size cho cả panel thì nút Start và nút hiện
+#              desktop nhỏ theo); lề âm bù phần ô trống quanh icon đã thu
+#   windows11  khay nằm panel riêng đã đặt icon-size 22: không cần thu
+# Cả hai bố cục Windows: khay XFCE tự có mũi tên bung icon ẩn NGANG ngay trên thanh — giấu nó (trong suốt, lề âm
+# bằng bề ngang của nó) vì icon ẩn mở bằng nút ^ riêng; icon khay cách nhau một chút; chữ % pin mảnh lại.
+write_panel_css() {
+    dir="$HOME/.config/gtk-3.0"
+    mkdir -p "$dir"
+    {
+        echo "/* Depot OS — CSS thanh panel theo bố cục \"$1\". depot-layout ghi lại mỗi lần đổi bố cục: đừng sửa tay. */"
+        case $1 in windows*) cat <<'CSS'
+#xfce4-power-manager-plugin label { font-weight: normal; font-size: 9pt; }
+#systray-5 button { padding-left: 4px; padding-right: 4px; }
+#systray-5 button.toggle { min-width: 0; min-height: 0; padding: 0; margin: 0; opacity: 0; }
+#systray-5 box { margin-right: -16px; }
+CSS
+        esac
+        [ "$1" = windows ] && cat <<'CSS'
+#pulseaudio-button image { -gtk-icon-transform: scale(0.68); margin: 0 -4px; }
+#xfce4-power-manager-plugin image { -gtk-icon-transform: scale(0.75); margin: 0 -3px; }
+#genmon-9 image, #genmon-12 image { -gtk-icon-transform: scale(0.56); margin: 0 -7px; }
+CSS
+    } > "$dir/depot-panel.css"
+    # gtk.css cũ (cài trước khi có file này) chưa nạp nó: thêm dòng @import lên đầu — @import phải đứng trước mọi luật
+    if [ -f "$dir/gtk.css" ]; then
+        grep -q 'depot-panel\.css' "$dir/gtk.css" || sed -i '1i @import url("depot-panel.css");' "$dir/gtk.css"
+    else
+        echo '@import url("depot-panel.css");' > "$dir/gtk.css"
+    fi
 }
 
 swap_panel() {   # $1 file XML, $2 bố cục
@@ -122,6 +169,8 @@ switch() {
     mkdir -p "$(dirname "$STATE")"
     echo "$1" > "$STATE"
     write_bell "$1"
+    write_tray "$1"
+    write_panel_css "$1"
     swap_panel "$xml" "$1"
     sleep 1
     # XML bố cục mới không mang cấu hình Clipman (cùng kênh xfce4-panel): đặt lại mặc định còn thiếu

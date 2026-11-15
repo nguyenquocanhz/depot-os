@@ -1,3 +1,7 @@
+/* phần CSS của thanh panel đổi theo bố cục (macOS / Windows 10 / Windows 11): depot-layout ghi file này.
+   @import phải đứng trước mọi luật khác. */
+@import url("depot-panel.css");
+
 /* Depot OS — chỉnh nhỏ cho app GTK3 (theme WhiteSur-Dark vẫn là gốc) */
 
 /* Thanh panel / taskbar: rê chuột qua nút nào (Start, app ghim, khay, đồng hồ, chuông) nút đó sáng lên mềm trong
