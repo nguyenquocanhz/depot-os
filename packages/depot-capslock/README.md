@@ -164,8 +164,11 @@ GNU General Public License phiên bản 3 — nguyên văn ở tệp [LICENSE](.
 Bản 1.1.0 — mới thử trên **một máy thật**: Depot OS v0.26 chạy từ USB (Debian 13, XFCE 4.20, picom, bàn phím thật), chạy
 bản chép tay trong `~/.local/bin`, bấm phím bằng XTest: Num Lock bật / tắt ra đúng ô `Num`, Caps Lock vẫn do
 `depot-notify` báo và không ra hai ô, `--test-num`, `--status-num`, `NUMLOCK=0`, `--check-update` hỏi được kho thật,
-`--update` với một kho giả trên máy (lên bản mới, từ chối tệp sai). **Chưa thử với bản 1.1.0**: cài bằng tệp `.deb`
-và `--update` qua `pkexec`, Ubuntu, máy không có Depot OS, không compositor.
+`--update` với một kho giả trên máy (lên bản mới, từ chối tệp sai). Sau đó **cài bằng tệp `.deb`** trên chính máy đó
+(`sudo apt install ./depot-capslock_1.1.0_all.deb`): apt không kéo thêm gói nào, `dpkg --verify` sạch, đủ tệp
+(`/usr/bin/depot-capslock`, mục tự khởi động, `copyright`), bản gói chạy riêng cho Num Lock (Caps Lock nhường
+`depot-notify`), bấm phím thật ra đúng ô, không in cảnh báo với `python3 -W error`. **Chưa thử với bản 1.1.0**:
+`--update` qua hộp hỏi mật khẩu `pkexec`, gói tự chạy lúc đăng nhập lại, Ubuntu, máy không có Depot OS, không compositor.
 
 Bản 1.0.2, trên màn hình ảo (Xvfb 1366×768), bấm phím bằng `xdotool`:
 
