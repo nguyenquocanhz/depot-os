@@ -1,0 +1,1338 @@
+#!/usr/bin/env python3
+# Depot OS — depot-backup: app "Sao lưu" kiểu Windows Backup của Windows 11 — chọn nơi lưu (USB, ổ ngoài, thư mục bất
+# kỳ), bật các nhóm muốn giữ (Thư mục, Ứng dụng, Cài đặt), bấm Sao lưu; máy mới hoặc cài lại thì bấm Khôi phục.
+#
+#   depot-backup                          mở cửa sổ
+#   depot-backup start                    mở cửa sổ và bắt đầu sao lưu ngay (nơi lưu và các nhóm như lần trước)
+#   depot-backup restore-page             mở cửa sổ ở trang Khôi phục
+#   depot-backup run [--dest THƯ_MỤC]     sao lưu theo lựa chọn đã lưu (in tiến độ ra terminal)
+#   depot-backup status                   in nơi lưu, các nhóm đang bật, lần sao lưu gần nhất
+#   depot-backup list [THƯ_MỤC]           in các bản sao lưu tìm thấy (ở nơi lưu, các ổ đang cắm, hoặc THƯ_MỤC)
+#   depot-backup restore BẢN [--only folders,settings,apps]   khôi phục từ một bản (BẢN = thư mục chứa manifest.json)
+#
+# Bản sao lưu là thư mục thường, mở xem được bằng trình quản lý tệp:  <nơi lưu>/Sao lưu Depot/<tên máy>/
+#   Thư mục/<Tên>/…        bản chép các thư mục cá nhân đã chọn. Lần sau chỉ chép tệp mới hoặc đã đổi (so cỡ + giờ sửa).
+#                          Tệp đã xoá ở máy KHÔNG bị xoá ở bản sao lưu.
+#   Ứng dụng/              apt-manual.txt (gói người dùng chủ động cài), flatpak.txt, apt-sources.txt
+#   Cài đặt/<nhóm>.tar.gz  cấu hình trong ~/.config của từng nhóm (giao diện + panel, bộ gõ, app tự chạy…)
+#   manifest.json          thời điểm, tên máy, từng nhóm có gì — phần Khôi phục đọc file này
+# Khôi phục: thư mục chép ngược về (tệp ở máy mới hơn thì giữ); cài đặt giải nén về ~/.config sau khi cất bản đang có
+# vào ~/.local/share/depot-backup/ (đăng xuất rồi đăng nhập lại mới thấy đủ); ứng dụng: so danh sách với máy, cài lại
+# gói còn thiếu bằng pkexec apt-get.
+# KHÔNG sao lưu: mật khẩu Wi-Fi và tài khoản (nằm ở chỗ chỉ root đọc được, mà bản sao lưu thì không mã hoá), hồ sơ
+# trình duyệt, dữ liệu của từng ứng dụng. Bản sao lưu không mã hoá: ai cầm ổ đĩa cũng đọc được.
+# Thử: HOME=/thư-mục-giả XDG_CONFIG_HOME=/thư-mục-giả/.config depot-backup run --dest … (mọi đường dẫn tính từ hai biến này).
+
+import json
+import os
+import pwd
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+
+HOME = os.path.expanduser('~')
+CONFIG = os.environ.get('XDG_CONFIG_HOME') or os.path.join(HOME, '.config')
+CONF = os.path.join(CONFIG, 'depot', 'backup')
+ROOT_NAME = 'Sao lưu Depot'
+SAFE_DIR = os.path.join(HOME, '.local', 'share', 'depot-backup')      # bản cài đặt đang có, cất trước khi khôi phục
+FORMAT = 1
+
+# khoá, biến trong user-dirs.dirs, tên hiện (cũng là tên thư mục trong bản sao lưu), tên mặc định, bật sẵn
+FOLDERS = [
+    ('desktop', 'XDG_DESKTOP_DIR', 'Màn hình nền', 'Desktop', True),
+    ('documents', 'XDG_DOCUMENTS_DIR', 'Tài liệu', 'Documents', True),
+    ('pictures', 'XDG_PICTURES_DIR', 'Ảnh', 'Pictures', True),
+    ('videos', 'XDG_VIDEOS_DIR', 'Video', 'Videos', True),
+    ('music', 'XDG_MUSIC_DIR', 'Nhạc', 'Music', True),
+    ('download', 'XDG_DOWNLOAD_DIR', 'Tải về', 'Downloads', False),
+]
+# khoá, tên hiện, mô tả, các đường dẫn tính từ $HOME
+SETTINGS = [
+    ('look', 'Giao diện và thanh panel', 'Theme, bố cục, panel, khay, phím tắt, hình nền, hiệu ứng, Terminal',
+     ['.config/xfce4', '.config/gtk-3.0', '.config/depot', '.config/depot-capslock.conf', '.config/plank',
+      '.config/conky', '.config/picom', '.config/rofi', '.config/Thunar', '.config/fontconfig']),
+    ('input', 'Bộ gõ tiếng Việt', 'Kiểu gõ, bảng mã, phím chuyển V–E của Unikey / Fcitx 5', ['.config/fcitx5']),
+    ('startup', 'Ứng dụng tự chạy và mặc định', 'App chạy lúc đăng nhập, app mở từng loại tệp',
+     ['.config/autostart', '.config/mimeapps.list', '.local/share/applications/mimeapps.list']),
+    ('session', 'Phiên i3 và trình phát', 'Cấu hình i3, i3status, dunst, mpv',
+     ['.config/i3', '.config/i3status', '.config/dunst', '.config/mpv']),
+]
+
+
+# ====================================================================== cấu hình
+
+def conf_read():
+    d = {}
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            for line in f:
+                k, sep, v = line.rstrip('\n').partition('=')
+                if sep:
+                    d[k.strip()] = v
+    except OSError:
+        pass
+    return d
+
+
+def conf_write(d):
+    try:
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        with open(CONF, 'w', encoding='utf-8') as f:
+            f.write(''.join('%s=%s\n' % kv for kv in sorted(d.items())))
+    except OSError:
+        pass
+
+
+def conf_set(key, value):
+    d = conf_read()
+    d[key] = value
+    conf_write(d)
+
+
+def selection(conf=None):
+    """Các nhóm đang bật: {'folders': [khoá], 'apps': bool, 'settings': [khoá]}."""
+    c = conf_read() if conf is None else conf
+    folders = c['FOLDERS'].split(',') if 'FOLDERS' in c else [f[0] for f in FOLDERS if f[4]]
+    settings = c['SETTINGS'].split(',') if 'SETTINGS' in c else [s[0] for s in SETTINGS]
+    return {'folders': [k for k in folders if k], 'apps': c.get('APPS', '1') != '0',
+            'settings': [k for k in settings if k]}
+
+
+def user_dirs():
+    """{khoá: đường dẫn thư mục cá nhân} theo ~/.config/user-dirs.dirs (tên thư mục đổi theo ngôn ngữ)."""
+    raw = {}
+    try:
+        with open(os.path.join(CONFIG, 'user-dirs.dirs'), encoding='utf-8') as f:
+            for line in f:
+                k, sep, v = line.strip().partition('=')
+                if sep and not k.startswith('#'):
+                    raw[k] = v.strip().strip('"').replace('$HOME', HOME)
+    except OSError:
+        pass
+    out = {}
+    for key, var, _name, default, _on in FOLDERS:
+        p = raw.get(var) or os.path.join(HOME, default)
+        out[key] = p if os.path.normpath(p) != os.path.normpath(HOME) else ''     # trỏ về $HOME = không dùng
+    return out
+
+
+def human(n):
+    for unit, size in (('GB', 1e9), ('MB', 1e6), ('KB', 1e3)):
+        if n >= size:
+            return ('%.1f %s' % (n / size, unit)).replace('.', ',')
+    return '%d byte' % n
+
+
+def short(path):
+    """Đường dẫn cho gọn mắt: ~ thay thư mục nhà; dài quá thì chỉ giữ ba cấp cuối."""
+    p = path.replace(HOME, '~', 1) if path.startswith(HOME) else path
+    parts = p.split('/')
+    return p if len(p) <= 64 or len(parts) <= 4 else '…/' + '/'.join(parts[-3:])
+
+
+def backup_root(dest):
+    return os.path.join(dest, ROOT_NAME, socket.gethostname())
+
+
+# ====================================================================== chép tệp
+
+class Stop(Exception):
+    pass
+
+
+def inside(path, parent):
+    path, parent = os.path.realpath(path), os.path.realpath(parent)
+    return path == parent or path.startswith(parent.rstrip('/') + '/')
+
+
+def plan_copy(src, dst, skip=(), keep_newer=False):
+    """Các tệp cần chép từ src sang dst: [(nguồn, đích, cỡ)], cùng số tệp và tổng cỡ của cả cây nguồn.
+    Bỏ qua liên kết mềm và tệp đặc biệt; tệp đích cùng cỡ và cùng giờ sửa (lệch dưới 2 giây: ổ FAT) coi là đã có.
+    keep_newer (khôi phục): tệp đích mới hơn thì giữ."""
+    todo, files, total = [], 0, 0
+    for base, dirs, names in os.walk(src):
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(base, d))
+                   and not any(inside(os.path.join(base, d), s) for s in skip)]
+        rel = os.path.relpath(base, src)
+        for name in names:
+            s = os.path.join(base, name)
+            try:
+                st = os.lstat(s)
+            except OSError:
+                continue
+            if not os.path.isfile(s) or os.path.islink(s):
+                continue
+            files += 1
+            total += st.st_size
+            d = os.path.normpath(os.path.join(dst, rel, name))
+            try:
+                dt = os.stat(d)
+                if keep_newer and dt.st_mtime >= st.st_mtime - 2:
+                    continue
+                if dt.st_size == st.st_size and abs(dt.st_mtime - st.st_mtime) < 2.5:
+                    continue
+            except OSError:
+                pass
+            todo.append((s, d, st.st_size))
+    return todo, files, total
+
+
+def run_copy(todo, progress, stop, errors):
+    """Chép từng tệp (ghi ra tệp tạm rồi đổi tên: rút ổ giữa chừng không để lại tệp dở mang tên thật)."""
+    for s, d, size in todo:
+        if stop.is_set():
+            raise Stop()
+        try:
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            tmp = d + '.depot-tmp'
+            with open(s, 'rb') as fi, open(tmp, 'wb') as fo:
+                while True:
+                    if stop.is_set():
+                        raise Stop()
+                    buf = fi.read(1 << 20)
+                    if not buf:
+                        break
+                    fo.write(buf)
+                    progress(len(buf), s)
+            st = os.stat(s)
+            os.utime(tmp, (st.st_atime, st.st_mtime))
+            os.replace(tmp, d)
+        except Stop:
+            try:
+                os.remove(d + '.depot-tmp')
+            except OSError:
+                pass
+            raise
+        except OSError as e:
+            errors.append('%s: %s' % (s, e.strerror or e))
+            try:
+                os.remove(d + '.depot-tmp')
+            except OSError:
+                pass
+            progress(0, s)
+
+
+# ====================================================================== ứng dụng
+
+def cmd_lines(argv, any_code=False):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, LC_ALL='C'))
+        return [l for l in p.stdout.splitlines() if l.strip()] if p.returncode == 0 or any_code else []
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def apps_now():
+    """{'apt': [gói cài chủ động], 'flatpak': [id], 'sources': [dòng nguồn apt]}"""
+    sources = []
+    for path in ['/etc/apt/sources.list'] + sorted(
+            os.path.join('/etc/apt/sources.list.d', n) for n in (os.listdir('/etc/apt/sources.list.d')
+                                                                  if os.path.isdir('/etc/apt/sources.list.d') else [])):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                sources += ['# ' + path] + [l.rstrip() for l in f if l.strip() and not l.lstrip().startswith('#')]
+        except OSError:
+            pass
+    return {'apt': sorted(cmd_lines(['apt-mark', 'showmanual'])),
+            'flatpak': sorted(cmd_lines(['flatpak', 'list', '--app', '--columns=application'])),
+            'sources': sources}
+
+
+def apps_missing(root):
+    """Gói có trong bản sao lưu mà máy này chưa cài: (cài được bằng apt, kho của máy không có), và app Flatpak thiếu."""
+    def read(name):
+        try:
+            with open(os.path.join(root, 'Ứng dụng', name), encoding='utf-8') as f:
+                return [l.strip() for l in f if l.strip() and not l.startswith('#')]
+        except OSError:
+            return []
+    have = set(cmd_lines(['dpkg-query', '-W', '-f', '${Package}\n']))
+    want = [p for p in read('apt-manual.txt') if p not in have]
+    known = set()
+    for i in range(0, len(want), 200):
+        # hỏi theo lô; có gói lạ thì apt-cache trả mã lỗi nhưng vẫn in đủ các gói nó biết
+        for line in cmd_lines(['apt-cache', 'show', '--no-all-versions'] + want[i:i + 200], any_code=True):
+            if line.startswith('Package: '):
+                known.add(line[9:].strip())
+    flat_have = set(cmd_lines(['flatpak', 'list', '--app', '--columns=application']))
+    return ([p for p in want if p in known], [p for p in want if p not in known],
+            [a for a in read('flatpak.txt') if a not in flat_have])
+
+
+# ====================================================================== sao lưu
+
+def estimate(dest, sel=None):
+    """Tính trước: {'folders': {khoá: (số tệp, cỡ, cỡ còn phải chép)}, 'need': tổng phải chép, 'free': chỗ trống}."""
+    sel = sel or selection()
+    dirs, root = user_dirs(), backup_root(dest) if dest else ''
+    out = {'folders': {}, 'need': 0, 'free': None}
+    for key, _var, name, _d, _on in FOLDERS:
+        src = dirs.get(key)
+        if not src or not os.path.isdir(src):
+            continue
+        todo, files, total = plan_copy(src, os.path.join(root, 'Thư mục', name) if root else '/nonexistent',
+                                       skip=[root] if root else [])
+        need = sum(t[2] for t in todo)
+        out['folders'][key] = (files, total, need)
+        if key in sel['folders']:
+            out['need'] += need
+    if dest and os.path.isdir(dest):
+        try:
+            out['free'] = shutil.disk_usage(dest).free
+        except OSError:
+            pass
+    return out
+
+
+def do_backup(dest, sel=None, report=lambda *a: None, stop=None):
+    """Sao lưu. report(giai đoạn, đã xong, tổng, đang làm gì). Trả manifest (có khoá 'errors')."""
+    sel = sel or selection()
+    stop = stop or threading.Event()
+    if not dest or not os.path.isdir(dest):
+        raise OSError('Nơi lưu "%s" không có (ổ chưa cắm?)' % dest)
+    if not os.access(dest, os.W_OK):
+        raise OSError('Không ghi được vào "%s"' % dest)
+    root = backup_root(dest)
+    dirs = user_dirs()
+    errors = []
+    manifest = {'format': FORMAT, 'host': socket.gethostname(), 'user': os.path.basename(HOME),
+                'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'folders': {}, 'apps': {}, 'settings': {}}
+
+    # 1) tính trước để biết có đủ chỗ không và vẽ thanh tiến độ theo byte
+    report('scan', 0, 0, 'Đang xem cần chép những gì…')
+    plans, need = [], 0
+    for key, _var, name, _d, _on in FOLDERS:
+        src = dirs.get(key)
+        if key not in sel['folders'] or not src or not os.path.isdir(src):
+            continue
+        if inside(dest, src):
+            raise OSError('Nơi lưu nằm trong thư mục "%s" đang được sao lưu — chọn nơi khác, hoặc tắt thư mục đó.' % name)
+        todo, files, total = plan_copy(src, os.path.join(root, 'Thư mục', name), skip=[root])
+        plans.append((key, name, src, todo, files, total))
+        need += sum(t[2] for t in todo)
+    free = shutil.disk_usage(dest).free
+    if need + 20 * 1024 * 1024 > free:
+        raise OSError('Nơi lưu không đủ chỗ: cần %s, còn trống %s.' % (human(need), human(free)))
+    os.makedirs(root, exist_ok=True)
+
+    # 2) thư mục
+    done = [0]
+
+    def progress(n, path):
+        done[0] += n
+        report('folders', done[0], need, path)
+    for key, name, src, todo, files, total in plans:
+        run_copy(todo, progress, stop, errors)
+        manifest['folders'][key] = {'name': name, 'files': files, 'bytes': total, 'source': src}
+
+    # 3) ứng dụng
+    if sel['apps']:
+        report('apps', need, need, 'Đang ghi danh sách ứng dụng…')
+        apps = apps_now()
+        d = os.path.join(root, 'Ứng dụng')
+        os.makedirs(d, exist_ok=True)
+        for name, lines in (('apt-manual.txt', apps['apt']), ('flatpak.txt', apps['flatpak']),
+                            ('apt-sources.txt', apps['sources'])):
+            with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + ('\n' if lines else ''))
+        manifest['apps'] = {'apt': len(apps['apt']), 'flatpak': len(apps['flatpak'])}
+
+    # 4) cài đặt
+    for key, name, _desc, paths in SETTINGS:
+        if key not in sel['settings']:
+            continue
+        if stop.is_set():
+            raise Stop()
+        report('settings', need, need, 'Đang gói cài đặt: %s…' % name)
+        d = os.path.join(root, 'Cài đặt')
+        os.makedirs(d, exist_ok=True)
+        have = [p for p in paths if os.path.lexists(os.path.join(HOME, p))]
+        tmp = os.path.join(d, key + '.tar.gz.depot-tmp')
+        try:
+            with tarfile.open(tmp, 'w:gz') as tar:
+                for p in have:
+                    tar.add(os.path.join(HOME, p), arcname=p)
+            os.replace(tmp, os.path.join(d, key + '.tar.gz'))
+            manifest['settings'][key] = {'name': name, 'paths': have}
+        except (OSError, tarfile.TarError) as e:
+            errors.append('Cài đặt "%s": %s' % (name, e))
+
+    manifest['errors'] = len(errors)
+    with open(os.path.join(root, 'manifest.json.depot-tmp'), 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=1)
+    os.replace(os.path.join(root, 'manifest.json.depot-tmp'), os.path.join(root, 'manifest.json'))
+    if errors:
+        with open(os.path.join(root, 'loi-lan-sao-luu-cuoi.txt'), 'w', encoding='utf-8') as f:
+            f.write('\n'.join(errors) + '\n')
+    conf_set('LAST', '%s|%s|%d' % (manifest['time'], root, len(errors)))
+    report('done', need, need, '')
+    manifest['error_list'] = errors
+    return manifest
+
+
+# ====================================================================== khôi phục
+
+def read_manifest(root):
+    try:
+        with open(os.path.join(root, 'manifest.json'), encoding='utf-8') as f:
+            m = json.load(f)
+        return m if isinstance(m, dict) and m.get('format') == FORMAT else None
+    except (OSError, ValueError):
+        return None
+
+
+def find_backups(extra=()):
+    """[(thư mục bản sao lưu, manifest)] ở nơi lưu đã chọn, các ổ đang cắm và các thư mục chỉ thêm; mới nhất trước."""
+    places = [conf_read().get('DEST', '')] + list(extra)
+    try:
+        with open('/proc/mounts', encoding='utf-8') as f:
+            places += [l.split()[1].replace('\\040', ' ') for l in f
+                       if l.split()[1].startswith(('/media/', '/run/media/', '/mnt/'))]
+    except OSError:
+        pass
+    found, seen = [], set()
+    for place in places:
+        if not place:
+            continue
+        cands = [place, os.path.join(place, ROOT_NAME)]
+        base = os.path.join(place, ROOT_NAME)
+        if os.path.isdir(base):
+            try:
+                cands += [os.path.join(base, n) for n in sorted(os.listdir(base))]
+            except OSError:
+                pass
+        for c in cands:
+            real = os.path.realpath(c)
+            m = read_manifest(c) if real not in seen else None
+            if m:
+                seen.add(real)
+                found.append((c, m))
+    return sorted(found, key=lambda x: x[1].get('time', ''), reverse=True)
+
+
+def do_restore(root, only=('folders', 'settings', 'apps'), report=lambda *a: None, stop=None):
+    """Khôi phục từ bản ở root. Trả {'folders': số tệp đã chép, 'settings': [nhóm], 'saved': tệp cất cài đặt cũ,
+    'apps': (cài được, không có trong kho, flatpak thiếu), 'errors': [...]}."""
+    m = read_manifest(root)
+    if not m:
+        raise OSError('"%s" không phải bản sao lưu Depot (thiếu manifest.json).' % root)
+    stop = stop or threading.Event()
+    res = {'folders': 0, 'settings': [], 'saved': '', 'apps': ([], [], []), 'errors': []}
+    dirs = user_dirs()
+    if 'folders' in only:
+        report('scan', 0, 0, 'Đang xem cần chép những gì…')
+        plans, need = [], 0
+        for key, info in m.get('folders', {}).items():
+            src = os.path.join(root, 'Thư mục', info.get('name', key))
+            dst = dirs.get(key)
+            if not dst or not os.path.isdir(src):
+                continue
+            todo, _files, _total = plan_copy(src, dst, keep_newer=True)
+            plans.append(todo)
+            need += sum(t[2] for t in todo)
+        free = shutil.disk_usage(HOME).free
+        if need + 50 * 1024 * 1024 > free:
+            raise OSError('Máy không đủ chỗ để khôi phục thư mục: cần %s, còn trống %s.' % (human(need), human(free)))
+        done = [0]
+
+        def progress(n, path):
+            done[0] += n
+            report('folders', done[0], need, path)
+        for todo in plans:
+            run_copy(todo, progress, stop, res['errors'])
+            res['folders'] += len(todo)
+    if 'settings' in only and m.get('settings'):
+        report('settings', 1, 1, 'Đang khôi phục cài đặt…')
+        names = {s[0]: s for s in SETTINGS}
+        groups = [k for k in m['settings'] if k in names and os.path.isfile(os.path.join(root, 'Cài đặt', k + '.tar.gz'))]
+        # cất bản đang có trước khi ghi đè
+        os.makedirs(SAFE_DIR, exist_ok=True)
+        saved = os.path.join(SAFE_DIR, 'truoc-khi-khoi-phuc-%s.tar.gz' % time.strftime('%Y%m%d-%H%M%S'))
+        try:
+            with tarfile.open(saved, 'w:gz') as tar:
+                for k in groups:
+                    for p in names[k][3]:
+                        if os.path.lexists(os.path.join(HOME, p)):
+                            tar.add(os.path.join(HOME, p), arcname=p)
+            res['saved'] = saved
+        except (OSError, tarfile.TarError) as e:
+            raise OSError('Không cất được cài đặt đang có (%s) nên chưa khôi phục cài đặt.' % e)
+        if 'look' in groups and os.path.realpath(HOME) == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir):
+            # xfconfd giữ cài đặt trong bộ nhớ và sẽ ghi đè file vừa khôi phục: cho nó nghỉ, lần gọi sau nó đọc lại
+            subprocess.run(['pkill', '-x', 'xfconfd'], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for k in groups:
+            allowed = tuple(names[k][3])
+            try:
+                with tarfile.open(os.path.join(root, 'Cài đặt', k + '.tar.gz'), 'r:gz') as tar:
+                    members = [t for t in tar.getmembers()
+                               if not os.path.isabs(t.name) and '..' not in t.name.split('/')
+                               and any(t.name == a or t.name.startswith(a + '/') for a in allowed)
+                               and (t.isfile() or t.isdir())]
+                    tar.extractall(HOME, members=members, filter='data')
+                res['settings'].append(names[k][1])
+            except (OSError, tarfile.TarError, TypeError) as e:
+                res['errors'].append('Cài đặt "%s": %s' % (names[k][1], e))
+    if 'apps' in only and m.get('apps'):
+        report('apps', 1, 1, 'Đang so danh sách ứng dụng…')
+        res['apps'] = apps_missing(root)
+    report('done', 1, 1, '')
+    return res
+
+
+# ====================================================================== dòng lệnh
+
+def cli(args):
+    cmd = args[0]
+    if cmd == 'status':
+        c, sel, dirs = conf_read(), selection(), user_dirs()
+        print('Nơi lưu: %s' % (c.get('DEST') or '(chưa chọn)'))
+        print('Thư mục: %s' % (', '.join(f[2] for f in FOLDERS if f[0] in sel['folders'] and dirs.get(f[0])
+                                         and os.path.isdir(dirs[f[0]])) or 'không'))
+        print('Ứng dụng: %s' % ('có' if sel['apps'] else 'không'))
+        print('Cài đặt: %s' % (', '.join(s[1] for s in SETTINGS if s[0] in sel['settings']) or 'không'))
+        last = c.get('LAST', '').split('|')
+        print('Lần gần nhất: %s' % ('%s → %s%s' % (last[0], last[1], ' (%s lỗi)' % last[2] if last[2] != '0' else '')
+                                    if len(last) == 3 else 'chưa sao lưu lần nào'))
+        return 0
+    if cmd == 'list':
+        found = find_backups(args[1:2])
+        for root, m in found:
+            print('%s\t%s\t%s' % (m.get('time', '?'), m.get('host', '?'), root))
+        if not found:
+            print('Không thấy bản sao lưu nào.')
+        return 0
+    if cmd == 'run':
+        dest = args[args.index('--dest') + 1] if '--dest' in args[:-1] else conf_read().get('DEST', '')
+        if not dest:
+            print('depot-backup: chưa chọn nơi lưu — thêm --dest THƯ_MỤC', file=sys.stderr)
+            return 2
+        last = [0.0]
+
+        def report(stage, done, total, what):
+            if stage == 'folders' and time.monotonic() - last[0] > 0.5:
+                last[0] = time.monotonic()
+                print('\r  %s / %s   ' % (human(done), human(total)), end='', flush=True)
+            elif stage in ('scan', 'apps', 'settings'):
+                print('\r' + what.ljust(60))
+        try:
+            m = do_backup(dest, report=report)
+        except OSError as e:
+            print('\ndepot-backup: %s' % e, file=sys.stderr)
+            return 1
+        print('\rXong: %s' % backup_root(dest))
+        for key, info in m['folders'].items():
+            print('  %-14s %d tệp, %s' % (info['name'], info['files'], human(info['bytes'])))
+        if m['apps']:
+            print('  Ứng dụng       %d gói apt, %d app Flatpak' % (m['apps']['apt'], m['apps']['flatpak']))
+        if m['settings']:
+            print('  Cài đặt        %s' % ', '.join(v['name'] for v in m['settings'].values()))
+        for e in m['error_list'][:20]:
+            print('  !! ' + e)
+        return 0 if not m['error_list'] else 3
+    if cmd == 'restore' and len(args) > 1:
+        only = tuple(args[args.index('--only') + 1].split(',')) if '--only' in args[:-1] else ('folders', 'settings', 'apps')
+        try:
+            r = do_restore(args[1], only, report=lambda stage, d, t, what: stage != 'folders' and what and print(what))
+        except OSError as e:
+            print('depot-backup: %s' % e, file=sys.stderr)
+            return 1
+        print('Thư mục: đã chép %d tệp' % r['folders'])
+        if r['settings']:
+            print('Cài đặt: %s — bản cũ cất ở %s. Đăng xuất rồi đăng nhập lại để áp dụng.' % (', '.join(r['settings']), r['saved']))
+        ok, unknown, flat = r['apps']
+        if ok:
+            print('Ứng dụng còn thiếu, cài bằng:\n  sudo apt install %s' % ' '.join(ok))
+        if unknown:
+            print('Kho của máy này không có: %s' % ' '.join(unknown))
+        if flat:
+            print('App Flatpak còn thiếu: %s' % ' '.join(flat))
+        for e in r['errors'][:20]:
+            print('  !! ' + e)
+        return 0 if not r['errors'] else 3
+    print(__doc__ or 'dùng: depot-backup [run [--dest THƯ_MỤC] | status | list [THƯ_MỤC] | restore BẢN [--only …]]',
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__' and sys.argv[1:] and sys.argv[1] in ('run', 'status', 'list', 'restore'):
+    sys.exit(cli(sys.argv[1:]))
+if __name__ == '__main__' and sys.argv[1:] and sys.argv[1] in ('-h', '--help'):
+    print('dùng: depot-backup [run [--dest THƯ_MỤC] | status | list [THƯ_MỤC] | restore BẢN [--only folders,settings,apps]]')
+    sys.exit(0)
+
+# ====================================================================== cửa sổ (chỉ nạp GTK khi mở cửa sổ)
+
+import gi  # noqa: E402
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+APP_ID = 'tech.depot.Backup'
+
+# cùng bảng màu và kiểu thẻ với depot-settings
+PALETTES = {
+    'dark': dict(bg='#1f2733', fg='#ffffff', fg2='rgba(255,255,255,0.72)', fg3='rgba(255,255,255,0.36)',
+                 card='rgba(255,255,255,0.055)', card_border='rgba(255,255,255,0.06)',
+                 card_hover='rgba(255,255,255,0.09)', hover='rgba(255,255,255,0.07)', stroke='rgba(255,255,255,0.11)',
+                 control='rgba(255,255,255,0.07)', control_hover='rgba(255,255,255,0.11)', accent='#4cc2ff',
+                 accent_hover='#47b1e8', on_accent='#04121c', flyout='#2b3442', shadow='rgba(0,0,0,0.50)',
+                 inset='rgba(0,0,0,0.16)', bad='#ff99a4'),
+    'light': dict(bg='#f3f3f3', fg='#1b1b1b', fg2='rgba(0,0,0,0.62)', fg3='rgba(0,0,0,0.38)',
+                  card='rgba(255,255,255,0.72)', card_border='rgba(0,0,0,0.07)', card_hover='rgba(249,249,249,0.50)',
+                  hover='rgba(0,0,0,0.045)', stroke='rgba(0,0,0,0.12)', control='rgba(255,255,255,0.80)',
+                  control_hover='rgba(249,249,249,0.55)', accent='#005fb8', accent_hover='#1a6fc0',
+                  on_accent='#ffffff', flyout='#fbfbfb', shadow='rgba(0,0,0,0.22)', inset='rgba(0,0,0,0.03)',
+                  bad='#c42b1c'),
+}
+
+CSS = '''
+window.bk-win { background-color: @bk_bg; color: @bk_fg; border-radius: 8px; }
+window.bk-win decoration { margin: 14px; border-radius: 8px; border: none; background: none;
+    box-shadow: 0 8px 26px @bk_shadow, 0 0 0 1px @bk_stroke; }
+window.bk-win.maximized decoration { margin: 0; border-radius: 0; box-shadow: none; }
+window.bk-win.maximized { border-radius: 0; }
+.bk-win *, popover.bk-pop * { font-family: Inter, "Segoe UI Variable", "Noto Sans", sans-serif;
+    text-shadow: none; -gtk-icon-shadow: none; outline-width: 0; }
+.bk-win label, popover.bk-pop label { color: inherit; }
+.bk-root { background-color: @bk_bg; color: @bk_fg; border-radius: 0 0 8px 8px; }
+.bk-win button, popover.bk-pop button { background-image: none; background-color: transparent; box-shadow: none;
+    border: none; min-width: 0; min-height: 0; padding: 0; margin: 0; color: inherit;
+    transition: background-color 120ms ease, color 120ms ease; }
+.bk-titlebar { background-color: @bk_bg; border: none; box-shadow: none; padding: 0; min-height: 0;
+    border-radius: 8px 8px 0 0; }
+.bk-app-title { font-size: 9pt; margin-left: 14px; }
+.bk-win button.bk-back { min-width: 40px; min-height: 30px; border-radius: 4px; margin: 5px 0 5px 6px; }
+.bk-win button.bk-back:hover { background-color: @bk_hover; }
+.bk-win button.bk-winbtn { min-width: 46px; min-height: 32px; border-radius: 0; }
+.bk-win button.bk-winbtn:hover { background-color: @bk_hover; }
+.bk-win button.bk-winbtn.close { border-radius: 0 8px 0 0; }
+.bk-win button.bk-winbtn.close:hover { background-color: #c42b1c; color: #ffffff; }
+.bk-page { padding: 8px 32px 20px 32px; }
+.bk-win scrolledwindow, .bk-win viewport { background-color: transparent; border: none; }
+.bk-win scrolledwindow undershoot, .bk-win scrolledwindow overshoot { background-image: none; box-shadow: none; }
+.bk-hero-title { font-size: 17pt; font-weight: 600; }
+.bk-hero-sub { font-size: 10pt; color: @bk_fg2; }
+.bk-card, .bk-win button.bk-card { background-color: @bk_card; border: 1px solid @bk_card_border; border-radius: 4px;
+    padding: 12px 16px; min-height: 42px; color: @bk_fg; }
+.bk-win button.bk-card:hover { background-color: @bk_card_hover; }
+.bk-card.open, .bk-win button.bk-card.open { border-radius: 4px 4px 0 0; }
+.bk-sub { background-color: @bk_inset; border: 1px solid @bk_card_border; border-top: none;
+    border-radius: 0 0 4px 4px; padding: 2px 16px 4px 52px; }
+.bk-subrow { padding: 9px 0; }
+.bk-row-icon { margin-right: 16px; }
+.bk-row-title { font-size: 10.5pt; }
+.bk-row-sub { font-size: 9pt; color: @bk_fg2; }
+.bk-row-value { font-size: 9.5pt; color: @bk_fg2; margin-right: 12px; }
+.bk-chev { color: @bk_fg2; margin-left: 12px; }
+.bk-note { font-size: 9.5pt; color: @bk_fg2; }
+.bk-bad { color: @bk_bad; }
+.bk-bottom { padding: 12px 32px 16px 32px; border-top: 1px solid @bk_card_border; }
+.bk-win button.bk-btn, popover.bk-pop button.bk-btn { background-color: @bk_control; border: 1px solid @bk_stroke;
+    border-radius: 4px; padding: 6px 16px; min-height: 20px; font-size: 10pt; color: @bk_fg; }
+.bk-win button.bk-btn:hover { background-color: @bk_control_hover; }
+.bk-win button.bk-btn:disabled { color: @bk_fg3; }
+.bk-win button.bk-btn.accent { background-color: @bk_accent; border-color: @bk_accent; color: @bk_on_accent;
+    padding: 6px 28px; }
+.bk-win button.bk-btn.accent:hover { background-color: @bk_accent_hover; }
+.bk-win button.bk-btn.accent:disabled { background-color: @bk_control; border-color: @bk_stroke; color: @bk_fg3; }
+popover.bk-pop { background-color: @bk_flyout; border: 1px solid @bk_stroke; border-radius: 8px; padding: 4px;
+    box-shadow: 0 6px 18px @bk_shadow; color: @bk_fg; }
+popover.bk-pop button.bk-item { border-radius: 4px; padding: 7px 12px; font-size: 10pt; color: @bk_fg; }
+popover.bk-pop button.bk-item:hover { background-color: @bk_hover; }
+.bk-win switch { min-width: 40px; min-height: 20px; border-radius: 11px; border: 1px solid @bk_fg2;
+    box-shadow: none; background-image: none; background-color: transparent; margin: 0; padding: 0;
+    color: transparent; font-size: 1px; }
+.bk-win switch image { color: transparent; -gtk-icon-source: none; }
+.bk-win switch slider { min-width: 12px; min-height: 12px; border-radius: 7px; margin: 3px; border: none;
+    box-shadow: none; background-image: none; background-color: @bk_fg2; }
+.bk-win switch:checked { background-color: @bk_accent; border-color: @bk_accent; }
+.bk-win switch:checked slider { background-color: @bk_on_accent; }
+.bk-win switch:disabled { border-color: @bk_fg3; }
+.bk-win switch:disabled slider { background-color: @bk_fg3; }
+.bk-win progressbar, .bk-win progressbar trough, .bk-win progressbar progress { min-height: 4px; border-radius: 2px;
+    border: none; box-shadow: none; background-image: none; }
+.bk-win progressbar trough { background-color: @bk_fg3; }
+.bk-win progressbar progress { background-color: @bk_accent; }
+.bk-win scrollbar { background-color: transparent; border: none; }
+.bk-win scrollbar slider { min-width: 3px; min-height: 30px; border-radius: 3px; border: 3px solid transparent;
+    background-color: @bk_fg3; background-clip: padding-box; }
+'''
+
+
+def bg(fn, done=None):
+    def work():
+        try:
+            r = fn()
+        except Exception as e:                      # noqa: BLE001
+            r = e
+        if done:
+            GLib.idle_add(lambda: (done(r), False)[1])
+    threading.Thread(target=work, daemon=True).start()
+
+
+def label(text='', cls=None, xalign=0.0, wrap=False):
+    l = Gtk.Label(label=text)
+    l.set_xalign(xalign)
+    if wrap:
+        l.set_line_wrap(True)
+        l.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        l.set_max_width_chars(70)
+    else:
+        l.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+    for c in (cls or '').split():
+        l.get_style_context().add_class(c)
+    return l
+
+
+def image(name, px=20, cls=None):
+    theme = Gtk.IconTheme.get_default()
+    img = Gtk.Image.new_from_icon_name(name if theme.has_icon(name) else 'folder-symbolic', Gtk.IconSize.MENU)
+    img.set_pixel_size(px)
+    if cls:
+        img.get_style_context().add_class(cls)
+    return img
+
+
+def button(text, cb, accent=False):
+    b = Gtk.Button(label=text)
+    b.get_style_context().add_class('bk-btn')
+    if accent:
+        b.get_style_context().add_class('accent')
+    b.set_can_focus(False)
+    b.set_valign(Gtk.Align.CENTER)
+    b.connect('clicked', lambda *_: cb())
+    return b
+
+
+def switch(active, cb):
+    sw = Gtk.Switch()
+    sw.set_active(active)
+    sw.set_valign(Gtk.Align.CENTER)
+    sw.set_can_focus(False)
+    sw.connect('notify::active', lambda s, _p: cb(s.get_active()))
+    return sw
+
+
+class Group:
+    """Một nhóm kiểu Windows Backup: thẻ có icon, tên, tóm tắt; bấm thì mở ra các dòng con có công tắc."""
+
+    def __init__(self, icon_name, title, sub, trailing=None, rows=None):
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        head = Gtk.Box()
+        head.pack_start(image(icon_name, 20, 'bk-row-icon'), False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        col.set_valign(Gtk.Align.CENTER)
+        col.pack_start(label(title, 'bk-row-title'), False, False, 0)
+        self.sub = label(sub, 'bk-row-sub')
+        col.pack_start(self.sub, False, False, 0)
+        head.pack_start(col, True, True, 0)
+        self.value = label('', 'bk-row-value', xalign=1.0)
+        if rows is None:
+            for w in trailing or []:
+                head.pack_end(w, False, False, 0)
+            head.pack_end(self.value, False, False, 0)
+            head.get_style_context().add_class('bk-card')
+            self.box.pack_start(head, False, False, 0)
+            return
+        self.chev = image('pan-down-symbolic', 14, 'bk-chev')
+        head.pack_end(self.chev, False, False, 0)
+        head.pack_end(self.value, False, False, 0)
+        self.head = Gtk.Button()
+        self.head.add(head)
+        self.head.set_can_focus(False)
+        self.head.get_style_context().add_class('bk-card')
+        self.head.connect('clicked', lambda *_: self.toggle())
+        self.box.pack_start(self.head, False, False, 0)
+        self.rev = Gtk.Revealer()
+        self.rev.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.rev.set_transition_duration(160)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        inner.get_style_context().add_class('bk-sub')
+        for r in rows:
+            inner.pack_start(r, False, False, 0)
+        self.rev.add(inner)
+        self.box.pack_start(self.rev, False, False, 0)
+
+    def toggle(self):
+        on = not self.rev.get_reveal_child()
+        self.rev.set_reveal_child(on)
+        self.chev.set_from_icon_name('pan-up-symbolic' if on else 'pan-down-symbolic', Gtk.IconSize.MENU)
+        ctx = self.head.get_style_context()
+        (ctx.add_class if on else ctx.remove_class)('open')
+
+
+def subrow(title, sub, trailing):
+    row = Gtk.Box()
+    row.get_style_context().add_class('bk-subrow')
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+    col.set_valign(Gtk.Align.CENTER)
+    col.pack_start(label(title, 'bk-row-title'), False, False, 0)
+    sub_l = label(sub, 'bk-row-sub')
+    col.pack_start(sub_l, False, False, 0)
+    row.pack_start(col, True, True, 0)
+    for w in trailing:
+        row.pack_end(w, False, False, 0)
+    row.sub = sub_l
+    return row
+
+
+class Window(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title='Sao lưu')
+        self.set_default_size(760, 720)
+        self.set_size_request(560, 460)
+        self.set_icon_name('drive-harddisk')
+        self.get_style_context().add_class('bk-win')
+        self.busy = False
+        self.stop = threading.Event()
+        self.est = None
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 20)
+        self.apply_theme()
+        Gtk.Settings.get_default().connect('notify::gtk-theme-name', lambda *_: self.apply_theme())
+        self.build_titlebar()
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.get_style_context().add_class('bk-root')
+        self.add(root)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(120)
+        root.pack_start(self.stack, True, True, 0)
+        self.stack.add_named(self.build_backup_page(), 'backup')
+        self.stack.add_named(self.build_restore_page(), 'restore')
+        root.show_all()
+        self.show_page('backup')
+        self.connect('delete-event', self.on_close)
+        self.refresh()
+
+    # ------------------------------------------------------------------ khung
+    def apply_theme(self):
+        mode = conf_value_settings()
+        if mode not in PALETTES:
+            st = Gtk.Settings.get_default()
+            mode = 'dark' if 'dark' in (st.get_property('gtk-theme-name') or '').lower() or st.get_property(
+                'gtk-application-prefer-dark-theme') else 'light'
+        self.css.load_from_data((''.join('@define-color bk_%s %s;\n' % kv for kv in PALETTES[mode].items())
+                                 + CSS).encode())
+
+    def build_titlebar(self):
+        bar = Gtk.Box()
+        bar.get_style_context().add_class('bk-titlebar')
+        self.back = Gtk.Button()
+        self.back.add(image('go-previous-symbolic', 16))
+        self.back.get_style_context().add_class('bk-back')
+        self.back.set_can_focus(False)
+        self.back.get_child().show()
+        self.back.set_no_show_all(True)
+        self.back.connect('clicked', lambda *_: self.show_page('backup'))
+        bar.pack_start(self.back, False, False, 0)
+        self.app_title = label('Sao lưu Depot', 'bk-app-title')
+        bar.pack_start(self.app_title, False, False, 0)
+        for icon_name, cls, cb in (('window-close-symbolic', 'close', self.close),
+                                   ('window-maximize-symbolic', 'max',
+                                    lambda: self.unmaximize() if self.is_maximized() else self.maximize()),
+                                   ('window-minimize-symbolic', 'min', self.iconify)):
+            b = Gtk.Button()
+            b.add(image(icon_name, 14))
+            b.get_style_context().add_class('bk-winbtn')
+            b.get_style_context().add_class(cls)
+            b.set_can_focus(False)
+            b.set_valign(Gtk.Align.START)
+            b.connect('clicked', lambda _b, f=cb: f())
+            bar.pack_end(b, False, False, 0)
+        bar.show_all()
+        self.set_titlebar(bar)
+
+    def show_page(self, name):
+        if self.busy:
+            return
+        self.stack.set_visible_child_name(name)
+        self.back.set_visible(name != 'backup')
+        self.app_title.set_text('Sao lưu Depot' if name == 'backup' else 'Khôi phục')
+        if name == 'restore':
+            self.fill_backups()
+
+    def on_close(self, *_):
+        if self.busy:
+            self.stop.set()                          # đang chép: dừng cho gọn rồi mới đóng
+            return True
+        return False
+
+    def scrolled(self, child):
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.add(child)
+        return sc
+
+    # ------------------------------------------------------------------ trang Sao lưu
+    def build_backup_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.get_style_context().add_class('bk-page')
+        hero = Gtk.Box(spacing=18)
+        hero.set_margin_bottom(14)
+        hero.pack_start(image('drive-harddisk', 56), False, False, 0)
+        hcol = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        hcol.set_valign(Gtk.Align.CENTER)
+        hcol.pack_start(label('Sao lưu máy này', 'bk-hero-title'), False, False, 0)
+        self.hero_sub = label('', 'bk-hero-sub', wrap=True)
+        hcol.pack_start(self.hero_sub, False, False, 0)
+        hero.pack_start(hcol, True, True, 0)
+        col.pack_start(hero, False, False, 0)
+
+        # nơi lưu
+        self.dest_btn = Gtk.MenuButton()
+        self.dest_btn.add(label('Chọn nơi lưu'))
+        self.dest_btn.get_style_context().add_class('bk-btn')
+        self.dest_btn.set_can_focus(False)
+        self.dest_btn.set_valign(Gtk.Align.CENTER)
+        self.dest_pop = Gtk.Popover()
+        self.dest_pop.get_style_context().add_class('bk-pop')
+        self.dest_btn.set_popover(self.dest_pop)
+        self.dest_btn.connect('toggled', lambda b: b.get_active() and self.fill_places())
+        self.dest = Group('drive-removable-media-symbolic', 'Nơi lưu', '', trailing=[self.dest_btn])
+        col.pack_start(self.dest.box, False, False, 0)
+        col.pack_start(Gtk.Box(height_request=8), False, False, 0)
+
+        sel, dirs = selection(), user_dirs()
+        # thư mục
+        self.folder_rows = {}
+        rows = []
+        for key, _var, name, _d, _on in FOLDERS:
+            path = dirs.get(key)
+            if not path or not os.path.isdir(path):
+                continue
+            row = subrow(name, path.replace(HOME, '~', 1),
+                         [switch(key in sel['folders'], lambda on, key=key: self.set_member('FOLDERS', key, on))])
+            self.folder_rows[key] = row
+            rows.append(row)
+        self.g_folders = Group('folder-symbolic', 'Thư mục', '', rows=rows)
+        col.pack_start(self.g_folders.box, False, False, 0)
+        # ứng dụng
+        self.g_apps = Group('view-app-grid-symbolic', 'Ứng dụng',
+                            'Ghi nhớ danh sách ứng dụng đã cài để cài lại nhanh trên máy mới',
+                            trailing=[switch(sel['apps'], lambda on: (conf_set('APPS', '1' if on else '0'),
+                                                                      self.refresh()))])
+        col.pack_start(self.g_apps.box, False, False, 0)
+        # cài đặt
+        rows = [subrow(name, desc, [switch(key in sel['settings'],
+                                           lambda on, key=key: self.set_member('SETTINGS', key, on))])
+                for key, name, desc, _paths in SETTINGS]
+        self.g_settings = Group('preferences-system-symbolic', 'Cài đặt', '', rows=rows)
+        col.pack_start(self.g_settings.box, False, False, 0)
+        col.pack_start(Gtk.Box(height_request=8), False, False, 0)
+        col.pack_start(label('Không sao lưu mật khẩu Wi‑Fi, tài khoản, hồ sơ trình duyệt. Bản sao lưu không mã hoá: '
+                             'ai cầm ổ đĩa cũng đọc được.', 'bk-note', wrap=True), False, False, 0)
+        page.pack_start(self.scrolled(col), True, True, 0)
+
+        # thanh dưới
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        bottom.get_style_context().add_class('bk-bottom')
+        self.bar = Gtk.ProgressBar()
+        self.bar.set_no_show_all(True)
+        bottom.pack_start(self.bar, False, False, 0)
+        line = Gtk.Box(spacing=8)
+        self.status = label('', 'bk-note', wrap=True)
+        line.pack_start(self.status, True, True, 0)
+        self.run_btn = button('Sao lưu', self.on_run, accent=True)
+        line.pack_end(self.run_btn, False, False, 0)
+        self.restore_btn = button('Khôi phục…', lambda: self.show_page('restore'))
+        line.pack_end(self.restore_btn, False, False, 0)
+        bottom.pack_start(line, False, False, 0)
+        page.pack_start(bottom, False, False, 0)
+        return page
+
+    def set_member(self, conf_key, key, on):
+        sel = selection()
+        cur = sel['folders' if conf_key == 'FOLDERS' else 'settings']
+        order = [f[0] for f in FOLDERS] if conf_key == 'FOLDERS' else [s[0] for s in SETTINGS]
+        new = [k for k in order if (k in cur and k != key) or (k == key and on)]
+        conf_set(conf_key, ','.join(new))
+        self.refresh()
+
+    def places(self):
+        """[(tên hiện, đường dẫn)] các ổ đang cắm ghi được."""
+        out = []
+        try:
+            with open('/proc/mounts', encoding='utf-8') as f:
+                for l in f:
+                    p = l.split()[1].replace('\\040', ' ')
+                    if p.startswith(('/media/', '/run/media/', '/mnt/')) and os.access(p, os.W_OK):
+                        try:
+                            free = human(shutil.disk_usage(p).free)
+                        except OSError:
+                            continue
+                        out.append(('%s — còn trống %s' % (os.path.basename(p) or p, free), p))
+        except OSError:
+            pass
+        return out
+
+    def fill_places(self):
+        old = self.dest_pop.get_child()
+        if old:
+            self.dest_pop.remove(old)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+        def item(text, cb):
+            b = Gtk.Button()
+            b.add(label(text))
+            b.get_style_context().add_class('bk-item')
+            b.connect('clicked', lambda *_: (self.dest_pop.popdown(), cb()))
+            col.pack_start(b, False, False, 0)
+        for name, path in self.places():
+            item(name, lambda path=path: self.set_dest(path))
+        item('Thư mục khác…', self.choose_folder)
+        col.show_all()
+        self.dest_pop.add(col)
+
+    def choose_folder(self):
+        dlg = Gtk.FileChooserNative.new('Chọn nơi lưu bản sao lưu', self, Gtk.FileChooserAction.SELECT_FOLDER,
+                                        'Chọn', 'Huỷ')
+        cur = conf_read().get('DEST', '')
+        if cur and os.path.isdir(cur):
+            dlg.set_current_folder(cur)
+        if dlg.run() == Gtk.ResponseType.ACCEPT and dlg.get_filename():
+            self.set_dest(dlg.get_filename())
+        dlg.destroy()
+
+    def set_dest(self, path):
+        conf_set('DEST', path)
+        self.refresh()
+
+    def refresh(self):
+        """Đọc lại cấu hình, tính dung lượng ở luồng phụ rồi cập nhật các dòng."""
+        c, sel = conf_read(), selection()
+        dest = c.get('DEST', '')
+        last = c.get('LAST', '').split('|')
+        self.hero_sub.set_text('%s · %s' % (socket.gethostname(), 'Lần sao lưu gần nhất: %s%s' % (
+            last[0], ' (%s tệp lỗi)' % last[2] if last[2] != '0' else '') if len(last) == 3
+            else 'Chưa sao lưu lần nào'))
+        self.dest.sub.set_text(short(dest) if dest else 'Chưa chọn — cắm USB hoặc ổ ngoài, hoặc chọn '
+                               'một thư mục')
+        self.dest_btn.get_child().set_text('Đổi' if dest else 'Chọn nơi lưu')
+        self.g_settings.sub.set_text(', '.join(s[1] for s in SETTINGS if s[0] in sel['settings']) or 'Không sao lưu')
+        self.g_settings.value.set_text('Bật' if sel['settings'] else 'Tắt')
+        self.g_apps.value.set_text('Bật' if sel['apps'] else 'Tắt')
+        self.g_folders.value.set_text('%d thư mục' % len([k for k in sel['folders'] if k in self.folder_rows])
+                                      if sel['folders'] else 'Tắt')
+        if self.busy:
+            return
+        self.run_btn.set_sensitive(False)
+        self.status.set_text('Đang tính dung lượng…')
+        bg(lambda: estimate(dest, sel), lambda r: self.show_estimate(r, dest, sel))
+
+    def show_estimate(self, est, dest, sel):
+        if self.busy or isinstance(est, Exception):
+            return
+        self.est = est
+        names = []
+        for key, row in self.folder_rows.items():
+            files, total, _need = est['folders'].get(key, (0, 0, 0))
+            row.sub.set_text('%s · %d tệp, %s' % (user_dirs()[key].replace(HOME, '~', 1), files, human(total)))
+            if key in sel['folders']:
+                names.append(next(f[2] for f in FOLDERS if f[0] == key))
+        self.g_folders.sub.set_text(', '.join(names) or 'Không sao lưu thư mục nào')
+        self.status.get_style_context().remove_class('bk-bad')
+        nothing = not (sel['folders'] or sel['apps'] or sel['settings'])
+        if not dest:
+            self.status.set_text('Chọn nơi lưu để bắt đầu.')
+        elif not os.path.isdir(dest):
+            self.status.set_text('Không thấy nơi lưu (ổ chưa cắm?).')
+            self.status.get_style_context().add_class('bk-bad')
+        elif nothing:
+            self.status.set_text('Chưa bật nhóm nào để sao lưu.')
+        elif est['free'] is not None and est['need'] + 20 * 1024 * 1024 > est['free']:
+            self.status.set_text('Nơi lưu không đủ chỗ: cần chép %s, còn trống %s.' % (human(est['need']),
+                                                                                       human(est['free'])))
+            self.status.get_style_context().add_class('bk-bad')
+        else:
+            self.status.set_text('Cần chép %s%s' % (human(est['need']), ' · nơi lưu còn trống %s' % human(est['free'])
+                                                    if est['free'] is not None else ''))
+            self.run_btn.set_sensitive(True)
+            return
+        self.run_btn.set_sensitive(False)
+
+    # ------------------------------------------------------------------ chạy sao lưu / khôi phục
+    def start(self, work, done, stop_label_for):
+        self.busy = True
+        self.stop.clear()
+        self.bar.set_fraction(0)
+        self.bar.show()
+        self.restore_btn.set_sensitive(False)
+        self.run_btn.set_sensitive(True)
+        self.run_btn.set_label('Dừng')
+        self.run_btn.get_style_context().remove_class('accent')
+        last = [0.0]
+
+        def report(stage, d, t, what):
+            now = time.monotonic()
+            if stage == 'folders' and now - last[0] < 0.1:
+                return
+            last[0] = now
+
+            def show():
+                if stage == 'folders' and t:
+                    self.bar.set_fraction(min(1.0, d / t))
+                    self.status.set_text('%s / %s — %s' % (human(d), human(t), os.path.basename(what)))
+                elif what:
+                    self.status.set_text(what)
+                return False
+            GLib.idle_add(show)
+
+        def finish(r):
+            self.busy = False
+            self.bar.hide()
+            self.run_btn.set_label(stop_label_for)
+            self.run_btn.get_style_context().add_class('accent')
+            self.restore_btn.set_sensitive(True)
+            done(r)
+        bg(lambda: work(report), finish)
+
+    def on_run(self):
+        if self.busy:
+            self.stop.set()
+            self.status.set_text('Đang dừng…')
+            return
+        dest, sel = conf_read().get('DEST', ''), selection()
+        self.start(lambda report: do_backup(dest, sel, report, self.stop), self.backup_done, 'Sao lưu')
+
+    def start_when_ready(self, tries=40):
+        """depot-backup start: chờ phần tính dung lượng xong (nút Sao lưu sáng lên) rồi chạy; không chạy được thì thôi."""
+        if self.busy:
+            return False
+        if self.run_btn.get_sensitive() and self.est is not None:
+            self.on_run()
+        elif tries > 0 and self.status.get_text().startswith('Đang tính'):
+            GLib.timeout_add(150, self.start_when_ready, tries - 1)
+        return False
+
+    def backup_done(self, r):
+        self.refresh()
+        if isinstance(r, Stop):
+            self.message('Đã dừng. Các tệp chép xong vẫn nằm ở nơi lưu; lần sau sẽ chép tiếp phần còn lại.')
+        elif isinstance(r, Exception):
+            self.message('Sao lưu không thành: %s' % r, bad=True)
+        else:
+            n = len(r.get('error_list', []))
+            where = short(backup_root(conf_read().get('DEST', '')))
+            self.message('Đã sao lưu xong vào %s.' % where + (
+                ' %d tệp không chép được (xem loi-lan-sao-luu-cuoi.txt trong thư mục đó).' % n if n else ''),
+                bad=bool(n))
+
+    def message(self, text, bad=False):
+        def show():
+            self.status.set_text(text)
+            ctx = self.status.get_style_context()
+            (ctx.add_class if bad else ctx.remove_class)('bk-bad')
+            return False
+        GLib.timeout_add(450, show)                  # sau khi refresh() ghi dòng "Cần chép…"
+
+    # ------------------------------------------------------------------ trang Khôi phục
+    def build_restore_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.get_style_context().add_class('bk-page')
+        col.pack_start(label('Khôi phục từ bản sao lưu', 'bk-hero-title'), False, False, 0)
+        sub = label('Chọn một bản sao lưu. Thư mục được chép về (tệp ở máy mới hơn thì giữ nguyên); cài đặt đang có '
+                    'được cất lại trước khi ghi đè.', 'bk-hero-sub', wrap=True)
+        sub.set_margin_bottom(12)
+        col.pack_start(sub, False, False, 0)
+        self.backup_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.pack_start(self.backup_list, False, False, 0)
+        self.r_only = {'folders': True, 'settings': True, 'apps': True}
+        self.r_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.r_opts.set_margin_top(10)
+        for key, icon_name, title, desc in (
+                ('folders', 'folder-symbolic', 'Thư mục', 'Chép các thư mục cá nhân trong bản sao lưu về máy này'),
+                ('settings', 'preferences-system-symbolic', 'Cài đặt', 'Giao diện, panel, bộ gõ… — đăng xuất rồi đăng '
+                 'nhập lại để áp dụng'),
+                ('apps', 'view-app-grid-symbolic', 'Ứng dụng', 'So với máy này và cài lại những ứng dụng còn thiếu')):
+            g = Group(icon_name, title, desc,
+                      trailing=[switch(True, lambda on, key=key: self.r_only.__setitem__(key, on))])
+            self.r_opts.pack_start(g.box, False, False, 0)
+        col.pack_start(self.r_opts, False, False, 0)
+        self.r_result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.r_result.set_margin_top(12)
+        col.pack_start(self.r_result, False, False, 0)
+        page.pack_start(self.scrolled(col), True, True, 0)
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        bottom.get_style_context().add_class('bk-bottom')
+        self.r_bar = Gtk.ProgressBar()
+        self.r_bar.set_no_show_all(True)
+        bottom.pack_start(self.r_bar, False, False, 0)
+        line = Gtk.Box(spacing=8)
+        self.r_status = label('', 'bk-note', wrap=True)
+        line.pack_start(self.r_status, True, True, 0)
+        self.r_btn = button('Khôi phục', self.on_restore, accent=True)
+        line.pack_end(self.r_btn, False, False, 0)
+        line.pack_end(button('Tìm ở thư mục khác…', self.browse_backup), False, False, 0)
+        bottom.pack_start(line, False, False, 0)
+        page.pack_start(bottom, False, False, 0)
+        self.r_root = None
+        self.r_extra = []
+        return page
+
+    def fill_backups(self):
+        for w in self.backup_list.get_children():
+            self.backup_list.remove(w)
+        found = find_backups(self.r_extra)
+        group = None
+        self.r_root = found[0][0] if found else None
+        for root, m in found:
+            what = []
+            if m.get('folders'):
+                what.append('%d thư mục (%s)' % (len(m['folders']), human(sum(f.get('bytes', 0)
+                                                                         for f in m['folders'].values()))))
+            if m.get('apps'):
+                what.append('%d ứng dụng' % (m['apps'].get('apt', 0) + m['apps'].get('flatpak', 0)))
+            if m.get('settings'):
+                what.append('%d nhóm cài đặt' % len(m['settings']))
+            radio = Gtk.RadioButton.new_from_widget(group)
+            group = group or radio
+            radio.set_active(root == self.r_root)
+            radio.set_can_focus(False)
+            radio.set_valign(Gtk.Align.CENTER)
+            radio.connect('toggled', lambda r, root=root: r.get_active() and setattr(self, 'r_root', root))
+            g = Group('drive-harddisk-symbolic', 'Máy "%s" — %s' % (m.get('host', '?'), m.get('time', '?')),
+                      '%s · %s' % (short(root), ', '.join(what) or 'trống'), trailing=[radio])
+            self.backup_list.pack_start(g.box, False, False, 0)
+        if not found:
+            self.backup_list.pack_start(label('Chưa thấy bản sao lưu nào ở nơi lưu đã chọn và các ổ đang cắm. Cắm ổ '
+                                              'chứa thư mục "%s", hoặc bấm "Tìm ở thư mục khác…".' % ROOT_NAME,
+                                              'bk-note', wrap=True), False, False, 0)
+        self.backup_list.show_all()
+        self.r_opts.set_visible(bool(found))
+        self.r_btn.set_sensitive(bool(found))
+        self.r_status.set_text('')
+
+    def browse_backup(self):
+        dlg = Gtk.FileChooserNative.new('Chọn thư mục chứa bản sao lưu', self, Gtk.FileChooserAction.SELECT_FOLDER,
+                                        'Chọn', 'Huỷ')
+        if dlg.run() == Gtk.ResponseType.ACCEPT and dlg.get_filename():
+            self.r_extra.append(dlg.get_filename())
+            self.fill_backups()
+            if not find_backups([dlg.get_filename()]) or self.r_root is None:
+                self.r_status.set_text('Thư mục đó không chứa bản sao lưu Depot.')
+        dlg.destroy()
+
+    def on_restore(self):
+        if self.busy:
+            self.stop.set()
+            return
+        root, only = self.r_root, tuple(k for k, on in self.r_only.items() if on)
+        if not root or not only:
+            self.r_status.set_text('Chọn một bản sao lưu và ít nhất một nhóm.')
+            return
+        for w in self.r_result.get_children():
+            self.r_result.remove(w)
+        # dùng chung start(): tạm trỏ thanh tiến độ / dòng trạng thái / nút sang trang này
+        keep = (self.bar, self.status, self.run_btn, self.restore_btn)
+        self.bar, self.status, self.run_btn, self.restore_btn = self.r_bar, self.r_status, self.r_btn, self.back
+
+        def done(r):
+            self.bar, self.status, self.run_btn, self.restore_btn = keep
+            self.restore_done(r)
+        self.start(lambda report: do_restore(root, only, report, self.stop), done, 'Khôi phục')
+
+    def restore_done(self, r):
+        if isinstance(r, Stop):
+            self.r_status.set_text('Đã dừng.')
+            return
+        if isinstance(r, Exception):
+            self.r_status.set_text('Khôi phục không thành: %s' % r)
+            return
+        self.r_status.set_text('Đã khôi phục xong.')
+        lines = ['Thư mục: đã chép %d tệp về máy.' % r['folders']] if r['folders'] else []
+        if r['settings']:
+            lines.append('Cài đặt: %s. Bản đang có đã cất ở %s. Đăng xuất rồi đăng nhập lại để áp dụng.' % (
+                ', '.join(r['settings']), short(r['saved'])))
+        ok, unknown, flat = r['apps']
+        if unknown:
+            lines.append('Kho phần mềm của máy này không có: %s' % ', '.join(unknown[:30]) + ('…' if len(unknown) > 30 else ''))
+        if flat:
+            lines.append('App Flatpak còn thiếu (cài trong Phần mềm): %s' % ', '.join(flat))
+        if r['errors']:
+            lines.append('%d lỗi: %s' % (len(r['errors']), '; '.join(r['errors'][:3])))
+        for text in lines:
+            self.r_result.pack_start(label(text, 'bk-note', wrap=True), False, False, 0)
+        if ok:
+            g = Group('view-app-grid-symbolic', '%d ứng dụng còn thiếu' % len(ok),
+                      ', '.join(ok[:8]) + ('…' if len(ok) > 8 else ''),
+                      trailing=[button('Cài lại', lambda: self.install(ok))])
+            self.r_result.pack_start(g.box, False, False, 0)
+        elif 'apps' in self.r_only and self.r_only['apps'] and not unknown and not flat:
+            self.r_result.pack_start(label('Ứng dụng: máy này đã có đủ các ứng dụng trong bản sao lưu.', 'bk-note'),
+                                     False, False, 0)
+        self.r_result.show_all()
+
+    def install(self, pkgs):
+        self.r_status.set_text('Đang cài %d ứng dụng… (hệ thống sẽ hỏi mật khẩu quản trị)' % len(pkgs))
+
+        def work():
+            return subprocess.run(['pkexec', 'apt-get', 'install', '-y'] + pkgs, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True).returncode
+        bg(work, lambda rc: self.r_status.set_text('Đã cài xong.' if rc == 0 else 'Chưa cài được (huỷ hoặc lỗi mạng).'))
+
+
+def conf_value_settings():
+    """Chế độ màu dùng chung với app Cài đặt (THEME=system|dark|light trong ~/.config/depot/settings)."""
+    try:
+        with open(os.path.join(CONFIG, 'depot', 'settings'), encoding='utf-8') as f:
+            for line in f:
+                k, _, v = line.strip().partition('=')
+                if k == 'THEME':
+                    return v
+    except OSError:
+        pass
+    return 'system'
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.win = None
+
+    def do_command_line(self, cl):
+        args = cl.get_arguments()[1:]
+        if self.win is None:
+            self.win = Window(self)
+        if args and args[0] == 'restore-page':
+            self.win.show_page('restore')
+        self.win.present()
+        if args and args[0] == 'start' and not self.win.busy:
+            self.win.show_page('backup')
+            self.win.start_when_ready()
+        if args and args[0] == '--shots' and len(args) > 1:      # chụp hai trang để soát giao diện rồi thoát
+            self.shots(args[1])
+        return 0
+
+    def shots(self, outdir):
+        os.makedirs(outdir, exist_ok=True)
+        steps = [('backup', lambda: self.win.show_page('backup')),
+                 ('backup-mo', lambda: (self.win.g_folders.toggle(), self.win.g_settings.toggle())),
+                 ('restore', lambda: self.win.show_page('restore'))]
+        state = {'i': -1}
+
+        def step():
+            if state['i'] >= 0:
+                gw = self.win.get_window()
+                pb = Gdk.pixbuf_get_from_window(gw, 0, 0, gw.get_width(), gw.get_height())
+                if pb:
+                    pb.savev(os.path.join(outdir, steps[state['i']][0] + '.png'), 'png', [], [])
+            state['i'] += 1
+            if state['i'] >= len(steps):
+                self.win.destroy()
+                return False
+            steps[state['i']][1]()
+            return True
+        GLib.timeout_add(1500, step)
+
+
+if __name__ == '__main__':
+    sys.exit(App().run(sys.argv))

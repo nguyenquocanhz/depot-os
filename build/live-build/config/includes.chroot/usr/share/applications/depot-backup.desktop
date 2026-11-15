@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Sao lưu
+Name[en]=Backup
+GenericName=Sao lưu và khôi phục
+Comment=Sao lưu thư mục cá nhân, danh sách ứng dụng và cài đặt ra USB hoặc ổ ngoài; khôi phục trên máy mới — kiểu Windows Backup
+Comment[en]=Back up personal folders, the app list and settings to a USB or external drive, and restore them
+Exec=depot-backup
+Icon=drive-harddisk
+Terminal=false
+StartupNotify=true
+StartupWMClass=depot-backup
+Categories=Utility;System;Archiving;GTK;
+Keywords=backup;sao lưu;sao luu;khôi phục;khoi phuc;restore;usb;windows backup;
