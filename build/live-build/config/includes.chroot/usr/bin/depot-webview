@@ -1,0 +1,84 @@
+#!/bin/sh
+# Depot OS — depot-webview: sửa Mini App / Mini Game của Telegram không mở được (cửa sổ trắng, tự đóng, báo thiếu WebKitGTK)
+#
+#   depot-webview status         in tình trạng: bản WebKitGTK nào đang có, Telegram sẽ dùng bản nào, có cần sửa không
+#   depot-webview fix            (root, tự gọi pkexec) cài bản 4.1, gỡ bản 6.0 nếu không gói nào khác cần nó
+#   depot-webview fix --dry-run  chỉ in những gì "fix" sẽ làm (apt mô phỏng), không cần quyền quản trị
+#
+# Vì sao: Telegram Desktop không mang trình duyệt, lúc mở Mini App nó tự nạp WebKitGTK của hệ thống theo thứ tự
+#   libwebkitgtk-6.0.so.4 (GTK 4)  →  libwebkit2gtk-4.1.so.0 (GTK 3)  →  libwebkit2gtk-4.0.so.37
+# ISO Depot từ v0.24.1 chỉ mang bản 4.1 (hook 0728-depot-webkit): đó là đường nhúng thẳng vào cửa sổ X11.
+# Máy nào có bản 6.0 (người dùng tự cài theo lời nhắc "Please install WebKitGTK (webkitgtk-6.0/…)" của Telegram,
+# hoặc một app GTK 4 kéo về) thì Telegram ƯU TIÊN bản 6.0 và đi đường khác — nhúng qua một compositor Wayland lồng —
+# đường này trên phiên X11 làm webview chết ngay: log.txt của Telegram ghi 'BotWebView Error: … on crashed webview'.
+# Gặp trên máy thật 15/11/2026 (Acer Nitro 5, Intel UHD + NVIDIA, XFCE/X11, Telegram 7.4.4 tải từ telegram.org, chỉ có
+# libwebkitgtk-6.0-4): trong khi đó chính WebKitGTK 6.0 chạy bình thường (MiniBrowser của nó vẽ WebGL 182 khung / 2,5 giây)
+# — hỏng ở cách nhúng, không phải ở WebKit hay card đồ hoạ.
+# Sửa: có bản 4.1, không có bản 6.0 → Telegram quay về đường 4.1. Mở lại Telegram sau khi sửa.
+# Không đụng tới bản 6.0 khi có gói đã cài cần nó (khi đó chỉ báo, để người dùng quyết).
+set -u
+LIBDIR=/usr/lib/x86_64-linux-gnu
+PKG41=libwebkit2gtk-4.1-0
+PKG60=libwebkitgtk-6.0-4
+SELF=$(command -v "$0")   # pkexec cần đường dẫn tuyệt đối
+case $SELF in /*) ;; *) SELF=$(pwd)/$SELF ;; esac
+
+has41() { [ -e "$LIBDIR/libwebkit2gtk-4.1.so.0" ]; }
+has60() { [ -e "$LIBDIR/libwebkitgtk-6.0.so.4" ]; }
+
+# gói đã cài (ngoài chính nó) sẽ bị gỡ theo nếu gỡ bản 6.0
+needs60() {
+    LC_ALL=C apt-get -s remove "$PKG60" 2>/dev/null | awk '$1 == "Remv" && $2 != "'"$PKG60"'" { print $2 }'
+}
+
+status() {
+    if has60; then echo "WebKitGTK 6.0 (GTK 4): có"; else echo "WebKitGTK 6.0 (GTK 4): không"; fi
+    if has41; then echo "WebKitGTK 4.1 (GTK 3): có"; else echo "WebKitGTK 4.1 (GTK 3): không"; fi
+    if has60 && [ "${XDG_SESSION_TYPE:-x11}" != wayland ]; then
+        echo "Telegram sẽ dùng: bản 6.0 — trên phiên X11 đường này làm Mini App chết ngay"
+        echo "Cần sửa: có — chạy: depot-webview fix"
+        return 10
+    fi
+    if has41 || has60; then
+        echo "Telegram sẽ dùng: bản $(has60 && echo 6.0 || echo 4.1)"
+        echo "Cần sửa: không"
+        return 0
+    fi
+    echo "Telegram sẽ báo thiếu WebKitGTK khi mở Mini App"
+    echo "Cần sửa: có — chạy: depot-webview fix"
+    return 10
+}
+
+fix() {
+    dry=
+    [ "${1:-}" = --dry-run ] && dry=-s
+    if [ -z "$dry" ] && [ "$(id -u)" != 0 ]; then
+        exec pkexec "$SELF" fix
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    if ! has41; then
+        echo ">> cài $PKG41 (không kèm gói gợi ý: bộ gstreamer plugins-bad kéo thêm ~50 gói)"
+        # shellcheck disable=SC2086
+        apt-get $dry install -y --no-install-recommends "$PKG41" || { echo "!! cài $PKG41 lỗi (có mạng không?)"; return 1; }
+    fi
+    if has60; then
+        other=$(needs60)
+        if [ -n "$other" ]; then
+            echo "!! không gỡ $PKG60: các gói này đang cần nó: $(echo "$other" | tr '\n' ' ')"
+            echo "   Telegram vẫn sẽ chọn bản 6.0. Muốn Mini App chạy thì phải gỡ các gói đó, hoặc dùng Telegram Web."
+            return 2
+        fi
+        echo ">> gỡ $PKG60 (không gói nào khác cần nó) để Telegram dùng bản 4.1"
+        # shellcheck disable=SC2086
+        apt-get $dry remove -y "$PKG60" || { echo "!! gỡ $PKG60 lỗi"; return 1; }
+    fi
+    [ -n "$dry" ] && { echo ">> (mô phỏng, chưa đổi gì)"; return 0; }
+    echo ">> xong. Thoát hẳn Telegram (chuột phải biểu tượng ở khay > Quit) rồi mở lại, thử Mini App."
+}
+
+case ${1:-status} in
+    status) status ;;
+    fix) shift; fix "$@" ;;
+    -h | --help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "dùng: depot-webview [status | fix [--dry-run]]" >&2; exit 2 ;;
+esac
