@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Cài đặt
+Name[en]=Settings
+GenericName=Cài đặt hệ thống
+Comment=Màn hình, âm thanh, mạng, Bluetooth, máy in, cá nhân hoá, trợ năng — mọi thiết lập ở một chỗ, kiểu Windows 11
+Comment[en]=Display, sound, network, Bluetooth, printers, personalization, accessibility in one place
+Exec=depot-settings
+Icon=preferences-system
+Terminal=false
+StartupNotify=true
+StartupWMClass=depot-settings
+Categories=Settings;DesktopSettings;GTK;
+Keywords=settings;cài đặt;cai dat;thiết lập;control panel;wifi;bluetooth;âm thanh;màn hình;máy in;numlock;capslock;

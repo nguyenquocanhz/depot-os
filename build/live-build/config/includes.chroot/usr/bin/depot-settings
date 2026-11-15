@@ -1,0 +1,2353 @@
+#!/usr/bin/env python3
+# Depot OS — depot-settings: app "Cài đặt" kiểu Windows 11 cho phiên XFCE — một chỗ cho mọi thiết lập hay dùng,
+# thay cho việc lần từng hộp thoại trong Settings Manager.
+#
+#   depot-settings                 mở app (đang mở thì đưa cửa sổ lên)
+#   depot-settings TRANG           mở thẳng một trang: system display sound notifications power storage devices
+#                                  printers network wifi personalize apps time access about
+#   depot-settings --search CHỮ    mở và tìm sẵn một cài đặt
+#   depot-settings --shots THƯ_MỤC [TRANG…]   mở từng trang, lưu ảnh cửa sổ rồi thoát (để soát giao diện)
+#
+# Bố cục: thanh bên có ô tìm kiếm (gõ không dấu cũng ra) và danh mục; bên phải là tiêu đề trang (breadcrumb khi vào
+# trang con) và các thẻ cài đặt. Nền tối / sáng theo theme GTK đang dùng, hoặc ép bằng THEME=dark|light trong
+# ~/.config/depot/settings. Giao diện vẽ bằng CSS của GTK 3, chỉ cần python3-gi — không tải gì từ ngoài.
+#
+# Mỗi mục hoặc điều khiển trực tiếp, hoặc mở đúng công cụ sẵn có theo file .desktop của nó; công cụ nào máy không có
+# thì mục đó tự ẩn — không có mục giả.
+#   Điều khiển trực tiếp: độ sáng (logind SetBrightness), ánh sáng đêm (xrandr --gamma), tỉ lệ chữ (xsettings
+#     /Xft/DPI), âm lượng / thiết bị phát / micro (pactl), âm thanh sự kiện, Không làm phiền (depot-notify),
+#     chế độ pin (depot-power), Wi-Fi và danh sách mạng (nmcli), Bluetooth (bluetoothctl + /dev/rfkill), chế độ máy
+#     bay, hiệu ứng và Dynamic Island (depot-effects), tự đồng bộ giờ (depot-region), máy in đã cài (lpstat),
+#     ô báo Caps Lock / Num Lock (depot-notify, hoặc gói depot-capslock trên máy chưa có depot-notify mới).
+#   Mở công cụ sẵn có: các hộp thoại xfce4-*-settings và công cụ depot-* (hình nền, con trỏ, bố cục, đồng hồ,
+#     DNS/Proxy, driver, cảm biến, ngôn ngữ, Unikey, giới thiệu máy…).
+
+import glob
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
+
+APP_ID = 'tech.depot.Settings'
+RUN = os.environ.get('XDG_RUNTIME_DIR') or '/tmp'
+CONFIG = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+CONF = os.path.join(CONFIG, 'depot', 'settings')
+CAPS_CONF = os.path.join(CONFIG, 'depot-capslock.conf')         # cấu hình của gói depot-capslock
+NOTIFY_CONF = os.path.join(CONFIG, 'depot', 'notify')
+C_ENV = dict(os.environ, LC_ALL='C', LANG='C')          # đầu ra lệnh bằng tiếng Anh để đọc cho chắc
+NIGHT_GAMMA = '1:0.86:0.66'                             # cùng mức với bảng điều khiển nhanh
+
+PALETTES = {
+    'dark': dict(bg='#1f2733', fg='#ffffff', fg2='rgba(255,255,255,0.72)', fg3='rgba(255,255,255,0.36)',
+                 card='rgba(255,255,255,0.055)', card_border='rgba(255,255,255,0.06)',
+                 card_hover='rgba(255,255,255,0.09)', card_active='rgba(255,255,255,0.04)',
+                 hover='rgba(255,255,255,0.07)', sel='rgba(255,255,255,0.09)', stroke='rgba(255,255,255,0.11)',
+                 control='rgba(255,255,255,0.07)', control_hover='rgba(255,255,255,0.11)',
+                 field='rgba(0,0,0,0.22)', accent='#4cc2ff', accent_hover='#47b1e8', on_accent='#04121c',
+                 flyout='#2b3442', knob='#3b4656', shadow='rgba(0,0,0,0.50)'),
+    'light': dict(bg='#f3f3f3', fg='#1b1b1b', fg2='rgba(0,0,0,0.62)', fg3='rgba(0,0,0,0.38)',
+                  card='rgba(255,255,255,0.72)', card_border='rgba(0,0,0,0.07)',
+                  card_hover='rgba(249,249,249,0.50)', card_active='rgba(249,249,249,0.30)',
+                  hover='rgba(0,0,0,0.045)', sel='rgba(0,0,0,0.06)', stroke='rgba(0,0,0,0.12)',
+                  control='rgba(255,255,255,0.80)', control_hover='rgba(249,249,249,0.55)',
+                  field='rgba(255,255,255,0.90)', accent='#005fb8', accent_hover='#1a6fc0', on_accent='#ffffff',
+                  flyout='#fbfbfb', knob='#ffffff', shadow='rgba(0,0,0,0.22)'),
+}
+
+CSS = '''
+window.st-win { background-color: @st_bg; color: @st_fg; }
+window.st-win decoration {
+    margin: 14px; border-radius: 8px; border: none; background: none;
+    box-shadow: 0 8px 26px @st_shadow, 0 0 0 1px @st_stroke;
+}
+window.st-win decoration:backdrop { box-shadow: 0 4px 16px @st_shadow, 0 0 0 1px @st_stroke; }
+window.st-win.maximized decoration, window.st-win.tiled decoration { margin: 0; border-radius: 0; box-shadow: none; }
+window.st-win { border-radius: 8px; }
+window.st-win.maximized, window.st-win.maximized .st-root { border-radius: 0; }
+.st-win *, popover.st-pop * {
+    font-family: Inter, "Segoe UI Variable", "Segoe UI", "Noto Sans", sans-serif;
+    text-shadow: none; -gtk-icon-shadow: none; outline-width: 0;
+}
+.st-win label, popover.st-pop label { color: inherit; }
+.st-root { background-color: @st_bg; color: @st_fg; border-radius: 0 0 8px 8px; }
+.st-win button, popover.st-pop button {
+    background-image: none; background-color: transparent; box-shadow: none; border: none;
+    min-width: 0; min-height: 0; padding: 0; margin: 0; color: inherit;
+    transition: background-color 120ms ease, color 120ms ease;
+}
+/* thanh tiêu đề */
+.st-titlebar { background-color: @st_bg; border: none; box-shadow: none; padding: 0; min-height: 0;
+    border-radius: 8px 8px 0 0; }
+window.st-win.maximized .st-titlebar { border-radius: 0; }
+.st-app-title { font-size: 9pt; color: @st_fg; margin-left: 4px; }
+.st-win button.st-back { min-width: 40px; min-height: 30px; border-radius: 4px; margin: 5px 2px 5px 6px; }
+.st-win button.st-back:hover { background-color: @st_hover; }
+.st-win button.st-back:disabled { color: @st_fg3; }
+.st-win button.st-winbtn { min-width: 46px; min-height: 32px; border-radius: 0; color: @st_fg; }
+.st-win button.st-winbtn:hover { background-color: @st_hover; }
+.st-win button.st-winbtn.close { border-radius: 0 8px 0 0; }
+window.st-win.maximized button.st-winbtn.close { border-radius: 0; }
+.st-win button.st-winbtn.close:hover { background-color: #c42b1c; color: #ffffff; }
+/* thanh bên */
+.st-side { padding: 0 6px 10px 14px; }
+.st-user { padding: 6px 6px 14px 6px; }
+.st-avatar { border-radius: 28px; background-color: @st_control; color: @st_fg2; min-width: 56px; min-height: 56px; }
+.st-user-name { font-size: 10.5pt; font-weight: 600; }
+.st-user-sub { font-size: 9pt; color: @st_fg2; }
+.st-win entry.st-search {
+    background-image: none; background-color: @st_field; color: @st_fg; caret-color: @st_fg;
+    border: 1px solid @st_stroke; border-bottom: 1px solid @st_fg3; border-radius: 4px; box-shadow: none;
+    padding: 5px 10px; min-height: 22px; font-size: 10pt;
+}
+.st-win entry.st-search:focus { border-bottom: 2px solid @st_accent; padding-bottom: 4px; }
+.st-win entry.st-search image { color: @st_fg2; }
+.st-win entry selection { background-color: @st_accent; color: @st_on_accent; }
+.st-win list.st-nav { background-color: transparent; margin-top: 12px; }
+.st-win list.st-nav row { border-radius: 4px; padding: 0; margin: 2px 0; background-color: transparent;
+    color: @st_fg; min-height: 36px; transition: background-color 120ms ease; }
+.st-win list.st-nav row:hover { background-color: @st_hover; }
+.st-win list.st-nav row:selected { background-color: @st_sel; }
+.st-nav .st-pill { min-width: 3px; min-height: 16px; border-radius: 2px; background-color: transparent; }
+.st-nav row:selected .st-pill { background-color: @st_accent; }
+.st-nav-label { font-size: 10.5pt; }
+/* vùng nội dung */
+.st-crumbs { padding: 6px 40px 14px 40px; }
+.st-crumb { font-size: 20pt; font-weight: 600; color: @st_fg; }
+.st-crumb.dim, .st-crumb-sep { color: @st_fg2; }
+.st-win button.st-crumb-btn { border-radius: 4px; padding: 0 4px; margin-left: -4px; }
+.st-win button.st-crumb-btn:hover .st-crumb { color: @st_fg; }
+.st-crumb-sep { font-size: 16pt; margin: 0 8px; }
+.st-page { padding: 2px 40px 32px 40px; }
+.st-win scrolledwindow, .st-win viewport { background-color: transparent; border: none; }
+.st-win scrolledwindow undershoot, .st-win scrolledwindow overshoot { background-image: none; box-shadow: none; }
+.st-card { background-color: @st_card; border: 1px solid @st_card_border; border-radius: 4px;
+    padding: 12px 16px; min-height: 42px; color: @st_fg; }
+.st-win button.st-card { background-color: @st_card; border: 1px solid @st_card_border; border-radius: 4px;
+    padding: 12px 16px; }
+.st-win button.st-card:hover { background-color: @st_card_hover; }
+.st-win button.st-card:active { background-color: @st_card_active; }
+.st-card.hero { padding: 16px; }
+.st-row-icon { color: @st_fg; margin-right: 16px; }
+.st-row-title { font-size: 10.5pt; }
+.st-row-sub { font-size: 9pt; color: @st_fg2; }
+.st-row-value { font-size: 10pt; color: @st_fg2; }
+.st-chev { color: @st_fg2; margin-left: 12px; }
+.st-section { font-size: 10.5pt; font-weight: 600; margin: 22px 0 6px 2px; }
+.st-note { font-size: 9.5pt; color: @st_fg2; margin: 4px 2px; }
+.st-hero-title { font-size: 15pt; font-weight: 600; }
+.st-hero-sub { font-size: 10pt; color: @st_fg2; }
+.st-thumb { border-radius: 6px; border: 1px solid @st_stroke; }
+/* nút */
+.st-win button.st-btn, popover.st-pop button.st-btn {
+    background-color: @st_control; border: 1px solid @st_stroke; border-radius: 4px;
+    padding: 5px 12px; min-height: 20px; font-size: 10pt; color: @st_fg;
+}
+.st-win button.st-btn:hover { background-color: @st_control_hover; }
+.st-win button.st-btn:disabled { color: @st_fg3; }
+.st-win button.st-btn.accent { background-color: @st_accent; border-color: @st_accent; color: @st_on_accent; }
+.st-win button.st-btn.accent:hover { background-color: @st_accent_hover; }
+.st-drop-label { font-size: 10pt; }
+popover.st-pop { background-color: @st_flyout; border: 1px solid @st_stroke; border-radius: 8px; padding: 4px;
+    box-shadow: 0 6px 18px @st_shadow; color: @st_fg; }
+popover.st-pop button.st-item { border-radius: 4px; padding: 7px 12px 7px 8px; font-size: 10pt; color: @st_fg; }
+popover.st-pop button.st-item:hover { background-color: @st_hover; }
+popover.st-pop button.st-item .st-pill { min-width: 3px; min-height: 16px; border-radius: 2px;
+    background-color: transparent; margin-right: 8px; }
+popover.st-pop button.st-item.on { background-color: @st_sel; }
+popover.st-pop button.st-item.on .st-pill { background-color: @st_accent; }
+/* công tắc */
+.st-win switch {
+    min-width: 40px; min-height: 20px; border-radius: 11px; border: 1px solid @st_fg2; box-shadow: none;
+    background-image: none; background-color: transparent; margin: 0; padding: 0; color: transparent;
+    font-size: 1px; transition: background-color 150ms ease, border-color 150ms ease;
+}
+.st-win switch image { color: transparent; -gtk-icon-source: none; min-width: 0; min-height: 0; }
+.st-win switch slider {
+    min-width: 12px; min-height: 12px; border-radius: 7px; margin: 3px; border: none; box-shadow: none;
+    background-image: none; background-color: @st_fg2; transition: background-color 150ms ease;
+}
+.st-win switch:checked { background-color: @st_accent; border-color: @st_accent; }
+.st-win switch:checked slider { background-color: @st_on_accent; }
+.st-win switch:disabled { border-color: @st_fg3; }
+.st-win switch:disabled slider { background-color: @st_fg3; }
+.st-switch-text { font-size: 10pt; margin-right: 12px; }
+/* thanh trượt */
+.st-win scale { padding: 0; margin: 0; min-height: 20px; }
+.st-win scale trough { min-height: 4px; border-radius: 2px; border: none; box-shadow: none;
+    background-image: none; background-color: @st_fg3; }
+.st-win scale highlight { min-height: 4px; border-radius: 2px; border: none; box-shadow: none;
+    background-image: none; background-color: @st_accent; }
+.st-win scale slider { min-width: 10px; min-height: 10px; margin: -8px; border-radius: 10px;
+    border: 5px solid @st_knob; box-shadow: 0 0 0 1px @st_stroke;
+    background-image: none; background-color: @st_accent; }
+.st-win scale slider:hover { border-width: 4px; }
+.st-win scale:disabled highlight, .st-win scale:disabled slider { background-color: @st_fg3; }
+.st-win progressbar { min-height: 4px; }
+.st-win progressbar trough { min-height: 4px; border-radius: 2px; border: none; box-shadow: none;
+    background-image: none; background-color: @st_fg3; }
+.st-win progressbar progress { min-height: 4px; border-radius: 2px; border: none; box-shadow: none;
+    background-image: none; background-color: @st_accent; }
+.st-win entry.st-field { background-image: none; background-color: @st_field; color: @st_fg; caret-color: @st_fg;
+    border: 1px solid @st_stroke; border-bottom: 1px solid @st_fg3; border-radius: 4px; box-shadow: none;
+    padding: 4px 10px; min-height: 22px; font-size: 10pt; }
+.st-win entry.st-field:focus { border-bottom: 2px solid @st_accent; padding-bottom: 3px; }
+.st-win scrollbar { background-color: transparent; border: none; }
+.st-win scrollbar slider { min-width: 3px; min-height: 30px; border-radius: 3px; border: 3px solid transparent;
+    background-color: @st_fg3; background-clip: padding-box; }
+.st-win scrollbar slider:hover { min-width: 6px; }
+.st-win separator { background-color: @st_stroke; min-height: 1px; }
+tooltip.st-tip, .st-win tooltip { background-color: @st_flyout; border: 1px solid @st_stroke; border-radius: 4px; }
+'''
+
+
+# ====================================================================== tiện ích
+
+def which(cmd):
+    return shutil.which(cmd)
+
+
+def run(argv, timeout=6):
+    """Chạy lệnh, trả (mã thoát, stdout, stderr). Không ném lỗi."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=C_ENV,
+                           stdin=subprocess.DEVNULL)
+        return p.returncode, p.stdout, p.stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, '', str(e)
+
+
+def spawn(argv):
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return True
+    except OSError:
+        return False
+
+
+def bg(fn, done=None):
+    """Chạy fn ở luồng phụ (lệnh ngoài có thể chậm), xong gọi done(kết quả) trên luồng giao diện."""
+    def work():
+        try:
+            r = fn()
+        except Exception as e:                      # noqa: BLE001 — một mục hỏng không được làm sập cả app
+            print('depot-settings:', e, file=sys.stderr)
+            r = None
+        if done:
+            GLib.idle_add(lambda: (done(r), False)[1])
+    threading.Thread(target=work, daemon=True).start()
+
+
+def read(path, default=''):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def conf_value(path, key, default=''):
+    for line in read(path).splitlines():
+        k, _, v = line.strip().partition('=')
+        if k == key:
+            return v.strip().strip('"')
+    return default
+
+
+def conf_set(path, key, value):
+    """Đổi một khoá trong file KEY=VALUE, giữ nguyên các dòng khác."""
+    lines = [l for l in read(path).splitlines() if l.split('=', 1)[0].strip() != key]
+    lines.append('%s=%s' % (key, value))
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+    except OSError:
+        pass
+
+
+def fold(text):
+    """Bỏ dấu tiếng Việt + chữ thường, để tìm 'man hinh' ra 'Màn hình'."""
+    t = unicodedata.normalize('NFD', text.lower().replace('đ', 'd'))
+    return ''.join(c for c in t if not unicodedata.combining(c))
+
+
+_cache, _cache_lock = {}, threading.Lock()
+
+
+def cached(fn, ttl=1.5):
+    """Nhiều mục cùng hỏi một trạng thái (vd âm thanh) trong một lần làm mới thì chỉ chạy lệnh một lần."""
+    def wrap():
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _cache.get(fn)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+        val = fn()
+        with _cache_lock:
+            _cache[fn] = (time.monotonic(), val)
+        return val
+    return wrap
+
+
+def flush_cache():
+    with _cache_lock:
+        _cache.clear()
+
+
+def app_info(desktop_id):
+    try:
+        return Gio.DesktopAppInfo.new(desktop_id)
+    except TypeError:
+        return None
+
+
+def launch(target):
+    """target: 'ten.desktop' (mở theo file .desktop: đúng lệnh, đúng terminal, có báo đang mở) hoặc [lệnh…]."""
+    if isinstance(target, str):
+        info = app_info(target)
+        if info is None:
+            return False
+        try:
+            ctx = Gdk.Display.get_default().get_app_launch_context()
+            return info.launch([], ctx)
+        except GLib.Error:
+            return False
+    return spawn(target)
+
+
+def available(target):
+    if isinstance(target, str):
+        return app_info(target) is not None
+    return bool(target) and which(target[0]) is not None
+
+
+def pick_icon(*names):
+    theme = Gtk.IconTheme.get_default()
+    for n in names:
+        if theme.has_icon(n):
+            return n
+    return 'applications-system-symbolic'
+
+
+def xfconf_get(channel, prop, default=''):
+    rc, out, _ = run(['xfconf-query', '-c', channel, '-p', prop])
+    return out.strip() if rc == 0 else default
+
+
+def xfconf_set(channel, prop, typ, value):
+    return run(['xfconf-query', '-c', channel, '-p', prop, '-n', '-t', typ, '-s', str(value)])[0] == 0
+
+
+class Latest:
+    """Kéo thanh trượt sinh rất nhiều giá trị: chỉ áp giá trị mới nhất, không xếp hàng lệnh."""
+
+    def __init__(self, fn):
+        self.fn, self.value, self.busy = fn, None, False
+        self.lock = threading.Lock()
+
+    def push(self, value):
+        with self.lock:
+            self.value = value
+            if self.busy:
+                return
+            self.busy = True
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def _work(self):
+        while True:
+            with self.lock:
+                v, self.value = self.value, None
+                if v is None:
+                    self.busy = False
+                    return
+            try:
+                self.fn(v)
+            except Exception as e:                  # noqa: BLE001
+                print('depot-settings:', e, file=sys.stderr)
+
+
+# ====================================================================== hệ thống: đọc / đổi trạng thái
+
+# ---- Màn hình
+def bl_dir():
+    dirs = sorted(glob.glob('/sys/class/backlight/*'))
+    return dirs[0] if dirs else None
+
+
+def bl_get():
+    d = bl_dir()
+    if not d:
+        return None
+    try:
+        return round(int(read(d + '/brightness')) * 100 / max(1, int(read(d + '/max_brightness'))))
+    except ValueError:
+        return None
+
+
+def bl_set(pct):
+    d = bl_dir()
+    if not d:
+        return
+    try:
+        mx = int(read(d + '/max_brightness'))
+    except ValueError:
+        return
+    val = max(1, round(mx * max(1, min(100, pct)) / 100))
+    try:        # logind đổi đèn nền cho phiên đang ngồi trước máy — không cần root
+        bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        bus.call_sync('org.freedesktop.login1', '/org/freedesktop/login1/session/auto',
+                      'org.freedesktop.login1.Session', 'SetBrightness',
+                      GLib.Variant('(ssu)', ('backlight', os.path.basename(d), val)), None,
+                      Gio.DBusCallFlags.NONE, 2000, None)
+        return
+    except GLib.Error:
+        pass
+    try:
+        with open(d + '/brightness', 'w') as f:
+            f.write(str(val))
+    except OSError:
+        pass
+
+
+@cached
+def screens():
+    """{'outs': [tên], 'night': bool, 'mode': '1920 × 1080', 'hz': '144', 'name': 'eDP1'}; None = không có xrandr."""
+    rc, out, _ = run(['xrandr', '--current', '--verbose'])
+    if rc:
+        return None
+    st = {'outs': [], 'night': False, 'mode': '', 'hz': '', 'name': ''}
+    cur = None
+    for line in out.splitlines():
+        m = re.match(r'^(\S+) (connected|disconnected)(?: primary)? ?(\d+x\d+)?', line)
+        if m:
+            cur = m.group(1) if m.group(2) == 'connected' else None
+            if cur:
+                st['outs'].append(cur)
+                if m.group(3) and not st['mode']:
+                    st['mode'], st['name'] = m.group(3).replace('x', ' × '), cur
+        elif cur and 'Gamma:' in line:
+            try:
+                vals = [float(v) for v in line.split('Gamma:')[1].strip().split(':')]
+            except ValueError:
+                vals = [1.0, 1.0, 1.0]
+            if any(abs(v - 1.0) > 0.05 for v in vals):
+                st['night'] = True
+        elif cur == st['name'] and not st['hz']:
+            m = re.search(r'\*current', line)
+            if m:
+                st['_cur'] = True
+            elif st.get('_cur') and 'v:' in line:
+                m = re.search(r'clock\s+([\d.]+)Hz', line)
+                if m:
+                    st['hz'] = '%g' % round(float(m.group(1)))
+                st['_cur'] = False
+    return st if st['outs'] else None
+
+
+def night_set(on):
+    st = screens()
+    for o in (st or {}).get('outs', []):
+        run(['xrandr', '--output', o, '--gamma', NIGHT_GAMMA if on else '1:1:1'])
+
+
+SCALES = [('96', '100% (mặc định)'), ('106', '110%'), ('120', '125%'), ('144', '150%')]
+
+
+def dpi_get():
+    v = xfconf_get('xsettings', '/Xft/DPI', '96')
+    return '96' if v in ('-1', '') else v
+
+
+def dpi_set(v):
+    xfconf_set('xsettings', '/Xft/DPI', 'int', v)
+
+
+# ---- Âm thanh (PipeWire / PulseAudio qua pactl)
+@cached
+def audio_state():
+    rc, out, _ = run(['pactl', 'get-sink-volume', '@DEFAULT_SINK@'])
+    if rc:
+        return None
+    m = re.search(r'(\d+)%', out)
+    st = {'vol': int(m.group(1)) if m else 0,
+          'muted': 'yes' in run(['pactl', 'get-sink-mute', '@DEFAULT_SINK@'])[1]}
+    rc, out, _ = run(['pactl', 'get-source-mute', '@DEFAULT_SOURCE@'])
+    st['mic'] = None if rc else 'yes' not in out          # None = không có micro
+    m = re.search(r'(\d+)%', run(['pactl', 'get-source-volume', '@DEFAULT_SOURCE@'])[1])
+    st['mic_vol'] = int(m.group(1)) if m else None
+    return st
+
+
+@cached
+def audio_sinks():
+    """([(tên, mô tả)], tên mặc định)"""
+    default = run(['pactl', 'get-default-sink'])[1].strip()
+    try:
+        data = json.loads(run(['pactl', '-f', 'json', 'list', 'sinks'])[1])
+    except ValueError:
+        data = []
+    return [(s.get('name', ''), s.get('description') or s.get('name', '')) for s in data], default
+
+
+def vol_icon(vol, muted):
+    if muted or vol == 0:
+        return 'audio-volume-muted-symbolic'
+    return 'audio-volume-high-symbolic' if vol >= 66 else 'audio-volume-medium-symbolic' if vol >= 33 \
+        else 'audio-volume-low-symbolic'
+
+
+# ---- Không làm phiền
+def dnd_backend():
+    if which('depot-notify'):
+        return 'depot'
+    if which('xfconf-query') and run(['xfconf-query', '-c', 'xfce4-notifyd', '-l'])[0] == 0:
+        return 'xfce'
+    return None
+
+
+def dnd_get():
+    be = dnd_backend()
+    if be == 'depot':
+        st = os.path.join(RUN, 'depot-notify.state')
+        if os.path.exists(st):
+            return conf_value(st, 'DND') == '1'
+        return conf_value(NOTIFY_CONF, 'DND') == '1'
+    if be == 'xfce':
+        return xfconf_get('xfce4-notifyd', '/do-not-disturb') == 'true'
+    return None
+
+
+def dnd_set(on):
+    if dnd_backend() == 'depot':
+        run(['depot-notify', 'dnd', 'on' if on else 'off'])
+    else:
+        xfconf_set('xfce4-notifyd', '/do-not-disturb', 'bool', 'true' if on else 'false')
+
+
+# ---- Pin
+POWER_MODES = [('auto', 'Tự động'), ('off', 'Tắt tiết kiệm'), ('low', 'Low'), ('medium', 'Medium'),
+               ('high', 'High'), ('ultra', 'Ultra')]
+
+
+def power_mode():
+    m = conf_value(os.path.join(CONFIG, 'depot', 'power'), 'MODE', 'auto')
+    return m if m in dict(POWER_MODES) else 'auto'
+
+
+def battery():
+    """(phần trăm, mô tả, icon) hoặc None nếu máy không có pin."""
+    for d in sorted(glob.glob('/sys/class/power_supply/BAT*')):
+        cap, status = read(d + '/capacity'), read(d + '/status')
+        if not cap.isdigit():
+            continue
+        if status == 'Full' or (status != 'Discharging' and int(cap) >= 99):
+            return int(cap), 'Đã sạc đầy, đang cắm điện', 'battery-full-charged-symbolic'
+        if status == 'Charging':
+            return int(cap), 'Đang sạc', 'battery-good-charging-symbolic'
+        return int(cap), 'Đang dùng pin', 'battery-good-symbolic'
+    return None
+
+
+# ---- Lưu trữ
+def gb(n):
+    return ('%.1f GB' % (n / 1e9)).replace('.', ',')
+
+
+def disks():
+    """[(tên hiển thị, điểm gắn, đã dùng, tổng)]"""
+    out, seen = [], set()
+    points = ['/']
+    for line in read('/proc/mounts').splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[1].startswith(('/media/', '/mnt/', '/run/media/')) and \
+                f[2] in ('ext4', 'ext3', 'vfat', 'exfat', 'ntfs', 'ntfs3', 'fuseblk', 'btrfs', 'xfs', 'f2fs'):
+            points.append(f[1].replace('\\040', ' '))
+    for p in points:
+        try:
+            u = shutil.disk_usage(p)
+            dev = os.stat(p).st_dev
+        except OSError:
+            continue
+        if dev in seen or u.total == 0:
+            continue
+        seen.add(dev)
+        out.append(('Ổ hệ thống' if p == '/' else os.path.basename(p) or p, p, u.used, u.total))
+    return out
+
+
+# ---- Bluetooth
+def bt_present():
+    if not which('bluetoothctl'):
+        return False
+    if glob.glob('/sys/class/bluetooth/hci*'):
+        return True
+    return any(read(p) == 'bluetooth' for p in glob.glob('/sys/class/rfkill/*/type'))
+
+
+def bt_rfkill(block):
+    """Chặn / bỏ chặn sóng Bluetooth (như `rfkill block bluetooth`), qua /dev/rfkill — không cần root."""
+    try:
+        fd = os.open('/dev/rfkill', os.O_WRONLY)
+        try:
+            os.write(fd, struct.pack('IBBBB', 0, 2, 3, 1 if block else 0, 0))   # type=BLUETOOTH, op=CHANGE_ALL
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+@cached
+def bt_powered():
+    return bool(re.search(r'^\s*Powered:\s*yes', run(['bluetoothctl', 'show'], timeout=4)[1], re.M))
+
+
+def bt_devices(kind):
+    out = run(['bluetoothctl', 'devices', kind], timeout=4)[1]
+    return [(m.group(1), m.group(2)) for m in re.finditer(r'^Device (\S+) (.+)$', out, re.M)]
+
+
+def bt_set(on):
+    if on:
+        bt_rfkill(False)
+        for _ in range(10):
+            run(['bluetoothctl', 'power', 'on'], timeout=5)
+            flush_cache()
+            if bt_powered():
+                return True
+            time.sleep(0.4)
+        return False
+    run(['bluetoothctl', 'power', 'off'], timeout=5)
+    bt_rfkill(True)
+    return True
+
+
+def bt_list():
+    """[(mac, tên, đang kết nối)] các thiết bị đã ghép; [] khi Bluetooth tắt."""
+    if not bt_powered():
+        return []
+    con = {m for m, _n in bt_devices('Connected')}
+    return [(m, n, m in con) for m, n in bt_devices('Paired')]
+
+
+def bt_connect(mac, connect=True):
+    rc, out, _ = run(['bluetoothctl', 'connect' if connect else 'disconnect', mac], timeout=25)
+    return rc == 0 and 'Failed' not in out
+
+
+# ---- Máy in (CUPS)
+PRINT_INSTALL = 'sudo apt install cups system-config-printer'
+
+
+def printers():
+    """[(tên, trạng thái, là mặc định)]; None = máy chưa cài CUPS."""
+    if not which('lpstat'):
+        return None
+    out = run(['lpstat', '-p', '-d'], timeout=8)[1]
+    m = re.search(r'system default destination: (\S+)', out)
+    default = m.group(1) if m else ''
+    res = []
+    for m in re.finditer(r'^printer (\S+) (is idle|now printing|disabled)', out, re.M):
+        state = {'is idle': 'Sẵn sàng', 'now printing': 'Đang in', 'disabled': 'Đang tạm dừng'}[m.group(2)]
+        res.append((m.group(1), state, m.group(1) == default))
+    return res
+
+
+# ---- Mạng (NetworkManager)
+def nm_split(line):
+    return [p.replace('\\:', ':').replace('\\\\', '\\') for p in re.split(r'(?<!\\):', line)]
+
+
+@cached
+def net_state():
+    """None = máy không có NetworkManager."""
+    rc, out, _ = run(['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'dev'])
+    if rc:
+        return None
+    st = {'dev': None, 'on': False, 'state': '', 'ssid': '', 'signal': 0, 'eth': None, 'eth_state': '', 'ip': ''}
+    conn = ''
+    for line in out.splitlines():
+        f = nm_split(line)
+        if len(f) < 4:
+            continue
+        if f[1] == 'wifi' and st['dev'] is None:
+            st['dev'], st['state'], conn = f[0], f[2], f[3]
+        elif f[1] == 'ethernet' and st['eth'] is None:
+            st['eth'], st['eth_state'] = f[0], f[2]
+    if st['dev']:
+        st['on'] = run(['nmcli', '-t', '-f', 'WIFI', 'radio'])[1].strip() == 'enabled'
+        if st['on'] and st['state'].startswith('connected'):
+            out = run(['nmcli', '-t', '-f', 'IN-USE,SSID,SIGNAL', 'dev', 'wifi', 'list', 'ifname', st['dev'],
+                       '--rescan', 'no'])[1]
+            for line in out.splitlines():
+                f = nm_split(line)
+                if len(f) >= 3 and f[0] == '*':
+                    st['ssid'] = f[1]
+                    st['signal'] = int(f[2]) if f[2].isdigit() else 0
+            st['ssid'] = st['ssid'] or conn
+    use = st['eth'] if st['eth_state'].startswith('connected') else st['dev'] if st['ssid'] else None
+    if use:
+        out = run(['nmcli', '-t', '-f', 'IP4.ADDRESS', 'dev', 'show', use])[1]
+        m = re.search(r'IP4\.ADDRESS\[\d+\]:([\d.]+)', out)
+        st['ip'] = m.group(1) if m else ''
+    return st
+
+
+def wifi_set(on):
+    run(['nmcli', 'radio', 'wifi', 'on' if on else 'off'])
+
+
+def wifi_list(rescan='auto'):
+    """[(ssid, tín hiệu, có khoá, đang dùng, đã lưu)] — mạng đang dùng trên cùng, rồi mạnh nhất trước."""
+    saved = set()
+    for line in run(['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show'])[1].splitlines():
+        f = nm_split(line)
+        if len(f) >= 2 and f[1] == '802-11-wireless':
+            saved.add(f[0])
+    out = run(['nmcli', '-t', '-f', 'IN-USE,SSID,SIGNAL,SECURITY', 'dev', 'wifi', 'list', '--rescan', rescan],
+              timeout=20)[1]
+    nets = {}
+    for line in out.splitlines():
+        f = nm_split(line)
+        if len(f) < 4 or not f[1]:
+            continue
+        sig = int(f[2]) if f[2].isdigit() else 0
+        sec = f[3].strip() not in ('', '--')
+        old = nets.get(f[1])
+        if old is None or f[0] == '*' or (sig > old[1] and not old[3]):
+            nets[f[1]] = (f[1], sig, sec, f[0] == '*' or bool(old and old[3]), f[1] in saved)
+    return sorted(nets.values(), key=lambda n: (not n[3], -n[1]))
+
+
+def wifi_connect(ssid, password=None, saved=False):
+    """Trả (thành công, thông báo lỗi)."""
+    if saved and not password:
+        rc, out, err = run(['nmcli', '--wait', '30', 'con', 'up', 'id', ssid], timeout=40)
+    else:
+        argv = ['nmcli', '--wait', '30', 'dev', 'wifi', 'connect', ssid]
+        if password:
+            argv += ['password', password]
+        rc, out, err = run(argv, timeout=40)
+    msg = (err or out).strip().splitlines()
+    return rc == 0, (msg[-1] if msg else '')
+
+
+def wifi_disconnect(dev):
+    run(['nmcli', 'dev', 'disconnect', dev], timeout=15)
+
+
+def wifi_icon(sig, on=True, connected=True):
+    if not on:
+        return 'network-wireless-disabled-symbolic'
+    if not connected:
+        return 'network-wireless-offline-symbolic'
+    if sig >= 60:
+        return 'network-wireless-signal-excellent-symbolic'
+    if sig >= 40:
+        return 'network-wireless-signal-good-symbolic'
+    if sig >= 20:
+        return 'network-wireless-signal-ok-symbolic'
+    return 'network-wireless-signal-weak-symbolic'
+
+
+def airplane_get():
+    st = net_state()
+    if st is None:
+        return None
+    radios = run(['nmcli', '-t', '-f', 'WIFI,WWAN', 'radio'])[1].strip().split(':')
+    return all(r == 'disabled' for r in radios) and not (bt_present() and bt_powered())
+
+
+def airplane_set(on):
+    if on:
+        if bt_present():
+            conf_set(CONF, 'AIRPLANE_BT', '1' if bt_powered() else '0')
+            bt_set(False)
+        run(['nmcli', 'radio', 'all', 'off'])
+    else:
+        run(['nmcli', 'radio', 'all', 'on'])
+        if bt_present() and conf_value(CONF, 'AIRPLANE_BT') == '1':      # Bluetooth trước đó đang bật thì bật lại
+            bt_set(True)
+
+
+# ---- Cá nhân hoá
+def wallpaper_path():
+    out = run(['xfconf-query', '-c', 'xfce4-desktop', '-lv'])[1]
+    best = [l for l in out.splitlines() if 'workspace0/last-image' in l] or \
+           [l for l in out.splitlines() if 'last-image' in l]
+    for l in best:
+        p = l.split(None, 1)[1].strip() if len(l.split(None, 1)) > 1 else ''
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+EFFECTS = [('auto', 'Tự chọn theo máy'), ('best', 'Đẹp nhất'), ('fast', 'Nhanh nhất')]
+LAYOUTS = {'macos': 'macOS', 'windows': 'Windows 10', 'windows11': 'Windows 11'}
+CLOCKS = {'left': 'bên trái', 'center': 'ở giữa', 'right': 'bên phải'}
+THEMES = [('system', 'Theo hệ thống'), ('dark', 'Tối'), ('light', 'Sáng')]
+
+
+def effects_conf(key, default=''):
+    return conf_value(os.path.join(CONFIG, 'depot', 'effects'), key, default)
+
+
+# ---- Thời gian
+def ntp_get():
+    rc, out, _ = run(['timedatectl', 'show', '-p', 'NTP', '--value'])
+    return None if rc else out.strip() == 'yes'
+
+
+def tz_get():
+    return run(['timedatectl', 'show', '-p', 'Timezone', '--value'])[1].strip()
+
+
+# ---- Ô báo Caps Lock / Num Lock
+# Trên Depot OS ô báo nằm trong depot-notify (CAPS_OSD / NUM_OSD trong ~/.config/depot/notify). Phím nào depot-notify
+# của máy chưa báo (ISO cũ chưa có Num Lock) hoặc máy không có depot-notify thì do gói depot-capslock báo
+# (CAPSLOCK / NUMLOCK trong ~/.config/depot-capslock.conf). Mỗi phím chỉ một nơi báo.
+LOCK_KEYS = {'caps': ('CAPS_OSD', 'CAPSLOCK'), 'num': ('NUM_OSD', 'NUMLOCK')}
+
+
+@cached
+def notify_keys():
+    """Các phím depot-notify của máy này tự báo."""
+    try:
+        with open('/usr/bin/depot-notify', 'rb') as f:
+            src = f.read()
+    except OSError:
+        return set()
+    have = set()
+    if b'class LockOSD' in src:
+        have.add('caps')
+        if b'get_num_lock_state' in src:
+            have.add('num')
+    return have
+
+
+def capslock_bin():
+    return which('depot-capslock')
+
+
+def capslock_version():
+    exe = capslock_bin()
+    m = re.search(r'(\d+(?:\.\d+)+)', run([exe, '--version'])[1]) if exe else None
+    return m.group(1) if m else ''
+
+
+def lock_backend(kind):
+    """'notify' | 'capslock' | None — nơi báo phím này trên máy."""
+    if kind in notify_keys():
+        return 'notify'
+    ver = capslock_version()
+    if ver and (kind == 'caps' or tuple(int(x) for x in ver.split('.')[:2]) >= (1, 1)):   # Num Lock có từ bản 1.1
+        return 'capslock'
+    return None
+
+
+def lock_get(kind):
+    be = lock_backend(kind)
+    if be == 'notify':
+        return conf_value(NOTIFY_CONF, LOCK_KEYS[kind][0], '1') != '0'
+    if be == 'capslock':
+        return conf_value(CAPS_CONF, 'ENABLED', '1') != '0' and conf_value(CAPS_CONF, LOCK_KEYS[kind][1], '1') != '0'
+    return None
+
+
+def lock_set(kind, on):
+    be = lock_backend(kind)
+    if be == 'notify':
+        conf_set(NOTIFY_CONF, LOCK_KEYS[kind][0], '1' if on else '0')
+    elif be == 'capslock':
+        if on and conf_value(CAPS_CONF, 'ENABLED', '1') == '0':
+            # ENABLED=0 đang tắt cả hai: bật lại cho phím này, phím kia giữ nguyên là tắt
+            other = 'num' if kind == 'caps' else 'caps'
+            conf_set(CAPS_CONF, LOCK_KEYS[other][1], '0')
+            conf_set(CAPS_CONF, 'ENABLED', '1')
+        conf_set(CAPS_CONF, LOCK_KEYS[kind][1], '1' if on else '0')
+        if on:
+            spawn([capslock_bin()])              # chưa chạy nền thì chạy; đang chạy rồi thì bản mới tự thoát
+
+
+def capslock_update(cmd):
+    """depot-capslock --check-update → (có bản mới?, thông báo); --update → (thành công?, thông báo)."""
+    rc, out, err = run([capslock_bin(), cmd], timeout=300)
+    msg = (out or err).strip().splitlines()
+    return (rc == 10 if cmd == '--check-update' else rc == 0), (msg[-1] if msg else '')
+
+
+# ---- Giới thiệu
+def about_info():
+    """[(nhãn, giá trị)]"""
+    rows = []
+    vendor = read('/sys/class/dmi/id/sys_vendor')
+    model = read('/sys/class/dmi/id/product_name')
+    if model and model.lower() not in ('to be filled by o.e.m.', 'system product name', 'default string'):
+        rows.append(('Kiểu máy', ('%s %s' % (vendor, model)).strip() if vendor.lower() not in model.lower() else model))
+    cpu = ''
+    for line in read('/proc/cpuinfo').splitlines():
+        if line.startswith('model name'):
+            cpu = re.sub(r'\s+', ' ', line.split(':', 1)[1]).strip()
+            break
+    if cpu:
+        rows.append(('Bộ xử lý', '%s (%d luồng)' % (cpu, os.cpu_count() or 1)))
+    m = re.search(r'MemTotal:\s+(\d+)', read('/proc/meminfo'))
+    if m:
+        rows.append(('RAM', ('%.1f GB' % (int(m.group(1)) / 1048576)).replace('.', ',')))
+    if which('lspci'):
+        gpus = [re.sub(r'\s*\(rev [0-9a-f]+\)$', '', l.split(': ', 1)[1]) for l in run(['lspci'])[1].splitlines()
+                if re.search(r'VGA|3D controller|Display controller', l) and ': ' in l]
+        if gpus:
+            rows.append(('Đồ hoạ', '\n'.join(gpus)))
+    for name, _p, used, total in disks()[:1]:
+        rows.append(('Lưu trữ', 'Đã dùng %s / %s' % (gb(used), gb(total))))
+    osr = {}
+    for line in read('/etc/os-release').splitlines():
+        k, _, v = line.partition('=')
+        osr[k] = v.strip('"')
+    rows.append(('Hệ điều hành', osr.get('PRETTY_NAME', 'Linux')))
+    if which('depot-edition'):
+        ed = run(['depot-edition', 'current'])[1].strip()
+        if ed:
+            rows.append(('Phiên bản Depot', ed.capitalize()))
+    rows.append(('Nhân Linux', os.uname().release))
+    m = re.search(r'xfce4-session\s+([\d.]+)', run(['xfce4-session', '--version'])[1]) if which('xfce4-session') \
+        else None
+    rows.append(('Desktop', 'XFCE %s (X11)' % m.group(1) if m else os.environ.get('XDG_CURRENT_DESKTOP', '')))
+    return rows
+
+
+# ====================================================================== các mảnh giao diện
+
+def label(text='', cls=None, xalign=0.0, wrap=False, selectable=False):
+    l = Gtk.Label(label=text)
+    l.set_xalign(xalign)
+    if wrap:
+        l.set_line_wrap(True)
+        l.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        l.set_max_width_chars(60)
+    else:
+        l.set_ellipsize(Pango.EllipsizeMode.END)
+    l.set_selectable(selectable)
+    if cls:
+        for c in cls.split():
+            l.get_style_context().add_class(c)
+    return l
+
+
+def image(name, px=16, cls=None):
+    img = Gtk.Image.new_from_icon_name(name, Gtk.IconSize.MENU)
+    img.set_pixel_size(px)
+    if cls:
+        img.get_style_context().add_class(cls)
+    return img
+
+
+def set_class(widget, cls, on):
+    ctx = widget.get_style_context()
+    (ctx.add_class if on else ctx.remove_class)(cls)
+
+
+def text_button(text, cb, accent=False):
+    b = Gtk.Button(label=text)
+    b.get_style_context().add_class('st-btn')
+    if accent:
+        b.get_style_context().add_class('accent')
+    b.set_valign(Gtk.Align.CENTER)
+    b.set_can_focus(False)
+    b.connect('clicked', lambda *_: cb())
+    return b
+
+
+class Dropdown(Gtk.MenuButton):
+    """Ô chọn kiểu Windows 11: nút hiện giá trị + mũi tên, bấm ra danh sách có vạch màu nhấn ở mục đang chọn."""
+
+    def __init__(self, options, on_pick):
+        super().__init__()
+        self.options, self.on_pick, self.value = list(options), on_pick, None
+        self.get_style_context().add_class('st-btn')
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_can_focus(False)
+        box = Gtk.Box(spacing=10)
+        self.text = label('', 'st-drop-label')
+        box.pack_start(self.text, True, True, 0)
+        box.pack_end(image('pan-down-symbolic', 12), False, False, 0)
+        self.add(box)
+        self.pop = Gtk.Popover()
+        self.pop.get_style_context().add_class('st-pop')
+        self.pop.set_position(Gtk.PositionType.BOTTOM)
+        self.set_popover(self.pop)
+        self.fill()
+
+    def fill(self):
+        old = self.pop.get_child()
+        if old:
+            self.pop.remove(old)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for key, name in self.options:
+            b = Gtk.Button()
+            b.get_style_context().add_class('st-item')
+            set_class(b, 'on', key == self.value)
+            row = Gtk.Box()
+            pill = Gtk.Box()
+            pill.get_style_context().add_class('st-pill')
+            pill.set_valign(Gtk.Align.CENTER)
+            row.pack_start(pill, False, False, 0)
+            row.pack_start(label(name), True, True, 0)
+            b.add(row)
+            b.connect('clicked', self._picked, key)
+            col.pack_start(b, False, False, 0)
+        col.show_all()
+        self.pop.add(col)
+
+    def _picked(self, _b, key):
+        self.pop.popdown()
+        if key != self.value:
+            self.set_value(key)
+            self.on_pick(key)
+
+    def set_options(self, options):
+        if list(options) != self.options:
+            self.options = list(options)
+            self.fill()
+            self.set_value(self.value)
+
+    def set_value(self, key, fallback='Tuỳ chỉnh'):
+        self.value = key
+        self.text.set_text(dict(self.options).get(key, fallback if key is not None else '…'))
+        self.fill()
+
+
+class Card:
+    """Một thẻ cài đặt: icon · tên + mô tả một dòng · điều khiển / mũi tên bên phải."""
+
+    def __init__(self, icon_name, title, sub=None, trailing=None, on_click=None, chevron=None):
+        row = Gtk.Box()
+        self.icon = image(icon_name, 20, 'st-row-icon')
+        self.icon.set_valign(Gtk.Align.CENTER)
+        row.pack_start(self.icon, False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.set_valign(Gtk.Align.CENTER)
+        self.title = label(title, 'st-row-title')
+        self.sub = label(sub or '', 'st-row-sub')
+        self.sub.set_no_show_all(True)
+        self.sub.set_visible(bool(sub))
+        text.pack_start(self.title, False, False, 0)
+        text.pack_start(self.sub, False, False, 0)
+        row.pack_start(text, True, True, 0)
+        self.trail = Gtk.Box(spacing=8)
+        self.trail.set_valign(Gtk.Align.CENTER)
+        self.trail.set_margin_start(16)
+        for w in trailing or []:
+            self.trail.pack_start(w, False, False, 0)
+        row.pack_end(self.trail, False, False, 0)
+        if on_click:
+            if chevron:
+                row.pack_end(image(chevron, 14, 'st-chev'), False, False, 0)
+                row.reorder_child(self.trail, -1)
+            self.widget = Gtk.Button()
+            self.widget.add(row)
+            self.widget.set_can_focus(False)
+            self.widget.connect('clicked', lambda *_: on_click())
+        else:
+            self.widget = row
+        self.widget.get_style_context().add_class('st-card')
+
+    def set_sub(self, text):
+        self.sub.set_text(text or '')
+        self.sub.set_visible(bool(text))
+
+    def set_icon(self, name):
+        self.icon.set_from_icon_name(name, Gtk.IconSize.MENU)
+
+
+class Page:
+    """Một trang: cột các thẻ. Mỗi điều khiển đăng ký một hàm làm mới (đọc lại trạng thái thật của máy)."""
+
+    def __init__(self, win, pid, title, parent=None, icon=None):
+        self.win, self.id, self.title, self.parent, self.icon = win, pid, title, parent, icon
+        self.refreshers = []
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.box.get_style_context().add_class('st-page')
+        clamp = Gtk.Box()
+        self.box.set_size_request(-1, -1)
+        clamp.pack_start(self.box, True, True, 0)
+        self.scroll = Gtk.ScrolledWindow()
+        self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroll.add(clamp)
+
+    # ---- dựng
+    def add(self, widget):
+        self.box.pack_start(widget, False, False, 0)
+        return widget
+
+    def index(self, title, sub, icon_name, keywords=''):
+        self.win.search_index.append((fold(' '.join([title, sub or '', keywords, self.title])), title,
+                                      sub or '', icon_name, self.id))
+
+    def section(self, text):
+        return self.add(label(text, 'st-section'))
+
+    def note(self, text):
+        return self.add(label(text, 'st-note', wrap=True))
+
+    def card(self, icon_name, title, sub=None, trailing=None, on_click=None, chevron=None, keywords='',
+             index=True):
+        c = Card(icon_name, title, sub, trailing, on_click, chevron)
+        self.add(c.widget)
+        if index:
+            self.index(title, sub, icon_name, keywords)
+        return c
+
+    def nav(self, icon_name, title, sub, page_id, keywords=''):
+        return self.card(icon_name, title, sub, on_click=lambda: self.win.go(page_id), chevron='go-next-symbolic',
+                         keywords=keywords, index=False)
+
+    def link(self, icon_name, title, sub, target, keywords=''):
+        """Mở một công cụ sẵn có của máy. Máy không có công cụ đó thì không tạo thẻ."""
+        if not available(target):
+            return None
+        return self.card(icon_name, title, sub, on_click=lambda: self.win.open_tool(target, title),
+                         chevron=pick_icon('external-link-symbolic', 'go-next-symbolic'), keywords=keywords)
+
+    def switch(self, icon_name, title, sub, get, set_, keywords='', extra=None):
+        sw = Gtk.Switch()
+        sw.set_valign(Gtk.Align.CENTER)
+        sw.set_can_focus(False)
+        state = label('', 'st-switch-text', xalign=1.0)
+        c = self.card(icon_name, title, sub, trailing=(extra or []) + [state, sw], keywords=keywords)
+        busy = [0]
+
+        def show(v):
+            if busy[0]:
+                return
+            sw.set_sensitive(v is not None)
+            on = bool(v)
+            if sw.get_active() != on:
+                sw.handler_block(hid)
+                sw.set_active(on)
+                sw.handler_unblock(hid)
+            state.set_text('Bật' if on else 'Tắt')
+
+        def changed(s, _p):
+            on = s.get_active()
+            state.set_text('Bật' if on else 'Tắt')
+            busy[0] += 1
+
+            def done(_r):
+                busy[0] -= 1
+                flush_cache()
+                self.win.refresh_soon()
+            bg(lambda: set_(on), done)
+        hid = sw.connect('notify::active', changed)
+        self.refreshers.append(lambda: bg(get, show))
+        c.switch = sw
+        return c
+
+    def slider(self, icon_name, title, get, set_, sub=None, keywords='', icon_for=None):
+        adj = Gtk.Adjustment(value=0, lower=0, upper=100, step_increment=1, page_increment=10)
+        sc = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
+        sc.set_draw_value(False)
+        sc.set_size_request(260, -1)
+        sc.set_can_focus(False)
+        val = label('', 'st-row-value', xalign=1.0)
+        val.set_width_chars(3)
+        c = self.card(icon_name, title, sub, trailing=[val, sc], keywords=keywords)
+        latest = Latest(set_)
+        touched = [0.0]
+
+        def show(v):
+            if time.monotonic() - touched[0] < 2.0:          # đang kéo: không giật thanh trượt về giá trị cũ
+                return
+            sc.set_sensitive(v is not None)
+            if v is None:
+                val.set_text('')
+                return
+            sc.handler_block(hid)
+            adj.set_value(v)
+            sc.handler_unblock(hid)
+            val.set_text(str(int(v)))
+            if icon_for:
+                c.set_icon(icon_for(int(v)))
+
+        def changed(_s):
+            v = int(round(adj.get_value()))
+            touched[0] = time.monotonic()
+            val.set_text(str(v))
+            if icon_for:
+                c.set_icon(icon_for(v))
+            latest.push(v)
+        hid = sc.connect('value-changed', changed)
+        self.refreshers.append(lambda: bg(get, show))
+        c.scale = sc
+        return c
+
+    def dropdown(self, icon_name, title, sub, options, get, set_, keywords='', get_options=None):
+        def picked(key):
+            def done(_r):
+                flush_cache()
+                self.win.refresh_soon()
+            bg(lambda: set_(key), done)
+        dd = Dropdown(options, picked)
+        c = self.card(icon_name, title, sub, trailing=[dd], keywords=keywords)
+
+        def show(r):
+            if r is None:
+                dd.set_sensitive(False)
+                return
+            dd.set_sensitive(True)
+            if get_options:
+                opts, key = r
+                dd.set_options(opts)
+            else:
+                key = r
+            if key != dd.value:
+                dd.set_value(key)
+        self.refreshers.append(lambda: bg((lambda: (get_options(), get())) if get_options else get, show))
+        c.dropdown = dd
+        return c
+
+    def info(self, icon_name, title, get, sub=None, keywords='', trailing=None):
+        """Thẻ chỉ hiện thông tin; get() trả chữ cho dòng mô tả (hoặc (mô tả, icon))."""
+        c = self.card(icon_name, title, sub, trailing=trailing, keywords=keywords)
+
+        def show(r):
+            if isinstance(r, tuple):
+                c.set_sub(r[0])
+                if r[1]:
+                    c.set_icon(r[1])
+            elif r is not None:
+                c.set_sub(r)
+        self.refreshers.append(lambda: bg(get, show))
+        return c
+
+    def dynamic(self, get, build):
+        """Danh sách thay đổi theo máy (mạng Wi-Fi, thiết bị Bluetooth): dựng lại khi dữ liệu đổi."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.add(box)
+        last = [object()]
+
+        def show(data):
+            if data == last[0] or getattr(box, 'hold', False):
+                return
+            last[0] = data
+            for w in box.get_children():
+                box.remove(w)
+            build(box, data)
+            box.show_all()
+        self.refreshers.append(lambda: bg(get, show))
+        box.reset = lambda: last.__setitem__(0, object())
+        return box
+
+    def refresh(self):
+        for fn in self.refreshers:
+            fn()
+
+
+# ====================================================================== cửa sổ chính
+
+NAV = [   # (id trang, tên, icon thanh bên)
+    ('system', 'Hệ thống', ('computer',)),
+    ('devices', 'Bluetooth và thiết bị', ('bluetooth', 'preferences-system-bluetooth', 'bluetooth-symbolic')),
+    ('network', 'Mạng và Internet', ('preferences-system-network', 'network-wireless', 'network-wireless-symbolic')),
+    ('personalize', 'Cá nhân hoá', ('preferences-desktop-wallpaper', 'preferences-desktop-theme',
+                                    'preferences-desktop-wallpaper-symbolic')),
+    ('apps', 'Ứng dụng', ('preferences-desktop-default-applications', 'applications-other', 'view-app-grid-symbolic')),
+    ('time', 'Thời gian và ngôn ngữ', ('preferences-system-time', 'preferences-desktop-locale',
+                                       'preferences-system-time-symbolic')),
+    ('access', 'Trợ năng', ('preferences-desktop-accessibility', 'preferences-desktop-accessibility-symbolic')),
+    ('about', 'Giới thiệu', ('help-about', 'dialog-information', 'help-about-symbolic')),
+]
+
+
+class Window(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title='Cài đặt')
+        self.set_default_size(1100, 760)
+        self.set_size_request(760, 480)
+        self.set_icon_name('preferences-system')
+        self.get_style_context().add_class('st-win')
+        self.search_index = []
+        self.pages = {}
+        self.history = []
+        self.current = None
+        self.refresh_id = None
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), self.css,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 20)
+        self.apply_theme()
+        st = Gtk.Settings.get_default()
+        st.connect('notify::gtk-theme-name', lambda *_: self.apply_theme())
+        st.connect('notify::gtk-application-prefer-dark-theme', lambda *_: self.apply_theme())
+
+        self.build_titlebar()
+        root = Gtk.Box()
+        root.get_style_context().add_class('st-root')
+        self.add(root)
+        root.pack_start(self.build_sidebar(), False, False, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.crumbs = Gtk.Box()
+        self.crumbs.get_style_context().add_class('st-crumbs')
+        right.pack_start(self.crumbs, False, False, 0)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(120)
+        right.pack_start(self.stack, True, True, 0)
+        root.pack_start(right, True, True, 0)
+
+        self.build_pages()
+        self.connect('key-press-event', self.on_key)
+        self.connect('notify::is-active', lambda *_: self.is_active() and self.refresh_soon())
+        self.connect('window-state-event', self.on_state)
+        GLib.timeout_add_seconds(4, self.tick)
+        root.show_all()
+        self.go('system', record=False)
+
+    # ------------------------------------------------------------------ giao diện tối / sáng
+    def theme_mode(self):
+        mode = conf_value(CONF, 'THEME', 'system')
+        if mode in ('dark', 'light'):
+            return mode
+        st = Gtk.Settings.get_default()
+        name = (st.get_property('gtk-theme-name') or '').lower()
+        return 'dark' if 'dark' in name or st.get_property('gtk-application-prefer-dark-theme') else 'light'
+
+    def apply_theme(self):
+        pal = PALETTES[self.theme_mode()]
+        defs = ''.join('@define-color st_%s %s;\n' % (k, v) for k, v in pal.items())
+        defs += '@define-color placeholder_text_color %s;\n' % pal['fg2']
+        self.css.load_from_data((defs + CSS).encode())
+
+    # ------------------------------------------------------------------ thanh tiêu đề
+    def build_titlebar(self):
+        bar = Gtk.Box()
+        bar.get_style_context().add_class('st-titlebar')
+        self.back = Gtk.Button()
+        self.back.add(image('go-previous-symbolic', 16))
+        self.back.get_style_context().add_class('st-back')
+        self.back.set_tooltip_text('Quay lại (Alt+←)')
+        self.back.set_can_focus(False)
+        self.back.connect('clicked', lambda *_: self.go_back())
+        bar.pack_start(self.back, False, False, 0)
+        bar.pack_start(label('Cài đặt', 'st-app-title'), False, False, 0)
+        for icon_name, cls, tip, cb in (
+                ('window-close-symbolic', 'close', 'Đóng', self.close),
+                ('window-maximize-symbolic', 'max', 'Phóng to', self.toggle_max),
+                ('window-minimize-symbolic', 'min', 'Thu nhỏ', self.iconify)):
+            b = Gtk.Button()
+            img = image(icon_name, 14)
+            b.add(img)
+            b.get_style_context().add_class('st-winbtn')
+            b.get_style_context().add_class(cls)
+            b.set_tooltip_text(tip)
+            b.set_can_focus(False)
+            b.set_valign(Gtk.Align.START)
+            b.connect('clicked', lambda _b, f=cb: f())
+            bar.pack_end(b, False, False, 0)
+            if cls == 'max':
+                self.max_img, self.max_btn = img, b
+        bar.show_all()
+        self.set_titlebar(bar)
+
+    def toggle_max(self):
+        if self.is_maximized():
+            self.unmaximize()
+        else:
+            self.maximize()
+
+    def on_state(self, _w, ev):
+        mx = bool(ev.new_window_state & Gdk.WindowState.MAXIMIZED)
+        self.max_img.set_from_icon_name('window-restore-symbolic' if mx else 'window-maximize-symbolic',
+                                        Gtk.IconSize.MENU)
+        self.max_btn.set_tooltip_text('Thu về' if mx else 'Phóng to')
+        return False
+
+    # ------------------------------------------------------------------ thanh bên
+    def build_sidebar(self):
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        side.get_style_context().add_class('st-side')
+        side.set_size_request(288, -1)
+        # người dùng
+        user = Gtk.Box(spacing=12)
+        user.get_style_context().add_class('st-user')
+        user.pack_start(self.avatar(), False, False, 0)
+        pw = pwd.getpwuid(os.getuid())
+        name = (pw.pw_gecos or '').split(',')[0] or pw.pw_name
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        col.set_valign(Gtk.Align.CENTER)
+        col.pack_start(label(name, 'st-user-name'), False, False, 0)
+        col.pack_start(label('%s · %s' % (pw.pw_name, socket.gethostname()), 'st-user-sub'), False, False, 0)
+        user.pack_start(col, True, True, 0)
+        side.pack_start(user, False, False, 0)
+        # tìm kiếm
+        self.search = Gtk.Entry()
+        self.search.set_placeholder_text('Tìm cài đặt')
+        self.search.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, 'system-search-symbolic')
+        self.search.get_style_context().add_class('st-search')
+        self.search.connect('changed', self.on_search)
+        self.search.connect('activate', self.on_search_enter)
+        side.pack_start(self.search, False, False, 0)
+        # danh mục
+        self.nav = Gtk.ListBox()
+        self.nav.get_style_context().add_class('st-nav')
+        self.nav.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.nav_rows = {}
+        for pid, title, icons in NAV:
+            row = Gtk.ListBoxRow()
+            row.page_id = pid
+            box = Gtk.Box(spacing=0)
+            pill = Gtk.Box()
+            pill.get_style_context().add_class('st-pill')
+            pill.set_valign(Gtk.Align.CENTER)
+            box.pack_start(pill, False, False, 0)
+            img = image(pick_icon(*icons), 20)
+            if pid == 'system':     # bản 16px của icon máy tính là nét đơn sắc: lấy bản màu cỡ lớn rồi thu nhỏ
+                try:
+                    pb = Gtk.IconTheme.get_default().load_icon(pick_icon(*icons), 48,
+                                                               Gtk.IconLookupFlags.FORCE_SIZE)
+                    img.set_from_pixbuf(pb.scale_simple(20, 20, GdkPixbuf.InterpType.HYPER))
+                except GLib.Error:
+                    pass
+            img.set_margin_start(10)
+            img.set_margin_end(14)
+            box.pack_start(img, False, False, 0)
+            box.pack_start(label(title, 'st-nav-label'), True, True, 0)
+            row.add(box)
+            self.nav.add(row)
+            self.nav_rows[pid] = row
+        self.nav_handler = self.nav.connect('row-selected', self.on_nav)
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.add(self.nav)
+        side.pack_start(sc, True, True, 0)
+        return side
+
+    def avatar(self):
+        size = 56
+        for p in (os.path.expanduser('~/.face'), os.path.expanduser('~/.face.icon')):
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(p, size, size, False)
+            except GLib.Error:
+                continue
+            area = Gtk.DrawingArea()
+            area.set_size_request(size, size)
+
+            def draw(_w, cr, pb=pb):
+                import math
+                cr.arc(size / 2, size / 2, size / 2, 0, 2 * math.pi)
+                cr.clip()
+                Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+                cr.paint()
+            area.connect('draw', draw)
+            area.set_valign(Gtk.Align.CENTER)
+            return area
+        box = Gtk.Box()
+        box.get_style_context().add_class('st-avatar')
+        img = image('avatar-default-symbolic', 28)
+        img.set_halign(Gtk.Align.CENTER)
+        box.pack_start(img, True, True, 0)
+        box.set_valign(Gtk.Align.CENTER)
+        return box
+
+    # ------------------------------------------------------------------ điều hướng
+    def page(self, pid, title, parent=None):
+        p = Page(self, pid, title, parent)
+        self.pages[pid] = p
+        self.stack.add_named(p.scroll, pid)
+        return p
+
+    def top_of(self, pid):
+        while pid in self.pages and self.pages[pid].parent:
+            pid = self.pages[pid].parent
+        return pid
+
+    def go(self, pid, record=True):
+        if pid not in self.pages:
+            return
+        if record and self.current and self.current != pid:
+            self.history.append(self.current)
+        self.current = pid
+        p = self.pages[pid]
+        self.stack.set_visible_child_name(pid)
+        p.scroll.get_vadjustment().set_value(0)
+        self.back.set_sensitive(bool(self.history))
+        # thanh bên
+        self.nav.handler_block(self.nav_handler)
+        row = self.nav_rows.get(self.top_of(pid))
+        if row:
+            self.nav.select_row(row)
+        else:
+            self.nav.unselect_all()
+        self.nav.handler_unblock(self.nav_handler)
+        # breadcrumb
+        for w in self.crumbs.get_children():
+            self.crumbs.remove(w)
+        chain, q = [], pid
+        while q:
+            chain.insert(0, q)
+            q = self.pages[q].parent
+        for i, q in enumerate(chain):
+            last = i == len(chain) - 1
+            if i:
+                self.crumbs.pack_start(label('›', 'st-crumb-sep'), False, False, 0)
+            l = label(self.pages[q].title, 'st-crumb' if last else 'st-crumb dim')
+            if last:
+                self.crumbs.pack_start(l, False, False, 0)
+            else:
+                b = Gtk.Button()
+                b.add(l)
+                b.get_style_context().add_class('st-crumb-btn')
+                b.set_can_focus(False)
+                b.connect('clicked', lambda _b, q=q: self.go(q))
+                self.crumbs.pack_start(b, False, False, 0)
+        self.crumbs.show_all()
+        if pid != 'search' and self.search.get_text():
+            self.search.handler_block_by_func(self.on_search)
+            self.search.set_text('')
+            self.search.handler_unblock_by_func(self.on_search)
+        if hasattr(p, 'on_enter'):
+            p.on_enter()
+        flush_cache()
+        p.refresh()
+
+    def go_back(self):
+        if self.history:
+            self.go(self.history.pop(), record=False)
+
+    def on_nav(self, _lb, row):
+        if row is not None:
+            self.history.clear()
+            self.go(row.page_id, record=False)
+
+    def on_key(self, _w, e):
+        alt = e.state & Gdk.ModifierType.MOD1_MASK
+        ctrl = e.state & Gdk.ModifierType.CONTROL_MASK
+        if (alt and e.keyval == Gdk.KEY_Left) or e.keyval == Gdk.KEY_Back:
+            self.go_back()
+            return True
+        if e.keyval == Gdk.KEY_Escape:
+            if self.search.is_focus() and self.search.get_text():
+                self.search.set_text('')
+            else:
+                self.go_back()
+            return True
+        if ctrl and e.keyval in (Gdk.KEY_f, Gdk.KEY_e, Gdk.KEY_k):
+            self.search.grab_focus()
+            return True
+        return False
+
+    def tick(self):
+        if self.is_active() and self.current:
+            self.pages[self.current].refresh()
+        return True
+
+    def refresh_soon(self):
+        if self.refresh_id is None:
+            def fire():
+                self.refresh_id = None
+                if self.current:
+                    self.pages[self.current].refresh()
+                return False
+            self.refresh_id = GLib.timeout_add(350, fire)
+
+    def open_tool(self, target, title):
+        if not launch(target):
+            self.toast('Không mở được "%s"' % title)
+
+    def toast(self, text):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
+                              buttons=Gtk.ButtonsType.OK, text=text)
+        d.connect('response', lambda d, _r: d.destroy())
+        d.show()
+
+    # ------------------------------------------------------------------ tìm kiếm
+    def on_search(self, entry):
+        q = fold(entry.get_text().strip())
+        if not q:
+            if self.current == 'search':
+                self.go_back()
+            return
+        p = self.pages['search']
+        for w in p.box.get_children():
+            p.box.remove(w)
+        words = q.split()
+
+        def rank(it):
+            # 0: cả cụm nằm trong tên · 1: cả cụm nằm trong mô tả / từ khoá · 2: đủ các từ (mỗi từ mở đầu một chữ)
+            if q in fold(it[1]):
+                return 0
+            if q in it[0]:
+                return 1
+            have = it[0].split()
+            return 2 if all(any(h.startswith(w) for h in have) for w in words) else None
+        ranked = [(rank(it), i, it) for i, it in enumerate(self.search_index)]
+        best = min((r for r, _i, _it in ranked if r is not None), default=None)
+        # đã có mục khớp nguyên cụm thì không kéo theo các mục chỉ khớp rời từng từ
+        hits = [it for r, _i, it in sorted(x for x in ranked if x[0] is not None and (x[0] < 2 or best == 2))]
+        self.search_hits = hits
+        if not hits:
+            p.add(label('Không thấy cài đặt nào khớp với "%s".' % entry.get_text().strip(), 'st-note', wrap=True))
+        for _n, title, sub, icon_name, pid in hits[:40]:
+            where = self.pages[pid]
+            path = where.title if not where.parent else '%s › %s' % (self.pages[where.parent].title, where.title)
+            c = Card(icon_name, title, path if not sub else '%s — %s' % (path, sub),
+                     on_click=lambda pid=pid: self.go(pid), chevron='go-next-symbolic')
+            p.add(c.widget)
+        p.box.show_all()
+        if self.current != 'search':
+            self.go('search')
+
+    def on_search_enter(self, _e):
+        hits = getattr(self, 'search_hits', [])
+        if self.current == 'search' and hits:
+            self.go(hits[0][4])
+
+    # ================================================================== các trang
+    def build_pages(self):
+        self.page('search', 'Kết quả tìm kiếm')
+        self.build_system()
+        self.build_display()
+        self.build_sound()
+        self.build_notifications()
+        self.build_power()
+        self.build_storage()
+        self.build_devices()
+        self.build_printers()
+        self.build_network()
+        self.build_wifi()
+        self.build_personalize()
+        self.build_apps()
+        self.build_time()
+        self.build_access()
+        self.build_about()
+
+    def hero(self, p, icon_name, title, sub_get, px=48):
+        box = Gtk.Box(spacing=16)
+        box.get_style_context().add_class('st-card')
+        box.get_style_context().add_class('hero')
+        img = image(icon_name, px)
+        box.pack_start(img, False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        col.set_valign(Gtk.Align.CENTER)
+        t = label(title, 'st-hero-title')
+        s = label('', 'st-hero-sub')
+        col.pack_start(t, False, False, 0)
+        col.pack_start(s, False, False, 0)
+        box.pack_start(col, True, True, 0)
+        p.add(box)
+        p.refreshers.append(lambda: bg(sub_get, lambda r: s.set_text(r or '')))
+        box.title, box.sub, box.image = t, s, img
+        return box
+
+    # ---- Hệ thống
+    def build_system(self):
+        p = self.page('system', 'Hệ thống')
+
+        def machine():
+            model = read('/sys/class/dmi/id/product_name')
+            osname = conf_value('/etc/os-release', 'PRETTY_NAME', 'Linux')
+            return ' · '.join(x for x in (model, osname) if x)
+        self.hero(p, pick_icon('computer', 'computer-symbolic'), socket.gethostname(), machine)
+        p.add(Gtk.Box(height_request=6))
+        p.nav('video-display-symbolic', 'Màn hình', 'Độ sáng, ánh sáng đêm, tỉ lệ chữ, độ phân giải', 'display')
+        p.nav('audio-volume-high-symbolic', 'Âm thanh', 'Âm lượng, thiết bị phát, micro, âm thanh sự kiện', 'sound')
+        p.nav('preferences-system-notifications-symbolic', 'Thông báo', 'Không làm phiền, khung thông báo',
+              'notifications')
+        p.nav('battery-symbolic', 'Nguồn và pin', 'Chế độ pin, tắt màn hình, ngủ', 'power')
+        p.nav('drive-harddisk-symbolic', 'Lưu trữ', 'Dung lượng đã dùng, vùng lưu trên USB', 'storage')
+        p.link('edit-paste-symbolic', 'Bộ nhớ tạm', 'Lịch sử sao chép (Win+V): số mục giữ lại, phím tắt',
+               'xfce4-clipman-settings.desktop', 'clipboard clipman copy paste dán')
+        p.link('applications-system-symbolic', 'Driver phần cứng',
+               'Thiết bị đang chạy driver gì, cài driver còn thiếu', 'depot-drivers.desktop', 'nvidia firmware wifi')
+        p.link(pick_icon('sensors-temperature-symbolic', 'utilities-system-monitor-symbolic'), 'Cảm biến phần cứng',
+               'Nhiệt độ CPU/GPU, quạt, điện áp, kiểm tra nhiệt', 'depot-hwmon.desktop', 'nhiet do temperature fan')
+        p.link('utilities-system-monitor-symbolic', 'Quản lý tác vụ', 'Ứng dụng đang chạy, CPU, RAM',
+               'xfce4-taskmanager.desktop', 'task manager process tien trinh')
+        p.nav('help-about-symbolic', 'Giới thiệu', 'Cấu hình máy, phiên bản hệ điều hành', 'about')
+
+    def build_display(self):
+        p = self.page('display', 'Màn hình', 'system')
+        p.section('Độ sáng và màu')
+        if bl_dir():
+            p.slider('display-brightness-symbolic', 'Độ sáng', bl_get, bl_set,
+                     'Đèn nền của màn hình máy tính xách tay', 'brightness den nen')
+        if which('xrandr'):
+            p.switch('night-light-symbolic', 'Ánh sáng đêm', 'Màu ấm hơn, đỡ mỏi mắt buổi tối',
+                     lambda: (screens() or {}).get('night'), night_set, 'night light anh sang xanh am mau')
+        p.link('preferences-color-symbolic', 'Hồ sơ màu', 'Gán hồ sơ màu ICC cho màn hình',
+               'xfce4-color-settings.desktop', 'color profile icc')
+        p.section('Tỉ lệ và bố cục')
+        if which('xfconf-query'):
+            p.dropdown('zoom-in-symbolic', 'Tỉ lệ', 'Cỡ chữ và giao diện của mọi ứng dụng', SCALES,
+                       dpi_get, dpi_set, 'scale dpi co chu to nho font size')
+
+        def res():
+            st = screens()
+            if not st:
+                return None
+            return '%s%s · %s' % (st['mode'], ', %s Hz' % st['hz'] if st['hz'] else '', st['name'])
+        c = p.link('video-display-symbolic', 'Độ phân giải và nhiều màn hình', 'Độ phân giải, tần số quét, xoay, '
+                   'màn hình ngoài', 'xfce-display-settings.desktop', 'resolution refresh rate hdmi may chieu xoay')
+        if c:
+            p.refreshers.append(lambda: bg(res, lambda r: r and c.set_sub(
+                'Đang dùng %s — bấm để đổi độ phân giải, tần số quét, màn hình ngoài' % r)))
+
+    def build_sound(self):
+        p = self.page('sound', 'Âm thanh', 'system')
+        if not which('pactl'):
+            p.note('Máy này không có pactl (PipeWire / PulseAudio) nên không chỉnh âm thanh ở đây được.')
+        else:
+            p.section('Đầu ra')
+            p.dropdown('audio-speakers-symbolic', 'Thiết bị phát', 'Loa hoặc tai nghe đang dùng', [],
+                       lambda: audio_sinks()[1], lambda k: run(['pactl', 'set-default-sink', k]),
+                       'loa tai nghe output speaker headphone', get_options=lambda: audio_sinks()[0])
+            p.slider('audio-volume-high-symbolic', 'Âm lượng', lambda: (audio_state() or {}).get('vol'),
+                     lambda v: run(['pactl', 'set-sink-volume', '@DEFAULT_SINK@', '%d%%' % v]),
+                     keywords='volume am luong', icon_for=lambda v: vol_icon(v, False))
+            p.switch('audio-volume-muted-symbolic', 'Tắt tiếng', 'Tắt hết âm thanh phát ra loa',
+                     lambda: (audio_state() or {}).get('muted'),
+                     lambda on: run(['pactl', 'set-sink-mute', '@DEFAULT_SINK@', '1' if on else '0']), 'mute')
+            p.link('audio-speakers-symbolic', 'Thử loa', 'Phát chuông ở loa trái rồi loa phải',
+                   'depot-sound-test.desktop', 'test speaker')
+            p.section('Đầu vào')
+            p.switch('audio-input-microphone-symbolic', 'Micro', 'Cho ứng dụng thu tiếng từ micro',
+                     lambda: (audio_state() or {}).get('mic'),
+                     lambda on: run(['pactl', 'set-source-mute', '@DEFAULT_SOURCE@', '0' if on else '1']),
+                     'microphone thu am')
+            p.slider('microphone-sensitivity-high-symbolic', 'Âm lượng micro',
+                     lambda: (audio_state() or {}).get('mic_vol'),
+                     lambda v: run(['pactl', 'set-source-volume', '@DEFAULT_SOURCE@', '%d%%' % v]),
+                     keywords='microphone volume do nhay')
+        p.section('Khác')
+        if which('xfconf-query'):
+            p.switch('preferences-system-notifications-symbolic', 'Âm thanh sự kiện',
+                     'Chuông khi có thông báo, cắm sạc, cắm USB, đổi âm lượng',
+                     lambda: xfconf_get('xsettings', '/Net/EnableEventSounds') == 'true',
+                     lambda on: xfconf_set('xsettings', '/Net/EnableEventSounds', 'bool', 'true' if on else 'false'),
+                     'event sounds chuong am bao')
+        p.link('multimedia-volume-control-symbolic', 'Bộ trộn âm lượng', 'Âm lượng từng ứng dụng, cổng ra/vào, '
+               'cấu hình card âm thanh', 'org.pulseaudio.pavucontrol.desktop', 'pavucontrol mixer')
+
+    def build_notifications(self):
+        p = self.page('notifications', 'Thông báo', 'system')
+        if dnd_backend():
+            p.switch('notifications-disabled-symbolic', 'Không làm phiền',
+                     'Thông báo không nổi lên, vẫn nằm trong khung Thông báo', dnd_get, dnd_set,
+                     'dnd do not disturb im lang')
+        p.link('preferences-system-notifications-symbolic', 'Mở khung Thông báo',
+               'Xem lại, xoá thông báo (Super+N)', 'depot-notify.desktop', 'notification center')
+        if dnd_backend() == 'xfce':
+            p.link('preferences-system-notifications-symbolic', 'Tuỳ chỉnh thông báo',
+                   'Vị trí, thời gian hiện, ứng dụng được báo', 'xfce4-notifyd-config.desktop')
+        self.lock_rows(p)
+
+    def lock_rows(self, p):
+        """Công tắc ô báo Num Lock / Caps Lock (dùng ở trang Thông báo và Trợ năng)."""
+        kinds = [k for k in ('num', 'caps') if lock_backend(k)]
+        if not kinds:
+            return
+        p.section('Báo phím khoá trên màn hình')
+        rows = {'num': ('input-dialpad-symbolic', 'Báo Num Lock', 'Bấm Num Lock thì hiện ô ổ khoá chữ "Num" trên màn hình',
+                        'numlock phim so osd', '--test-num'),
+                'caps': (pick_icon('caps-lock-symbolic', 'input-keyboard-symbolic'), 'Báo Caps Lock',
+                         'Bấm Caps Lock thì hiện ô ổ khoá chữ "A" trên màn hình', 'capslock chu hoa osd', '--test')}
+        for kind in kinds:
+            icon_name, title, sub, words, test = rows[kind]
+            extra = None
+            if lock_backend(kind) == 'capslock':
+                extra = [text_button('Thử', lambda test=test: spawn([capslock_bin(), test]))]
+            p.switch(icon_name, title, sub, lambda kind=kind: lock_get(kind), lambda on, kind=kind: lock_set(kind, on),
+                     words, extra=extra)
+
+    def update_rows(self, p):
+        """Thẻ cập nhật OTA của gói depot-capslock (ô báo Caps Lock / Num Lock) — chỉ hiện khi máy có gói đó."""
+        ver = capslock_version()
+        if not ver:
+            return
+        p.section('Cập nhật')
+        new = [False]
+
+        def click():
+            btn.set_sensitive(False)
+            if new[0]:
+                card.set_sub('Đang tải và cài bản mới…')
+                bg(lambda: capslock_update('--update'), done)
+            else:
+                card.set_sub('Đang hỏi kho mã nguồn…')
+                bg(lambda: capslock_update('--check-update'), show)
+
+        def done(r):
+            _ok, msg = r or (False, 'Không chạy được lệnh cập nhật.')
+            new[0] = False
+            btn.set_label('Kiểm tra cập nhật')
+            btn.set_sensitive(True)
+            set_class(btn, 'accent', False)
+            card.set_sub(msg)
+
+        def show(r):
+            new[0], msg = r or (False, 'Không kiểm tra được.')
+            btn.set_sensitive(True)
+            card.set_sub(msg)
+            btn.set_label('Cập nhật' if new[0] else 'Kiểm tra cập nhật')
+            set_class(btn, 'accent', new[0])
+        btn = text_button('Kiểm tra cập nhật', click)
+        card = p.card('software-update-available-symbolic', 'Ô báo Caps Lock / Num Lock (depot-capslock)',
+                      'Phiên bản %s' % ver, trailing=[btn], keywords='update cap nhat ota phien ban version')
+        p.switch('view-refresh-symbolic', 'Tự kiểm tra bản mới', 'Mỗi ngày hỏi một lần, có bản mới thì báo — '
+                 'không tự cài', lambda: conf_value(CAPS_CONF, 'UPDATE_CHECK', '1') != '0',
+                 lambda on: conf_set(CAPS_CONF, 'UPDATE_CHECK', '1' if on else '0'), 'auto update')
+
+    def build_power(self):
+        p = self.page('power', 'Nguồn và pin', 'system')
+
+        def bat():
+            b = battery()
+            return ('%d%% — %s' % (b[0], b[1]), b[2]) if b else ('Máy này không có pin', 'battery-missing-symbolic')
+        p.info('battery-symbolic', 'Pin', bat, keywords='battery phan tram')
+        if which('depot-power'):
+            p.dropdown(pick_icon('power-profile-balanced-symbolic', 'battery-good-symbolic'), 'Chế độ pin',
+                       'Tiết kiệm pin: Tự động theo % pin, hoặc chọn mức', POWER_MODES, power_mode,
+                       lambda k: run(['depot-power', 'set', k], timeout=30), 'battery saver tiet kiem pin')
+            p.link('battery-good-symbolic', 'Chi tiết chế độ pin', 'Mỗi mức làm gì, ứng dụng được chừa "ngủ sâu"',
+                   'depot-power.desktop')
+        p.link('preferences-desktop-screensaver-symbolic', 'Màn hình và chế độ ngủ',
+               'Bao lâu thì tắt màn hình, ngủ; nút nguồn, gập máy', 'xfce4-power-manager-settings.desktop',
+               'sleep suspend tat man hinh gap may lid')
+
+    def build_storage(self):
+        p = self.page('storage', 'Lưu trữ', 'system')
+
+        def build(box, data):
+            for name, point, used, total in data or []:
+                row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                row.get_style_context().add_class('st-card')
+                top = Gtk.Box(spacing=16)
+                top.pack_start(image('drive-harddisk-symbolic', 20), False, False, 0)
+                top.pack_start(label('%s (%s)' % (name, point), 'st-row-title'), True, True, 0)
+                top.pack_end(label('Còn trống %s' % gb(total - used), 'st-row-value', xalign=1.0), False, False, 0)
+                row.pack_start(top, False, False, 0)
+                bar = Gtk.ProgressBar()
+                bar.set_fraction(used / total)
+                row.pack_start(bar, False, False, 0)
+                row.pack_start(label('Đã dùng %s trong %s' % (gb(used), gb(total)), 'st-row-sub'), False, False, 0)
+                box.pack_start(row, False, False, 0)
+        p.dynamic(disks, build)
+        p.index('Dung lượng ổ đĩa', 'Đã dùng, còn trống', 'drive-harddisk-symbolic', 'disk space o cung')
+        p.link('drive-removable-media-symbolic', 'Lưu dữ liệu trên USB',
+               'Vùng lưu mã hoá trên USB đang boot: giữ tệp và cài đặt qua lần khởi động sau',
+               'depot-persist.desktop', 'persistence usb')
+        p.link('folder-symbolic', 'Mở trình quản lý tệp', 'Xem và dọn các thư mục', 'thunar.desktop', 'thunar file')
+
+    # ---- Bluetooth và thiết bị
+    def build_devices(self):
+        p = self.page('devices', 'Bluetooth và thiết bị')
+        if bt_present():
+            def bt_sub():
+                if not bt_powered():
+                    return 'Đang tắt'
+                con = [n for _m, n in bt_devices('Connected')]
+                return 'Đang kết nối: ' + ', '.join(con) if con else 'Đang bật, chưa kết nối thiết bị nào'
+            c = p.switch('bluetooth-symbolic', 'Bluetooth', '', bt_powered, bt_set, 'bluetooth tai nghe loa')
+            p.refreshers.append(lambda: bg(bt_sub, c.set_sub))
+
+            def build(box, devs):
+                for mac, name, con in devs or []:
+                    def act(mac=mac, con=con):
+                        bg(lambda: bt_connect(mac, not con), lambda _r: (flush_cache(), self.refresh_soon()))
+                    card = Card('bluetooth-active-symbolic' if con else 'bluetooth-symbolic', name,
+                                'Đã kết nối' if con else 'Đã ghép đôi',
+                                trailing=[text_button('Ngắt' if con else 'Kết nối', act)])
+                    box.pack_start(card.widget, False, False, 0)
+            p.dynamic(bt_list, build)
+            p.link('list-add-symbolic', 'Thêm thiết bị', 'Dò và ghép đôi tai nghe, loa, chuột, bàn phím Bluetooth',
+                   'blueman-manager.desktop', 'pair ghep doi')
+        else:
+            p.note('Máy này không có Bluetooth.')
+        p.nav('printer-symbolic', 'Máy in và máy quét', 'Máy in đã cài, thêm máy in, in thử, quét tài liệu',
+              'printers')
+        p.section('Thiết bị nhập')
+        p.link('input-mouse-symbolic', 'Chuột và touchpad', 'Tốc độ, nút trái/phải, cuộn, chạm để bấm',
+               'xfce-mouse-settings.desktop', 'mouse touchpad chuot')
+        p.link(pick_icon('tool-pointer-symbolic', 'input-mouse-symbolic'), 'Con trỏ chuột',
+               'Kiểu và cỡ con trỏ', 'depot-cursor.desktop', 'cursor pointer')
+        p.link(pick_icon('preferences-desktop-keyboard-symbolic', 'input-keyboard-symbolic'), 'Bàn phím', 'Tốc độ lặp phím, phím tắt ứng dụng, bố cục',
+               'xfce-keyboard-settings.desktop', 'keyboard shortcut phim tat layout')
+        p.link(pick_icon('accessories-character-map-symbolic', 'input-keyboard-symbolic'), 'Bộ gõ tiếng Việt (Unikey)', 'Kiểu gõ VNI / Telex, phím chuyển V–E',
+               'depot-unikey.desktop', 'unikey telex vni go tieng viet fcitx')
+
+    def build_printers(self):
+        p = self.page('printers', 'Máy in và máy quét', 'devices')
+        p.index('Máy in và máy quét', 'Máy in đã cài, thêm máy in, in thử', 'printer-symbolic', 'printer in an cups scan')
+
+        def build(box, data):
+            if data is None:
+                box.pack_start(label('Bản Depot OS chạy từ USB chưa cài dịch vụ in (CUPS) nên chưa nhận máy in. '
+                                     'Cài bằng lệnh dưới đây trong Terminal (cần mạng, tải khoảng 10 MB), rồi mở lại '
+                                     'trang này. Khi cài Depot OS vào ổ cứng thì phần in ấn được cài sẵn.',
+                                     'st-note', wrap=True), False, False, 0)
+
+                def copy():
+                    Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(PRINT_INSTALL, -1)
+                    btn.set_label('Đã sao chép')
+                    GLib.timeout_add(1500, lambda: (btn.set_label('Sao chép lệnh'), False)[1])
+                btn = text_button('Sao chép lệnh', copy)
+                card = Card('utilities-terminal-symbolic', PRINT_INSTALL, 'Lệnh cài dịch vụ in và công cụ thêm máy in',
+                            trailing=[btn] + ([text_button('Mở Terminal', lambda: launch('xfce4-terminal.desktop'))]
+                                              if available('xfce4-terminal.desktop') else []))
+                card.title.set_selectable(True)
+                box.pack_start(card.widget, False, False, 0)
+                return
+            if not data:
+                box.pack_start(label('Chưa có máy in nào. Cắm máy in (USB) hoặc bật máy in mạng rồi bấm '
+                                     '"Thêm máy in".', 'st-note', wrap=True), False, False, 0)
+            for name, state, default in data:
+                def make_default(name=name):
+                    bg(lambda: run(['lpoptions', '-d', name]), lambda _r: self.refresh_soon())
+
+                def test(name=name):
+                    page = '/usr/share/cups/data/testprint'
+                    bg(lambda: run(['lp', '-d', name, page] if os.path.exists(page) else ['lp', '-d', name,
+                                                                                            '/etc/os-release']))
+                trail = [text_button('In thử', test)]
+                if not default:
+                    trail.append(text_button('Đặt mặc định', make_default))
+                card = Card('printer-symbolic', name, state + (' · máy in mặc định' if default else ''),
+                            trailing=trail)
+                box.pack_start(card.widget, False, False, 0)
+        p.dynamic(printers, build)
+        p.link('list-add-symbolic', 'Thêm và quản lý máy in', 'Dò máy in USB / mạng, chọn driver, hàng đợi in',
+               'system-config-printer.desktop', 'add printer driver')
+        if which('lpstat') and not available('system-config-printer.desktop'):
+            p.card('list-add-symbolic', 'Thêm và quản lý máy in', 'Mở trang quản lý CUPS trong trình duyệt',
+                   on_click=lambda: spawn(['xdg-open', 'http://localhost:631/admin']),
+                   chevron=pick_icon('external-link-symbolic', 'go-next-symbolic'))
+        p.link('scanner-symbolic', 'Quét tài liệu', 'Quét ảnh, tài liệu từ máy quét hoặc máy in đa năng',
+               'simple-scan.desktop', 'scan scanner may quet')
+
+    # ---- Mạng và Internet
+    def build_network(self):
+        p = self.page('network', 'Mạng và Internet')
+        if not which('nmcli'):
+            p.note('Máy này không dùng NetworkManager nên không chỉnh mạng ở đây được.')
+            return
+
+        def status():
+            st = net_state()
+            if not st:
+                return None
+            if st['eth_state'].startswith('connected'):
+                return 'Mạng dây — đã kết nối' + (' · %s' % st['ip'] if st['ip'] else '')
+            if st['ssid']:
+                return 'Wi‑Fi "%s" — đã kết nối' % st['ssid'] + (' · %s' % st['ip'] if st['ip'] else '')
+            return 'Chưa kết nối mạng'
+        h = self.hero(p, pick_icon('network-wireless-symbolic'), 'Trạng thái mạng', status, px=36)
+
+        def hero_icon(st):
+            if st:
+                wired = st['eth_state'].startswith('connected')
+                h.image.set_from_icon_name('network-wired-symbolic' if wired else
+                                           wifi_icon(st['signal'], st['on'], bool(st['ssid'])), Gtk.IconSize.MENU)
+        p.refreshers.append(lambda: bg(net_state, hero_icon))
+        p.add(Gtk.Box(height_request=6))
+        c = p.switch('network-wireless-symbolic', 'Wi‑Fi', '', lambda: (net_state() or {}).get('on'), wifi_set,
+                     'wifi wireless khong day')
+
+        def wifi_sub(st):
+            if st and st['dev']:
+                c.set_sub('Đã kết nối "%s"' % st['ssid'] if st['ssid'] else 'Đang bật' if st['on'] else 'Đang tắt')
+            else:
+                c.set_sub('Máy này không có card Wi‑Fi')
+                c.switch.set_sensitive(False)
+        p.refreshers.append(lambda: bg(net_state, wifi_sub))
+        p.nav('network-wireless-signal-excellent-symbolic', 'Hiện các mạng Wi‑Fi', 'Chọn mạng, nhập mật khẩu, '
+              'ngắt kết nối', 'wifi')
+
+        def eth():
+            st = net_state()
+            if not st or not st['eth']:
+                return 'Máy này không có cổng mạng dây'
+            return {'connected': 'Đã kết nối', 'unavailable': 'Chưa cắm dây',
+                    'disconnected': 'Đã cắm dây, chưa kết nối'}.get(st['eth_state'].split(' ')[0],
+                                                                    st['eth_state']) + ' · ' + st['eth']
+        p.info('network-wired-symbolic', 'Mạng dây (Ethernet)', eth, keywords='lan ethernet day mang')
+        p.switch('airplane-mode-symbolic', 'Chế độ máy bay', 'Tắt hết sóng: Wi‑Fi và Bluetooth',
+                 airplane_get, airplane_set, 'airplane flight tat song')
+        p.section('Nâng cao')
+        p.link('network-server-symbolic', 'DNS và Proxy', 'Đổi máy chủ DNS (kể cả DNS mã hoá) và proxy cho mọi mạng',
+               'depot-dns-proxy.desktop', 'dns proxy nextdns cloudflare')
+        p.link('preferences-system-network-symbolic', 'Cài đặt mạng nâng cao', 'IP tĩnh, VPN, mạng ẩn, sửa/xoá '
+               'mạng đã lưu', 'nm-connection-editor.desktop', 'ip tinh vpn static hidden')
+
+    def build_wifi(self):
+        p = self.page('wifi', 'Wi‑Fi', 'network')
+        if not which('nmcli'):
+            return
+        p.switch('network-wireless-symbolic', 'Wi‑Fi', 'Bật để dò và kết nối mạng không dây',
+                 lambda: (net_state() or {}).get('on'), wifi_set)
+        status = label('', 'st-note', wrap=True)
+        rescan = ['auto']
+
+        def get():
+            st = net_state()
+            if not st or not st['dev'] or not st['on']:
+                return ('off', ())
+            mode, rescan[0] = rescan[0], 'no'
+            return ('on', tuple(wifi_list(mode)))
+
+        def build(box, data):
+            state, nets = data if data else ('off', ())
+            if state == 'off':
+                box.pack_start(label('Wi‑Fi đang tắt.', 'st-note'), False, False, 0)
+                return
+            if not nets:
+                box.pack_start(label('Chưa thấy mạng nào. Bấm "Quét lại".', 'st-note'), False, False, 0)
+            for ssid, sig, sec, used, saved in nets:
+                sub = 'Đã kết nối' if used else ('Đã lưu' if saved else 'Có mật khẩu' if sec else 'Mạng mở')
+                outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+                outer.get_style_context().add_class('st-card')
+                top = Gtk.Box()
+                top.pack_start(image(wifi_icon(sig), 20, 'st-row-icon'), False, False, 0)
+                col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+                col.pack_start(label(ssid, 'st-row-title'), False, False, 0)
+                col.pack_start(label('%s · tín hiệu %d%%' % (sub, sig), 'st-row-sub'), False, False, 0)
+                top.pack_start(col, True, True, 0)
+                if sec and not used:
+                    top.pack_end(image('network-wireless-encrypted-symbolic', 14, 'st-chev'), False, False, 0)
+                outer.pack_start(top, False, False, 0)
+                ask = Gtk.Box(spacing=8)
+                ask.set_no_show_all(True)
+                entry = Gtk.Entry()
+                entry.set_visibility(False)
+                entry.set_placeholder_text('Mật khẩu Wi‑Fi')
+                entry.get_style_context().add_class('st-field')
+                entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+                ask.pack_start(entry, True, True, 0)
+
+                def connect(password=None, ssid=ssid, saved=saved, ask=ask, entry=entry):
+                    status.set_text('Đang kết nối "%s"…' % ssid)
+                    box.hold = False
+
+                    def done(r):
+                        ok, msg = r or (False, '')
+                        status.set_text('Đã kết nối "%s".' % ssid if ok else
+                                        'Không kết nối được "%s"%s' % (ssid, ': ' + msg if msg else '.'))
+                        flush_cache()
+                        box.reset()
+                        self.refresh_soon()
+                    bg(lambda: wifi_connect(ssid, password, saved), done)
+
+                def clicked(_b=None, sec=sec, saved=saved, used=used, ask=ask, entry=entry, connect=connect):
+                    if used:
+                        st = net_state()
+                        bg(lambda: wifi_disconnect(st['dev']),
+                           lambda _r: (flush_cache(), box.reset(), self.refresh_soon()))
+                    elif sec and not saved:
+                        box.hold = True                  # đang nhập mật khẩu: đừng dựng lại danh sách
+                        ask.show()
+                        for w in ask.get_children():
+                            w.show()
+                        entry.grab_focus()
+                    else:
+                        connect()
+                btn = text_button('Ngắt kết nối' if used else 'Kết nối', clicked)
+                top.pack_end(btn, False, False, 0)
+                ok = text_button('Kết nối', lambda entry=entry, connect=connect: connect(entry.get_text()),
+                                 accent=True)
+                entry.connect('activate', lambda e, connect=connect: connect(e.get_text()))
+
+                def cancel(ask=ask):
+                    box.hold = False
+                    ask.hide()
+                ask.pack_start(ok, False, False, 0)
+                ask.pack_start(text_button('Huỷ', cancel), False, False, 0)
+                outer.pack_start(ask, False, False, 0)
+                box.pack_start(outer, False, False, 0)
+        head = Gtk.Box()
+        head.pack_start(label('Mạng có sẵn', 'st-section'), True, True, 0)
+        lst = [None]
+
+        def do_rescan():
+            rescan[0] = 'yes'
+            status.set_text('Đang quét…')
+            lst[0].hold = False
+            lst[0].reset()
+            p.refresh()
+            GLib.timeout_add(6000, lambda: (status.get_text() == 'Đang quét…' and status.set_text(''), False)[1])
+        b = text_button('Quét lại', do_rescan)
+        b.set_valign(Gtk.Align.END)
+        b.set_margin_bottom(4)
+        head.pack_end(b, False, False, 0)
+        p.add(head)
+        p.add(status)
+        lst[0] = p.dynamic(get, build)
+
+        def on_enter():
+            rescan[0] = 'auto'
+            lst[0].hold = False
+        p.on_enter = on_enter
+
+    # ---- Cá nhân hoá
+    def build_personalize(self):
+        p = self.page('personalize', 'Cá nhân hoá')
+        thumb = Gtk.Image()
+        thumb.get_style_context().add_class('st-thumb')
+        thumb.set_halign(Gtk.Align.START)
+        thumb.set_margin_bottom(10)
+        thumb.set_no_show_all(True)
+        p.add(thumb)
+        shown = [None]
+
+        def load():
+            path = wallpaper_path()
+            if not path or path == shown[0]:
+                return None
+            try:
+                return path, GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 320, 180, True)
+            except GLib.Error:
+                return None
+
+        def show(r):
+            if r:
+                shown[0] = r[0]
+                thumb.set_from_pixbuf(r[1])
+                thumb.show()
+        p.refreshers.append(lambda: bg(load, show))
+        p.link('preferences-desktop-wallpaper-symbolic', 'Hình nền', 'Album hình nền Depot và ảnh của bạn',
+               'depot-wallpaper.desktop', 'wallpaper background anh nen')
+        p.dropdown('preferences-color-symbolic', 'Chế độ màu của Cài đặt', 'Nền tối hay sáng cho app Cài đặt này',
+                   THEMES, lambda: conf_value(CONF, 'THEME', 'system'), self.set_theme, 'dark light toi sang theme')
+        p.link('preferences-desktop-appearance-symbolic', 'Giao diện, biểu tượng, phông chữ',
+               'Theme tối/sáng của cả hệ thống, bộ icon, phông và cỡ chữ', 'xfce-ui-settings.desktop',
+               'appearance theme icon font')
+        if which('depot-effects'):
+            p.section('Hiệu ứng')
+
+            def set_fx(k):
+                run(['depot-effects', 'set', k], timeout=30)
+            p.dropdown('applications-graphics-symbolic', 'Hiệu ứng hình ảnh',
+                       'Animation, bóng đổ, mờ dần: đẹp nhất, nhanh nhất hoặc để Depot tự chọn', EFFECTS,
+                       lambda: effects_conf('PRESET', 'auto'), set_fx, 'animation shadow hieu ung picom')
+            p.switch(pick_icon('view-pin-symbolic', 'starred-symbolic'), 'Dynamic Island',
+                     'Viên đen ở giữa phía trên, hiện bài nhạc đang phát',
+                     lambda: effects_conf('ISLAND', '1') == '1',
+                     lambda on: run(['depot-effects', 'island', 'on' if on else 'off'], timeout=30),
+                     'island nhac music')
+            p.link('applications-graphics-symbolic', 'Bật tắt từng hiệu ứng', 'Animation cửa sổ, bóng đổ, mờ dần, '
+                   'widget, phóng to dock…', 'depot-effects.desktop')
+        p.section('Bố cục desktop')
+
+        def layout():
+            return 'Đang dùng kiểu %s — đổi sang macOS, Windows 10 hoặc Windows 11' % \
+                LAYOUTS.get(run(['depot-layout', 'current'])[1].strip(), '?')
+        c = p.link('view-dual-symbolic', 'Bố cục desktop', 'Kiểu macOS, Windows 10 hoặc Windows 11',
+                   'depot-layout.desktop', 'layout taskbar dock macos windows')
+        if c:
+            p.refreshers.append(lambda: bg(layout, c.set_sub))
+
+        def clock():
+            return 'Đồng hồ đang ở %s thanh panel' % CLOCKS.get(run(['depot-clock', 'current'])[1].strip(), '?')
+        c2 = p.link('preferences-system-time-symbolic', 'Vị trí đồng hồ', 'Bên trái, ở giữa hoặc bên phải thanh panel',
+                    'depot-clock.desktop', 'clock dong ho')
+        if c2:
+            p.refreshers.append(lambda: bg(clock, c2.set_sub))
+        p.link(pick_icon('dock-symbolic', 'view-list-symbolic'), 'Thanh tác vụ (panel)',
+               'Kích thước, vị trí, các nút và khay hệ thống', 'panel-preferences.desktop', 'taskbar panel')
+        p.link('preferences-desktop-wallpaper-symbolic', 'Biểu tượng trên màn hình nền', 'Hiện/ẩn icon, menu chuột '
+               'phải của desktop', 'xfce-backdrop-settings.desktop', 'desktop icons')
+        p.section('Cửa sổ')
+        p.link('focus-windows-symbolic', 'Cửa sổ', 'Kiểu thanh tiêu đề, phím tắt cửa sổ, cách lấy tiêu điểm',
+               'xfce-wm-settings.desktop', 'window manager xfwm')
+        p.link('focus-windows-symbolic', 'Tinh chỉnh cửa sổ', 'Dính cạnh, chuyển cửa sổ Alt+Tab, compositor',
+               'xfce-wmtweaks-settings.desktop', 'tweaks alt tab snap')
+        p.link('view-grid-symbolic', 'Không gian làm việc', 'Số lượng và tên các desktop ảo',
+               'xfce-workspaces-settings.desktop', 'workspace desktop ao')
+
+    def set_theme(self, mode):
+        conf_set(CONF, 'THEME', mode)
+        GLib.idle_add(lambda: (self.apply_theme(), False)[1])
+
+    # ---- Ứng dụng
+    def build_apps(self):
+        p = self.page('apps', 'Ứng dụng')
+        p.link('preferences-desktop-default-applications-symbolic', 'Ứng dụng mặc định',
+               'Trình duyệt, thư, trình quản lý tệp; loại tệp nào mở bằng app nào', 'xfce4-mime-settings.desktop',
+               'default apps mime trinh duyet mac dinh')
+        p.link('system-run-symbolic', 'Khởi động cùng máy', 'Ứng dụng tự chạy khi đăng nhập, lưu phiên làm việc',
+               'xfce-session-settings.desktop', 'autostart startup tu khoi dong session')
+        p.link('system-software-install-symbolic', 'Cài và gỡ phần mềm', 'Kho Debian và Flathub',
+               'org.gnome.Software.desktop', 'software store cai dat go')
+        p.link('utilities-system-monitor-symbolic', 'Quản lý tác vụ', 'Xem và tắt ứng dụng đang chạy',
+               'xfce4-taskmanager.desktop', 'task manager')
+        p.section('Cài đặt của từng ứng dụng')
+        p.link('folder-symbolic', 'Trình quản lý tệp', 'Cách hiện tệp, thanh bên, hành vi của Thunar',
+               'thunar-settings.desktop', 'thunar file manager')
+        p.link('utilities-terminal-symbolic', 'Terminal', 'Phông chữ, màu, phím tắt của Terminal',
+               'xfce4-terminal-settings.desktop', 'terminal')
+        p.link('edit-paste-symbolic', 'Bộ nhớ tạm', 'Lịch sử sao chép (Win+V)', 'xfce4-clipman-settings.desktop',
+               'clipboard')
+
+    # ---- Thời gian và ngôn ngữ
+    def build_time(self):
+        p = self.page('time', 'Thời gian và ngôn ngữ')
+
+        def now():
+            days = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
+            t = time.localtime()
+            return '%s, %02d/%02d/%d · %s' % (days[t.tm_wday], t.tm_mday, t.tm_mon, t.tm_year,
+                                              tz_get() or time.tzname[0])
+        h = self.hero(p, 'preferences-system-time-symbolic', time.strftime('%H:%M'), now, px=36)
+        p.refreshers.append(lambda: h.title.set_text(time.strftime('%H:%M')))
+        p.add(Gtk.Box(height_request=6))
+        p.section('Ngày giờ')
+        if which('timedatectl') and which('depot-region'):
+            p.switch('preferences-system-time-symbolic', 'Tự đồng bộ giờ', 'Lấy giờ chuẩn qua Internet', ntp_get,
+                     lambda on: run(['depot-region', 'ntp', 'on' if on else 'off'], timeout=60), 'ntp dong bo gio')
+            p.card('view-refresh-symbolic', 'Đồng bộ giờ ngay', 'Chỉnh lại đồng hồ theo máy chủ giờ',
+                   trailing=[text_button('Đồng bộ', lambda: bg(
+                       lambda: run(['depot-region', 'sync'], timeout=60), lambda _r: self.refresh_soon()))],
+                   keywords='sync time')
+
+        def region():
+            out = run(['depot-region', 'status'])[1]
+            lang = re.search(r'Ngôn ngữ:\s*(\S+)', out)
+            tz = re.search(r'Múi giờ:\s*(\S+)', out)
+            return ' · '.join(m.group(1) for m in (lang, tz) if m) or None
+        c = p.link('preferences-desktop-locale-symbolic', 'Ngôn ngữ, múi giờ, máy chủ giờ',
+                   'Đổi ngôn ngữ hiển thị, múi giờ', 'depot-region.desktop', 'language timezone locale mui gio')
+        if c and which('depot-region'):
+            p.refreshers.append(lambda: bg(region, lambda r: r and c.set_sub(
+                '%s — bấm để đổi ngôn ngữ hiển thị, múi giờ' % r)))
+        p.section('Gõ chữ')
+        p.link(pick_icon('accessories-character-map-symbolic', 'input-keyboard-symbolic'), 'Bộ gõ tiếng Việt (Unikey)', 'Kiểu gõ VNI / Telex / VIQR, bảng mã, phím '
+               'chuyển V–E', 'depot-unikey.desktop', 'unikey telex vni go dau')
+        p.link(pick_icon('preferences-desktop-keyboard-symbolic', 'input-keyboard-symbolic'), 'Bố cục bàn phím', 'Thêm bố cục phím (US, Việt…), phím đổi bố cục',
+               'xfce-keyboard-settings.desktop', 'keyboard layout')
+        p.link('preferences-other-symbolic', 'Cấu hình Fcitx 5', 'Thêm bộ gõ ngôn ngữ khác, phím tắt bộ gõ',
+               'fcitx5-configtool.desktop' if available('fcitx5-configtool.desktop')
+               else 'org.fcitx.fcitx5-config-qt.desktop', 'fcitx input method')
+
+    # ---- Trợ năng
+    def build_access(self):
+        p = self.page('access', 'Trợ năng')
+        p.section('Nhìn')
+        if which('xfconf-query'):
+            p.dropdown('zoom-in-symbolic', 'Cỡ chữ', 'Chữ và giao diện to hơn ở mọi ứng dụng', SCALES,
+                       dpi_get, dpi_set, 'text size chu to font')
+        p.link(pick_icon('tool-pointer-symbolic', 'input-mouse-symbolic'), 'Cỡ con trỏ chuột',
+               'Con trỏ to hơn, đổi kiểu con trỏ', 'depot-cursor.desktop', 'cursor size con tro to')
+        p.link('applications-graphics-symbolic', 'Hiệu ứng động', 'Giảm hoặc tắt animation, mờ dần',
+               'depot-effects.desktop', 'reduce motion animation')
+        self.lock_rows(p)
+        p.section('Tương tác')
+        p.link('preferences-desktop-accessibility-symbolic', 'Phím dính, phím chậm, chuột bằng bàn phím',
+               'Giữ Shift/Ctrl không cần đè, bỏ qua phím bấm lướt, điều khiển chuột bằng phím số',
+               'xfce4-accessibility-settings.desktop', 'sticky keys slow keys bounce mouse keys')
+
+    # ---- Giới thiệu
+    def build_about(self):
+        p = self.page('about', 'Giới thiệu')
+        self.hero(p, pick_icon('depot-logo', 'computer', 'computer-symbolic'), socket.gethostname(),
+                  lambda: conf_value('/etc/os-release', 'PRETTY_NAME', 'Linux'))
+        p.add(Gtk.Box(height_request=6))
+        p.section('Cấu hình máy')
+        text = ['']
+
+        def build(box, rows):
+            text[0] = '\n'.join('%s: %s' % (k, v.replace('\n', ', ')) for k, v in rows or [])
+            grid = Gtk.Grid(column_spacing=32, row_spacing=10)
+            grid.get_style_context().add_class('st-card')
+            for i, (k, v) in enumerate(rows or []):
+                kl = label(k, 'st-row-sub')
+                kl.set_valign(Gtk.Align.START)
+                grid.attach(kl, 0, i, 1, 1)
+                vl = label(v, 'st-row-title', wrap=True, selectable=True)
+                grid.attach(vl, 1, i, 1, 1)
+            box.pack_start(grid, False, False, 0)
+        p.dynamic(about_info, build)
+        p.index('Cấu hình máy', 'CPU, RAM, đồ hoạ, hệ điều hành', 'computer-symbolic', 'specs cau hinh chip')
+
+        def copy():
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text[0], -1)
+            btn.set_label('Đã sao chép')
+            GLib.timeout_add(1500, lambda: (btn.set_label('Sao chép'), False)[1])
+        btn = text_button('Sao chép', copy)
+        p.card('edit-copy-symbolic', 'Sao chép cấu hình', 'Chép các dòng trên để gửi khi cần hỗ trợ',
+               trailing=[btn], keywords='copy specs')
+        self.update_rows(p)
+        p.section('Xem thêm')
+        p.link('computer-symbolic', 'Giới thiệu máy này', 'Tên máy, chip, đồ hoạ, RAM, ổ đĩa', 'depot-about.desktop')
+        p.link('starred-symbolic', 'Phiên bản Depot', 'Home, Pro hay for Workstation', 'depot-edition.desktop',
+               'edition')
+        p.link('utilities-system-monitor-symbolic', 'Chẩn đoán main (Boot Diag)',
+               'Main, chipset, BIOS, khe RAM, khả năng nâng cấp CPU', 'depot-bootdiag.desktop', 'bios mainboard')
+        p.link('help-about-symbolic', 'Thông tin về XFCE', 'Phiên bản các thành phần desktop', 'xfce4-about.desktop')
+        p.link('preferences-other-symbolic', 'Trình quản lý cài đặt XFCE', 'Mọi hộp thoại cài đặt gốc của XFCE',
+               'xfce-settings-manager.desktop', 'xfce settings manager')
+
+    # ------------------------------------------------------------------ chụp từng trang (để kiểm tra giao diện)
+    def shoot(self, outdir, ids):
+        os.makedirs(outdir, exist_ok=True)
+        ids = list(ids)
+
+        def step():
+            if self.shoot_last:
+                gw = self.get_window()
+                pb = Gdk.pixbuf_get_from_window(gw, 0, 0, gw.get_width(), gw.get_height())
+                if pb:
+                    pb.savev(os.path.join(outdir, self.shoot_last + '.png'), 'png', [], [])
+            if not ids:
+                self.close()
+                return False
+            self.shoot_last = ids.pop(0)
+            self.go(self.shoot_last)
+            return True
+        self.shoot_last = None
+        GLib.timeout_add(1800, step)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.win = None
+
+    def do_command_line(self, cl):
+        args = cl.get_arguments()[1:]
+        if args and args[0] in ('-h', '--help'):
+            cl.print_literal('dùng: depot-settings [TRANG]\ntrang: %s\n' % ' '.join(
+                ['system', 'display', 'sound', 'notifications', 'power', 'storage', 'devices', 'printers', 'network', 'wifi',
+                 'personalize', 'apps', 'time', 'access', 'about']))
+            return 0
+        if self.win is None:
+            self.win = Window(self)
+        if args and args[0] == '--shots' and len(args) > 1:
+            self.win.present()
+            self.win.shoot(args[1], args[2:] or [p for p in self.win.pages if p != 'search'])
+            return 0
+        if args and args[0] == '--search':
+            self.win.search.set_text(' '.join(args[1:]))
+        elif args:
+            if args[0] in self.win.pages:
+                self.win.go(args[0])
+            else:
+                cl.printerr_literal('depot-settings: không có trang "%s"\n' % args[0])
+        self.win.present()
+        return 0
+
+
+if __name__ == '__main__':
+    sys.exit(App().run(sys.argv))
