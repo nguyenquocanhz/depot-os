@@ -2,32 +2,49 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright 2026 nguyenquocanhz — phát hành theo GNU GPL phiên bản 3, xem /usr/share/doc/depot-capslock/copyright
 #
-# depot-capslock — ô báo Caps Lock của Depot OS, tách thành gói riêng cho máy Debian / Ubuntu bất kỳ (phiên X11).
+# depot-capslock — ô báo Caps Lock và Num Lock của Depot OS, tách thành gói riêng cho máy Debian / Ubuntu bất kỳ
+# (phiên X11).
 #
-#   depot-capslock            chạy nền: mỗi lần Caps Lock đổi trạng thái thì hiện ô báo hơn một giây
-#   depot-capslock --test     hiện thử ô báo "bật" rồi "tắt", xong thoát
-#   depot-capslock --status   in "on" hoặc "off" rồi thoát
-#   depot-capslock --force    vẫn chạy trên Depot OS (ở đó depot-notify đã có sẵn ô báo này) và ở phiên Wayland
+#   depot-capslock                 chạy nền: mỗi lần Caps Lock / Num Lock đổi trạng thái thì hiện ô báo hơn một giây
+#   depot-capslock --test          hiện thử ô báo Caps Lock "bật" rồi "tắt", xong thoát
+#   depot-capslock --test-num      hiện thử ô báo Num Lock "bật" rồi "tắt", xong thoát
+#   depot-capslock --status        in "on" hoặc "off" (Caps Lock) rồi thoát
+#   depot-capslock --status-num    in "on" hoặc "off" (Num Lock) rồi thoát
+#   depot-capslock --force         vẫn chạy đủ cả hai ô báo trên Depot OS và ở phiên Wayland
+#   depot-capslock --check-update  hỏi kho GitHub xem có bản mới không (mã thoát 10 = có bản mới)
+#   depot-capslock --update        tải bản mới, đối chiếu sha256 rồi cài (cần quyền quản trị để cài gói .deb)
 #
-# Ô báo: ổ khoá đóng + chữ A khi Caps Lock bật, ổ khoá mở + chữ a khi tắt. Vẽ bằng cairo, không cần icon;
-# không nhận bàn phím, chuột bấm xuyên qua được; chạy giống nhau trên XFCE, i3, MATE, Cinnamon, LXQt, Openbox.
+# Ô báo: ổ khoá đóng khi bật, ổ khoá mở khi tắt; trong thân khoá là chữ A / a (Caps Lock) hoặc chữ Num (Num Lock).
+# Vẽ bằng cairo, không cần icon; không nhận bàn phím, chuột bấm xuyên qua được; chạy giống nhau trên XFCE, i3, MATE,
+# Cinnamon, LXQt, Openbox.
 #
 # Tuỳ chỉnh trong ~/.config/depot-capslock.conf, mỗi dòng KHOÁ=giá trị, đọc lại mỗi lần hiện:
 #   POSITION=top|center|bottom    chỗ hiện trên màn hình chính (mặc định top)
 #   HOLD=1.3                      số giây ô báo nằm trên màn hình
-#   ENABLED=0                     tạm tắt mà không phải gỡ gói
+#   ENABLED=0                     tạm tắt cả hai ô báo mà không phải gỡ gói
+#   CAPSLOCK=0                    chỉ tắt ô báo Caps Lock
+#   NUMLOCK=0                     chỉ tắt ô báo Num Lock
+#   UPDATE_CHECK=0                bản chạy nền không tự hỏi bản mới (mặc định mỗi ngày hỏi một lần, chỉ báo, không tự cài)
+#
+# Trên Depot OS, phím nào depot-notify đã tự báo thì bản này nhường phím đó (không thì ra hai ô chồng nhau): ISO có
+# depot-notify báo cả hai phím thì bản này thoát; ISO cũ chỉ báo Caps Lock thì bản này chạy riêng cho Num Lock.
 #
 # Mã vẽ lấy từ lớp LockOSD trong /usr/bin/depot-notify của Depot OS — sửa bên nào thì sửa luôn bên kia.
 
 import fcntl
+import hashlib
 import math
 import os
 import re
 import signal
+import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 
-VERSION = '1.0.2'
+VERSION = '1.1.0'
 CONF = os.path.expanduser('~/.config/depot-capslock.conf')
 
 OSD = 132                    # cạnh ô báo
@@ -35,15 +52,34 @@ OSD_RADIUS = 26
 OSD_HOLD = 1.3               # giây ô báo nằm trên màn hình
 ANIM = 0.3                   # giây hiện / tắt
 
-USAGE = """depot-capslock %s — ô báo Caps Lock trên màn hình (X11)
+# phím -> (chữ khi bật, chữ khi tắt, cỡ chữ, khoá cấu hình để tắt riêng)
+KEYS = {
+    'caps': ('A', 'a', 25, 'CAPSLOCK'),
+    'num': ('Num', 'Num', 15, 'NUMLOCK'),
+}
 
-  depot-capslock            chạy nền, hiện ô báo mỗi khi bật / tắt Caps Lock
-  depot-capslock --test     hiện thử "bật" rồi "tắt", xong thoát
-  depot-capslock --status   in on / off
-  depot-capslock --force    vẫn chạy trên Depot OS và ở phiên Wayland
+# cập nhật OTA: bản mới nhất là bản nằm trong nhánh main của kho (tệp .deb và .sha256 cạnh nguồn của gói)
+UPDATE_RAW = 'https://raw.githubusercontent.com/nguyenquocanhz/depot-os/main/packages/depot-capslock'
+UPDATE_EVERY = 24 * 3600     # giây giữa hai lần bản chạy nền tự hỏi bản mới
+# Thử: DEPOT_CAPSLOCK_UPDATE_URL=http://127.0.0.1:CỔNG trỏ sang một kho giả trên chính máy này (chỉ nhận 127.0.0.1)
+_TEST_URL = os.environ.get('DEPOT_CAPSLOCK_UPDATE_URL', '')
+if re.match(r'^http://127\.0\.0\.1(:\d+)?(/[\w./-]*)?$', _TEST_URL):
+    UPDATE_RAW = _TEST_URL.rstrip('/')
+
+USAGE = """depot-capslock %s — ô báo Caps Lock và Num Lock trên màn hình (X11)
+
+  depot-capslock                 chạy nền, hiện ô báo mỗi khi bật / tắt Caps Lock hoặc Num Lock
+  depot-capslock --test          hiện thử Caps Lock "bật" rồi "tắt", xong thoát
+  depot-capslock --test-num      hiện thử Num Lock "bật" rồi "tắt", xong thoát
+  depot-capslock --status        in on / off (Caps Lock)
+  depot-capslock --status-num    in on / off (Num Lock)
+  depot-capslock --force         vẫn chạy đủ hai ô báo trên Depot OS và ở phiên Wayland
+  depot-capslock --check-update  hỏi kho GitHub có bản mới không
+  depot-capslock --update        tải và cài bản mới
   depot-capslock --version
 
-Tuỳ chỉnh: ~/.config/depot-capslock.conf — POSITION=top|center|bottom, HOLD=1.3, ENABLED=0""" % VERSION
+Tuỳ chỉnh: ~/.config/depot-capslock.conf — POSITION=top|center|bottom, HOLD=1.3, ENABLED=0, CAPSLOCK=0, NUMLOCK=0,
+UPDATE_CHECK=0""" % VERSION
 
 
 def conf_get(key, default=''):
@@ -58,16 +94,145 @@ def conf_get(key, default=''):
     return default
 
 
+def conf_set(key, value):
+    lines = []
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            lines = [l.rstrip('\n') for l in f if l.split('=', 1)[0].strip() != key]
+    except OSError:
+        pass
+    lines.append('%s=%s' % (key, value))
+    try:
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        with open(CONF, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+    except OSError:
+        pass
+
+
 def depot_builtin():
-    """Depot OS: depot-notify đã tự hiện ô báo này — chạy thêm thì ra hai ô chồng nhau."""
+    """Depot OS: các phím depot-notify đã tự báo — báo thêm thì ra hai ô chồng nhau. Trả tập {'caps', 'num'}."""
     try:
         with open('/usr/bin/depot-notify', 'rb') as f:
-            return b'class LockOSD' in f.read()
+            src = f.read()
     except OSError:
-        return False
+        return set()
+    have = set()
+    if b'class LockOSD' in src:
+        have.add('caps')
+        if b'get_num_lock_state' in src:
+            have.add('num')
+    return have
 
 
-OPTS = ('--test', '--status', '--force', '--version', '--help', '-h')
+# ---------------------------------------------------------------- cập nhật OTA
+
+def ver_key(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v)[:4])
+
+
+def fetch(url, limit=5_000_000):
+    req = urllib.request.Request(url, headers={'User-Agent': 'depot-capslock/' + VERSION})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('tệp tải về quá lớn')
+    return data
+
+
+def latest_version():
+    """Phiên bản trong kho: trường Version của pkg/DEBIAN/control trên nhánh main."""
+    m = re.search(r'^Version:\s*(\d+(?:\.\d+){1,3})\s*$', fetch(UPDATE_RAW + '/pkg/DEBIAN/control', 20000)
+                  .decode('utf-8', 'replace'), re.M)
+    if not m:
+        raise ValueError('không đọc được phiên bản trong kho')
+    return m.group(1)
+
+
+def check_update():
+    """Trả (trạng thái, bản mới nhất, thông báo); trạng thái: ok | update | error."""
+    try:
+        latest = latest_version()
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        return 'error', '', 'Không hỏi được kho mã nguồn: %s' % e
+    if ver_key(latest) > ver_key(VERSION):
+        return 'update', latest, 'Có bản mới %s (đang dùng %s).' % (latest, VERSION)
+    return 'ok', latest, 'Đang dùng bản mới nhất (%s).' % VERSION
+
+
+def do_update():
+    """Tải bản mới rồi cài. Trả (mã thoát, thông báo)."""
+    state, latest, msg = check_update()
+    if state != 'update':
+        return (0 if state == 'ok' else 1), msg
+    me = os.path.realpath(sys.argv[0])
+    try:
+        if os.access(me, os.W_OK) and not me.startswith('/usr/'):
+            # bản chép tay vào thư mục người dùng (không phải gói .deb): thay chính tệp chương trình
+            data = fetch(UPDATE_RAW + '/pkg/usr/bin/depot-capslock')
+            text = data.decode('utf-8')
+            if not data.startswith(b'#!') or ("VERSION = '%s'" % latest) not in text:
+                raise ValueError('mã trong kho chưa khớp phiên bản %s' % latest)
+            compile(text, 'depot-capslock', 'exec')              # hỏng cú pháp thì không thay
+            with open(me + '.new', 'wb') as f:
+                f.write(data)
+            os.chmod(me + '.new', 0o755)
+            os.replace(me + '.new', me)
+            return 0, 'Đã cập nhật lên bản %s. Chạy lại: depot-capslock &' % latest
+        name = 'depot-capslock_%s_all.deb' % latest
+        deb = fetch('%s/%s' % (UPDATE_RAW, name))
+        want = fetch('%s/%s.sha256' % (UPDATE_RAW, name), 1000).decode('ascii', 'replace').split()[0].lower()
+        if hashlib.sha256(deb).hexdigest() != want:
+            raise ValueError('tệp %s tải về sai sha256 — không cài' % name)
+        cache = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'depot-capslock')
+        os.makedirs(cache, exist_ok=True)
+        path = os.path.join(cache, name)
+        with open(path, 'wb') as f:
+            f.write(deb)
+    except (OSError, ValueError, SyntaxError, urllib.error.URLError) as e:
+        return 1, 'Cập nhật không thành: %s' % e
+    manual = 'Đã tải %s (sha256 khớp). Cài bằng: sudo apt install %s' % (name, path)
+    if os.geteuid() == 0:
+        argv = ['apt-get', 'install', '-y', path]
+    elif os.environ.get('DISPLAY') and any(os.access(os.path.join(d, 'pkexec'), os.X_OK)
+                                           for d in os.environ.get('PATH', '').split(':')):
+        argv = ['pkexec', 'apt-get', 'install', '-y', path]      # hộp hỏi mật khẩu quản trị của hệ thống
+    else:
+        return 0, manual
+    try:
+        rc = subprocess.run(argv, stdin=subprocess.DEVNULL).returncode
+    except OSError:
+        rc = 1
+    if rc:
+        return 1, 'Chưa cài được (huỷ hoặc lỗi). ' + manual
+    return 0, 'Đã cập nhật lên bản %s. Bản chạy nền dùng mã mới từ lần đăng nhập sau.' % latest
+
+
+def auto_check():
+    """Bản chạy nền: mỗi ngày hỏi một lần; có bản mới thì báo một lần cho mỗi phiên bản. Không tự cài."""
+    if conf_get('UPDATE_CHECK', '1') == '0':
+        return
+    try:
+        last = float(conf_get('UPDATE_LAST', '0'))
+    except ValueError:
+        last = 0.0
+    if time.time() - last < UPDATE_EVERY:
+        return
+    conf_set('UPDATE_LAST', '%d' % time.time())
+    state, latest, _msg = check_update()
+    if state == 'update' and conf_get('UPDATE_SEEN') != latest:
+        conf_set('UPDATE_SEEN', latest)
+        try:
+            subprocess.run(['notify-send', '-i', 'software-update-available', '-a', 'Depot Caps Lock',
+                            'Ô báo Caps Lock / Num Lock: có bản mới %s' % latest,
+                            'Đang dùng %s. Cập nhật: depot-capslock --update' % VERSION],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+OPTS = ('--test', '--test-num', '--status', '--status-num', '--force', '--check-update', '--update', '--version',
+        '--help', '-h')
 ARGS = sys.argv[1:]
 BAD = [a for a in ARGS if a not in OPTS]
 if BAD:
@@ -79,12 +244,24 @@ if '--help' in ARGS or '-h' in ARGS:
 if '--version' in ARGS:
     print('depot-capslock', VERSION)
     sys.exit(0)
-ONESHOT = '--test' in ARGS or '--status' in ARGS
+if '--check-update' in ARGS:
+    STATE, LATEST, MSG = check_update()
+    print(MSG)
+    sys.exit({'ok': 0, 'update': 10}.get(STATE, 1))
+if '--update' in ARGS:
+    CODE, MSG = do_update()
+    print(MSG)
+    sys.exit(CODE)
+ONESHOT = any(a in ARGS for a in ('--test', '--test-num', '--status', '--status-num'))
+SKIP = set()                 # các phím nhường cho depot-notify
 if not ONESHOT and '--force' not in ARGS:
-    if depot_builtin():
-        print('depot-capslock: Depot OS đã có sẵn ô báo Caps Lock (depot-notify) — không chạy thêm. '
+    SKIP = depot_builtin()
+    if SKIP >= set(KEYS):
+        print('depot-capslock: Depot OS đã có sẵn ô báo Caps Lock và Num Lock (depot-notify) — không chạy thêm. '
               'Muốn chạy bằng được: depot-capslock --force')
         sys.exit(0)
+    if SKIP:
+        print('depot-capslock: Caps Lock đã có depot-notify báo — bản này chỉ báo Num Lock.')
     if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
         print('depot-capslock: phiên Wayland không báo trạng thái Caps Lock cho chương trình X11 — không chạy. '
               'Dùng phiên X11 (Xorg), hoặc thử: depot-capslock --force')
@@ -154,6 +331,7 @@ class LockOSD(Gtk.Window):
         scr.connect('composited-changed', lambda *_: self.on_composited())
         self.anim_id = None
         self.hide_id = None
+        self.kind = 'caps'
         self.on = False
         self.alpha = 0.0
         area = Gtk.DrawingArea()
@@ -247,8 +425,9 @@ class LockOSD(Gtk.Window):
         cr.stroke()
         rrect(cr, cx - bw / 2, by, bw, bh, 9)
         cr.fill()
-        lay = self.create_pango_layout('A' if self.on else 'a')
-        lay.set_font_description(Pango.FontDescription('Inter,Sans Bold 25'))   # không có Inter thì chữ không chân nào cũng được
+        on_text, off_text, size, _key = KEYS[self.kind]
+        lay = self.create_pango_layout(on_text if self.on else off_text)
+        lay.set_font_description(Pango.FontDescription('Inter,Sans Bold %d' % size))   # không có Inter thì chữ không chân nào cũng được
         tw, th = lay.get_pixel_size()
         cr.set_source_rgba(0.03, 0.03, 0.045, 1)
         cr.move_to(cx - tw / 2, by + (bh - th) / 2)
@@ -281,7 +460,8 @@ class LockOSD(Gtk.Window):
         self.resize(OSD, OSD)
         self.move(x, max(wa.y, y))
 
-    def flash(self, on):
+    def flash(self, on, kind='caps'):
+        self.kind = kind
         self.on = on
         self.place()
         if self.hide_id is not None:
@@ -326,12 +506,16 @@ def main():
     if '--status' in ARGS:
         print('on' if keymap.get_caps_lock_state() else 'off')
         return 0
+    if '--status-num' in ARGS:
+        print('on' if keymap.get_num_lock_state() else 'off')
+        return 0
 
     osd = LockOSD()
-    if '--test' in ARGS:
+    if '--test' in ARGS or '--test-num' in ARGS:
+        kind = 'num' if '--test-num' in ARGS else 'caps'
         hold = int(hold_time() * 1000)
-        osd.flash(True)
-        GLib.timeout_add(hold + 400, lambda: osd.flash(False) or False)
+        osd.flash(True, kind)
+        GLib.timeout_add(hold + 400, lambda: osd.flash(False, kind) or False)
         GLib.timeout_add(2 * hold + 1200, lambda: Gtk.main_quit() or False)
         Gtk.main()
         return 0
@@ -342,16 +526,25 @@ def main():
         return 0
 
     # X báo qua XKB mỗi khi đèn khoá đổi, không cần cửa sổ nào của mình đang được chọn
-    state = {'caps': keymap.get_caps_lock_state()}
+    state = {'caps': keymap.get_caps_lock_state(), 'num': keymap.get_num_lock_state()}
 
     def on_keymap(km):
-        caps = km.get_caps_lock_state()
-        if caps != state['caps']:
-            state['caps'] = caps
-            if conf_get('ENABLED', '1') != '0':
-                osd.flash(caps)
+        now = {'caps': km.get_caps_lock_state(), 'num': km.get_num_lock_state()}
+        for kind in ('caps', 'num'):
+            if now[kind] == state[kind]:
+                continue
+            state[kind] = now[kind]
+            if kind in SKIP or conf_get('ENABLED', '1') == '0' or conf_get(KEYS[kind][3], '1') == '0':
+                continue
+            osd.flash(now[kind], kind)
 
     keymap.connect('state-changed', on_keymap)
+
+    def update_tick():
+        threading.Thread(target=auto_check, daemon=True).start()
+        return True
+    GLib.timeout_add_seconds(120, lambda: update_tick() and False)
+    GLib.timeout_add_seconds(3600, update_tick)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: Gtk.main_quit() or False)
     Gtk.main()
