@@ -41,6 +41,7 @@ Dotfiles nằm sẵn trong hệ thống:
 | `config/dunst/` | Dự phòng: thông báo của dunst khi không chạy `depot-notify` (i3 giờ dùng depot-notify, `$mod+n` mở khung Thông báo) |
 | `config/autostart/` | `xfce4-notifyd.desktop` (Hidden): không tự chạy xfce4-notifyd, thông báo do `depot-notify` lo |
 | `config/xfce4/panel/genmon-7.rc`, `genmon-9.rc` | Nút chuông thông báo trên panel (genmon chạy `depot-notify-bell`) |
+| `config/gtk-3.0/depot-panel.css` | CSS thanh panel theo bố cục, `gtk.css` nạp bằng `@import`. Bản ở đây là của bố cục macOS (trống); `depot-layout` ghi lại khi đổi sang kiểu Windows (khay gọn, giấu mũi tên bung ngang của khay vì đã có nút ^ mở bảng nổi `depot-tray`) |
 | `config/fcitx5/` | Bộ gõ tiếng Việt: Unikey (Telex, kiểu mới hoà/thuý, tự trả lại từ tiếng Anh). Ctrl+Space hoặc Ctrl+Shift bật/tắt, mặc định tắt, bật một lần áp dụng mọi cửa sổ |
 | `config/picom/` | `picom-animations.conf`: gốc cấu hình compositor. `depot-effects` ("Hiệu ứng hình ảnh") lọc bỏ khối bóng/mờ dần/animation người dùng tắt rồi chạy bản ở `~/.cache/depot/picom.conf` |
 | `config/fontconfig/` | Render chữ mịn (hintslight + rgb), ưu tiên Inter/Noto |
