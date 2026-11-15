@@ -18,7 +18,8 @@
 #     /Xft/DPI), âm lượng / thiết bị phát / micro (pactl), âm thanh sự kiện, Không làm phiền (depot-notify),
 #     chế độ pin (depot-power), Wi-Fi và danh sách mạng (nmcli), Bluetooth (bluetoothctl + /dev/rfkill), chế độ máy
 #     bay, hiệu ứng và Dynamic Island (depot-effects), tự đồng bộ giờ (depot-region), máy in đã cài (lpstat),
-#     ô báo Caps Lock / Num Lock (depot-notify, hoặc gói depot-capslock trên máy chưa có depot-notify mới).
+#     ô báo Caps Lock / Num Lock (depot-notify, hoặc gói depot-capslock trên máy chưa có depot-notify mới),
+#     sửa Mini App của Telegram (depot-webview).
 #   Mở công cụ sẵn có: các hộp thoại xfce4-*-settings và công cụ depot-* (hình nền, con trỏ, bố cục, đồng hồ,
 #     DNS/Proxy, driver, cảm biến, ngôn ngữ, Unikey, giới thiệu máy…).
 
@@ -2193,6 +2194,38 @@ class Window(Gtk.ApplicationWindow):
                'org.gnome.Software.desktop', 'software store cai dat go')
         p.link('utilities-system-monitor-symbolic', 'Quản lý tác vụ', 'Xem và tắt ứng dụng đang chạy',
                'xfce4-taskmanager.desktop', 'task manager')
+        if which('depot-webview'):
+            # Mini App của Telegram: depot-webview biết máy đang có bản WebKitGTK nào và sửa (cần quyền quản trị)
+            def wv_state():
+                rc, out, _ = run(['depot-webview', 'status'])
+                lines = [l for l in out.splitlines() if l.startswith('Telegram')]
+                return rc == 10, (lines[0] if lines else out.strip())
+
+            def wv_show(r):
+                need, text = r or (False, '')
+                wv.set_sub(text if need else 'Đang ổn — ' + text if text else '')
+                wv_btn.set_sensitive(need)
+                set_class(wv_btn, 'accent', need)
+
+            def wv_fix():
+                wv_btn.set_sensitive(False)
+                wv.set_sub('Đang sửa… (hệ thống sẽ hỏi mật khẩu quản trị)')
+
+                def done(r):
+                    rc, out, err = r or (1, '', '')
+                    tail = [l for l in (out or err).splitlines() if l.strip()]
+                    if rc:
+                        wv.set_sub('Chưa sửa được: ' + (tail[-1].lstrip('!> ') if tail else 'đã huỷ'))
+                        wv_btn.set_sensitive(True)
+                    else:
+                        self.toast('Đã sửa. Thoát hẳn Telegram rồi mở lại để thử Mini App.')
+                        self.refresh_soon()
+                bg(lambda: run(['depot-webview', 'fix'], timeout=900), done)
+            wv_btn = text_button('Sửa', wv_fix)
+            wv = p.card('applications-internet-symbolic', 'Mini App của Telegram',
+                        'Mini App / Mini Game không mở được, cửa sổ trắng hoặc tự đóng', trailing=[wv_btn],
+                        keywords='telegram mini app game webkit webkitgtk webview')
+            p.refreshers.append(lambda: bg(wv_state, wv_show))
         p.section('Cài đặt của từng ứng dụng')
         p.link('folder-symbolic', 'Trình quản lý tệp', 'Cách hiện tệp, thanh bên, hành vi của Thunar',
                'thunar-settings.desktop', 'thunar file manager')
