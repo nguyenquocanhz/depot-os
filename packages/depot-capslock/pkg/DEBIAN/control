@@ -1,5 +1,5 @@
 Package: depot-capslock
-Version: 1.0.2
+Version: 1.1.0
 Section: x11
 Priority: optional
 Architecture: all
@@ -7,14 +7,18 @@ Depends: python3, python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-pango-1.0
 Recommends: fonts-inter
 Maintainer: nguyenquocanhz <nguyenquocanhz@users.noreply.github.com>
 Homepage: https://github.com/nguyenquocanhz/depot-os
-Description: on-screen Caps Lock indicator from Depot OS
+Description: on-screen Caps Lock and Num Lock indicator from Depot OS
  Shows a small rounded box with a padlock for a second each time Caps Lock
- is switched: closed padlock and "A" when on, open padlock and "a" when off.
+ or Num Lock is switched: closed padlock when on, open padlock when off,
+ with "A" / "a" for Caps Lock and "Num" for Num Lock inside the padlock.
  .
  The box is drawn with cairo (no icon theme needed), never takes keyboard
  focus and lets mouse clicks through. It starts with the desktop session
  and works on any X11 desktop: XFCE, MATE, Cinnamon, LXQt, i3, Openbox.
+ "depot-capslock --check-update" asks the GitHub repository for a newer
+ version and "--update" downloads and installs it.
  .
- Ô báo Caps Lock của Depot OS đóng thành gói riêng: ổ khoá đóng + chữ A khi
- bật, ổ khoá mở + chữ a khi tắt. Trên Depot OS ô báo này đã có sẵn trong
- depot-notify nên gói tự nhường, không hiện hai lần.
+ Ô báo Caps Lock và Num Lock của Depot OS đóng thành gói riêng: ổ khoá đóng
+ khi bật, ổ khoá mở khi tắt; chữ A / a cho Caps Lock, chữ Num cho Num Lock.
+ Trên Depot OS, phím nào depot-notify đã tự báo thì gói nhường phím đó,
+ không hiện hai lần.

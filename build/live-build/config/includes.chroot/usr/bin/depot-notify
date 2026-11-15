@@ -12,6 +12,8 @@
 #     công tắc "Không làm phiền". Đóng: Esc, bấm ra ngoài, nút ›, hoặc bấm chuông lần nữa.
 #   Caps Lock: bật thì hiện ổ khoá đóng có chữ A ở giữa trên màn hình, tắt thì ổ khoá mở chữ a; tự tan sau
 #     hơn một giây, bấm chuột xuyên qua được. Tắt: CAPS_OSD=0 trong ~/.config/depot/notify.
+#   Num Lock: cùng ô báo đó, trong ổ khoá ghi chữ "Num" — bật thì ổ khoá đóng, tắt thì ổ khoá mở.
+#     Tắt: NUM_OSD=0 trong ~/.config/depot/notify.
 #   Chạm / rê chuột: nền thẻ, nút đổi màu trong 0,3 giây; khung trượt vào trong 0,3 giây
 #     (tắt "Animation bên trong ứng dụng" ở Hiệu ứng hình ảnh, hoặc không có compositor: hiện ngay).
 # Lịch sử nằm ở $XDG_RUNTIME_DIR (RAM): còn khi depot-notify chạy lại, mất khi đăng xuất — không ghi nội dung
@@ -57,7 +59,7 @@ TOAST_RADIUS = 18
 SIDE_W = 392
 SIDE_MARGIN = 10
 SIDE_RADIUS = 22
-OSD = 132                    # cạnh ô báo Caps Lock
+OSD = 132                    # cạnh ô báo Caps Lock / Num Lock
 OSD_RADIUS = 26
 OSD_HOLD = 1.3               # giây ô báo nằm trên màn hình
 ANIM = 0.3                   # giây: trượt khung, hiện / tắt thẻ — cùng nhịp với transition 300ms trong CSS
@@ -777,11 +779,15 @@ class Sidebar(WinBase):
 
 
 class LockOSD(WinBase):
-    """Ô báo Caps Lock: ổ khoá đóng + chữ A khi bật, ổ khoá mở + chữ a khi tắt. Vẽ bằng cairo, không cần icon."""
+    """Ô báo Caps Lock / Num Lock: ổ khoá đóng khi bật, ổ khoá mở khi tắt; trong thân khoá là chữ A / a (Caps Lock)
+    hoặc chữ Num (Num Lock). Vẽ bằng cairo, không cần icon."""
+
+    TEXT = {'caps': ('A', 'a', 25), 'num': ('Num', 'Num', 15)}      # phím -> (chữ khi bật, chữ khi tắt, cỡ chữ)
 
     def __init__(self):
         super().__init__(OSD_RADIUS, Gdk.WindowTypeHint.NOTIFICATION)
         self.set_title('Depot Caps Lock')
+        self.kind = 'caps'
         self.on = False
         self.alpha = 0.0
         self.hide_id = None
@@ -820,15 +826,17 @@ class LockOSD(WinBase):
         cr.stroke()
         rrect(cr, cx - bw / 2, by, bw, bh, 9)
         cr.fill()
-        lay = self.create_pango_layout('A' if self.on else 'a')
-        lay.set_font_description(Pango.FontDescription('Inter Bold 25'))
+        on_text, off_text, size = self.TEXT[self.kind]
+        lay = self.create_pango_layout(on_text if self.on else off_text)
+        lay.set_font_description(Pango.FontDescription('Inter Bold %d' % size))
         tw, th = lay.get_pixel_size()
         cr.set_source_rgba(0.03, 0.03, 0.045, 1)
         cr.move_to(cx - tw / 2, by + (bh - th) / 2)
         PangoCairo.show_layout(cr, lay)
         return True
 
-    def flash(self, on):
+    def flash(self, on, kind='caps'):
+        self.kind = kind
         self.on = on
         wa = workarea()
         self.resize(OSD, OSD)
@@ -889,10 +897,11 @@ class Notify(Gtk.Application):
                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10)
         self.load()
         self.sidebar = Sidebar(self)
-        # Caps Lock: X báo qua XKB mỗi khi đèn khoá đổi, không cần cửa sổ nào của mình đang được chọn
+        # Caps Lock, Num Lock: X báo qua XKB mỗi khi đèn khoá đổi, không cần cửa sổ nào của mình đang được chọn
         self.osd = LockOSD()
         self.keymap = Gdk.Keymap.get_for_display(Gdk.Display.get_default())
         self.caps = self.keymap.get_caps_lock_state()
+        self.num = self.keymap.get_num_lock_state()
         self.keymap.connect('state-changed', self.on_keymap)
         self.conn = self.get_dbus_connection()
         node = Gio.DBusNodeInfo.new_for_xml(IFACE_XML)
@@ -910,7 +919,12 @@ class Notify(Gtk.Application):
         if caps != self.caps:
             self.caps = caps
             if conf_get('CAPS_OSD', '1') != '0':
-                self.osd.flash(caps)
+                self.osd.flash(caps, 'caps')
+        num = keymap.get_num_lock_state()
+        if num != self.num:
+            self.num = num
+            if conf_get('NUM_OSD', '1') != '0':
+                self.osd.flash(num, 'num')
 
     def name_lost(self, conn, _name):
         """Trình thông báo khác đang giữ tên: bảo nó nghỉ (xfce4-notifyd, dunst), mình đã xếp hàng nhận tên."""
@@ -970,9 +984,9 @@ class Notify(Gtk.Application):
             self.set_dnd(not self.dnd if how == 'toggle' else how == 'on')
         elif cmd == 'status':
             unread = sum(1 for n in self.notes if n.get('unread'))
-            cl.print_literal('Thông báo: %d (mới: %d)\nKhông làm phiền: %s\nCaps Lock: %s\nKhung bên cạnh: %s\n' % (
-                len(self.notes), unread, 'bật' if self.dnd else 'tắt', 'bật' if self.caps else 'tắt',
-                'đang mở' if self.sidebar.is_open else 'đóng'))
+            cl.print_literal('Thông báo: %d (mới: %d)\nKhông làm phiền: %s\nCaps Lock: %s\nNum Lock: %s\nKhung bên cạnh: %s\n'
+                             % (len(self.notes), unread, 'bật' if self.dnd else 'tắt', 'bật' if self.caps else 'tắt',
+                                'bật' if self.num else 'tắt', 'đang mở' if self.sidebar.is_open else 'đóng'))
         elif not remote:
             log('chạy nền')
         return 0
