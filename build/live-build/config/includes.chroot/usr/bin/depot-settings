@@ -1671,6 +1671,9 @@ class Window(Gtk.ApplicationWindow):
               'notifications')
         p.nav('battery-symbolic', 'Nguồn và pin', 'Chế độ pin, tắt màn hình, ngủ', 'power')
         p.nav('drive-harddisk-symbolic', 'Lưu trữ', 'Dung lượng đã dùng, vùng lưu trên USB', 'storage')
+        p.link(pick_icon('emblem-synchronizing-symbolic', 'view-refresh-symbolic'), 'Sao lưu',
+               'Sao lưu thư mục cá nhân, danh sách ứng dụng và cài đặt ra USB hoặc ổ ngoài; khôi phục trên máy mới',
+               'depot-backup.desktop', 'backup restore khoi phuc sao luu usb windows backup')
         p.link('edit-paste-symbolic', 'Bộ nhớ tạm', 'Lịch sử sao chép (Win+V): số mục giữ lại, phím tắt',
                'xfce4-clipman-settings.desktop', 'clipboard clipman copy paste dán')
         p.link('applications-system-symbolic', 'Driver phần cứng',
@@ -1852,6 +1855,8 @@ class Window(Gtk.ApplicationWindow):
         p.link('drive-removable-media-symbolic', 'Lưu dữ liệu trên USB',
                'Vùng lưu mã hoá trên USB đang boot: giữ tệp và cài đặt qua lần khởi động sau',
                'depot-persist.desktop', 'persistence usb')
+        p.link(pick_icon('emblem-synchronizing-symbolic', 'view-refresh-symbolic'), 'Sao lưu',
+               'Chép thư mục cá nhân, danh sách ứng dụng và cài đặt ra USB hoặc ổ ngoài', 'depot-backup.desktop')
         p.link('folder-symbolic', 'Mở trình quản lý tệp', 'Xem và dọn các thư mục', 'thunar.desktop', 'thunar file')
 
     # ---- Bluetooth và thiết bị
