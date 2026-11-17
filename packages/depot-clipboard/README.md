@@ -203,11 +203,14 @@ Bản 1.0.0, trên **Depot OS v0.26 chạy từ USB** (Debian 13, Python 3.13, G
 - **Gói `.deb`** cài thật bằng `sudo apt install ./depot-clipboard_1.0.0_all.deb` trên chính máy đó: apt không kéo
   thêm gói nào, bản `depot-clipboard` cũ được cất nguyên vẹn sang `.clipman`, đủ tệp, `depot-clipboard --version` ra
   1.0.0; `dpkg --verify` chỉ báo tệp `.desktop` khác — do Depot OS tự thêm mục "Gỡ cài đặt" vào mọi tệp `.desktop`;
-  `apt remove` → bản cũ về đúng chỗ cũ, giống từng byte. Sau khi thử, gói đã được gỡ.
+  `apt remove` → bản cũ về đúng chỗ cũ, giống từng byte.
+- **Phiên XFCE thật** của máy đó (17/11/2026, gói cài bằng apt): người dùng bấm Win+V thật → bản mới tự chạy nền, bảng
+  mở ("chạy tốt"), `xfce4-clipman` của phiên được tắt; sao chép một đoạn chữ từ chương trình khác → vào lịch sử, chương
+  trình đó thoát thì bộ nhớ tạm vẫn còn đúng đoạn chữ.
 
-**Chưa thử**: chạy trong phiên XFCE thật (bấm Win+V thật, dán vào app thật, tiếp quản Clipman thật của phiên, tự chạy
-lúc đăng nhập lại); `--update` qua hộp hỏi mật khẩu `pkexec` và từ kho GitHub thật (gói chưa có trên `main`); dán
-vào app Qt / Electron / Chrome; họ xterm (Shift+Insert); thông báo "có bản mới" của bản chạy nền; Ubuntu, máy không
+**Chưa thử**: trong phiên XFCE thật — dán vào từng loại app (mới thử trên màn hình ảo), ảnh, ghim, tự chạy lúc đăng
+nhập lại, gỡ gói lúc bản chạy nền đang chạy; `--update` qua hộp hỏi mật khẩu `pkexec` và cài bản mới từ kho GitHub
+thật (cần có bản sau 1.0.0); dán vào app Qt / Electron / Chrome; họ xterm (Shift+Insert); thông báo "có bản mới" của bản chạy nền; Ubuntu, máy không
 có Depot OS, MATE / Cinnamon / LXQt / Openbox; nhiều màn hình; màn hình HiDPI.
 
 **Chưa làm cho ISO**: ISO vẫn mang bản cũ dùng Clipman. Đưa bản mới vào ISO (thay tệp trong `includes.chroot`, bỏ
