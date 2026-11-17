@@ -44,7 +44,8 @@ depot-os/
 │   └── hardware-tuning.md     ← chi tiết tinh chỉnh Sandy Bridge
 ├── results/                   ← số đo thật theo phiên bản/máy (sinh bởi `depot-results`)
 ├── packages/                  ← phần của Depot đóng thành gói .deb cài riêng được trên Debian / Ubuntu
-│   └── depot-capslock/        ← ô báo Caps Lock / Num Lock: nguồn (pkg/), build.sh, tệp .deb đã build
+│   ├── depot-capslock/        ← ô báo Caps Lock / Num Lock: nguồn (pkg/), build.sh, tệp .deb đã build
+│   └── depot-clipboard/       ← Bộ nhớ tạm (Win+V): lịch sử sao chép, tìm, ghim, tự cập nhật — cùng cấu trúc
 └── build/live-build/          ← cấu hình live-build (build trong WSL2)
     ├── auto/                  ← config/build/clean — build tự sync dotfiles
     ├── config/

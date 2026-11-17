@@ -1,0 +1,8 @@
+#!/bin/sh
+# Gỡ gói: tắt các bản đang chạy nền (chương trình sắp bị xoá). Nâng cấp thì để yên, bản chạy nền tự chạy lại bằng
+# "depot-clipboard restart" hoặc từ lần đăng nhập sau.
+set -e
+if [ "$1" = remove ] && command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -f '^/usr/bin/python3 /usr/bin/depot-clipboard start' || true
+fi
+exit 0

@@ -1,0 +1,1510 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright 2026 nguyenquocanhz — phát hành theo GNU GPL phiên bản 3, xem /usr/share/doc/depot-clipboard/copyright
+#
+# depot-clipboard — Bộ nhớ tạm (Clipboard Manager) của Depot OS, đóng thành gói riêng cho máy Debian / Ubuntu bất kỳ
+# (phiên X11). Lịch sử những gì đã sao chép; bấm Win+V để chọn lại và dán, kiểu Windows 11.
+#
+#   depot-clipboard start          chạy nền, ghi lại những gì được sao chép (mục tự khởi động gọi lệnh này)
+#   depot-clipboard show           mở / đóng bảng lịch sử ngay chỗ con trỏ (gán cho Win+V) — chưa chạy nền thì chạy luôn
+#   depot-clipboard settings       mở bảng ở trang cài đặt (có nút kiểm tra cập nhật)
+#   depot-clipboard clear          xoá lịch sử, giữ các mục đã ghim
+#   depot-clipboard status         bản chạy nền có đang chạy không, đang giữ bao nhiêu mục
+#   depot-clipboard quit           tắt bản chạy nền
+#   depot-clipboard restart        chạy lại bản chạy nền (sau khi cập nhật)
+#   depot-clipboard bind           XFCE: gán Win+V cho "depot-clipboard show" (bản chạy nền tự làm một lần đầu,
+#                                  nếu Win+V chưa gán cho gì); desktop khác thì in cách tự gán
+#   depot-clipboard --check-update hỏi kho GitHub xem có bản mới không (mã thoát 10 = có bản mới)
+#   depot-clipboard --update       tải bản mới, đối chiếu sha256 rồi cài (cần quyền quản trị để cài gói .deb)
+#   depot-clipboard --version
+#
+# Trong bảng: gõ để tìm (gõ không dấu cũng ra chữ có dấu), ↑ ↓ chọn, Enter (hoặc bấm chuột) là dán luôn vào cửa sổ
+# đang làm việc, Delete xoá mục, Ctrl+P ghim / bỏ ghim, Esc đóng. Cửa sổ Terminal được dán bằng Ctrl+Shift+V
+# (họ xterm: Shift+Insert).
+#
+# Riêng tư: lịch sử CHỈ nằm trong bộ nhớ — tắt máy / đăng xuất là hết, mật khẩu vừa sao chép không nằm lại trên đĩa.
+# Chỉ mục nào người dùng tự ghim mới được ghi xuống ~/.local/share/depot-clipboard/ (quyền 600). Nội dung mà trình
+# quản lý mật khẩu đánh dấu bí mật (x-kde-passwordManagerHint = secret, ví dụ KeePassXC) thì không ghi vào lịch sử.
+# Không gom vùng chữ đang bôi (PRIMARY), chỉ lấy khi bấm Sao chép.
+#
+# Tuỳ chỉnh trong ~/.config/depot/clipboard, mỗi dòng KHOÁ=giá trị (trang cài đặt của bảng sửa giúp):
+#   MAX_TEXTS=30          số đoạn chữ giữ lại (không tính mục đã ghim)
+#   MAX_IMAGES=3          số ảnh giữ lại; 0 = không ghi ảnh
+#   PASTE=0               chọn một mục thì chỉ đưa vào bộ nhớ tạm, không tự dán
+#   THEME=dark|light      màu bảng (mặc định theo giao diện của máy)
+#   UPDATE_CHECK=0        bản chạy nền không tự hỏi bản mới (mặc định mỗi ngày hỏi một lần, chỉ báo, không tự cài)
+#
+# Trên Depot OS, lệnh này thay bản cũ (một script sh gọi Clipman của XFCE): cùng tên lệnh, cùng "start" / "show" /
+# "defaults" / "settings" nên Win+V, mục tự khởi động và depot-layout không phải đổi gì. Khi chạy nền, bản này tắt
+# xfce4-clipman đang chạy trên cùng màn hình — hai trình giữ lịch sử cùng lúc thì giành nhau bộ nhớ tạm.
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+
+VERSION = '1.0.0'
+NAME = 'depot-clipboard'
+
+CONF = os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'), 'depot', 'clipboard')
+DATA = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), NAME)
+PINS = os.path.join(DATA, 'pinned.json')
+
+MAX_TEXT_BYTES = 2_000_000   # đoạn chữ dài hơn thế này thì không ghi vào lịch sử
+MAX_IMAGE_SIDE = 8192        # ảnh có cạnh dài hơn thế này thì không ghi
+WIDTH = 380                  # bề ngang bảng
+LIST_HEIGHT = 420            # chiều cao tối đa của danh sách, quá thì cuộn
+
+# cập nhật OTA: bản mới nhất là bản nằm trong nhánh main của kho (tệp .deb và .sha256 cạnh nguồn của gói)
+UPDATE_RAW = 'https://raw.githubusercontent.com/nguyenquocanhz/depot-os/main/packages/depot-clipboard'
+UPDATE_EVERY = 24 * 3600     # giây giữa hai lần bản chạy nền tự hỏi bản mới
+# Thử: DEPOT_CLIPBOARD_UPDATE_URL=http://127.0.0.1:CỔNG trỏ sang một kho giả trên chính máy này (chỉ nhận 127.0.0.1)
+_TEST_URL = os.environ.get('DEPOT_CLIPBOARD_UPDATE_URL', '')
+if re.match(r'^http://127\.0\.0\.1(:\d+)?(/[\w./-]*)?$', _TEST_URL):
+    UPDATE_RAW = _TEST_URL.rstrip('/')
+
+USAGE = """depot-clipboard %s — Bộ nhớ tạm: lịch sử sao chép, Win+V để chọn lại và dán (X11)
+
+  depot-clipboard start          chạy nền, ghi lại những gì được sao chép
+  depot-clipboard show           mở / đóng bảng lịch sử ngay chỗ con trỏ (gán cho Win+V)
+  depot-clipboard settings       mở bảng ở trang cài đặt
+  depot-clipboard clear          xoá lịch sử, giữ các mục đã ghim
+  depot-clipboard status         trạng thái bản chạy nền
+  depot-clipboard quit           tắt bản chạy nền
+  depot-clipboard restart        chạy lại bản chạy nền
+  depot-clipboard bind           gán phím Win+V (XFCE); desktop khác: in cách tự gán
+  depot-clipboard --check-update hỏi kho GitHub có bản mới không
+  depot-clipboard --update       tải và cài bản mới
+  depot-clipboard --version
+
+Trong bảng: gõ để tìm (không dấu cũng được), ↑ ↓ chọn, Enter dán, Delete xoá mục, Ctrl+P ghim, Esc đóng.
+Tuỳ chỉnh: ~/.config/depot/clipboard — MAX_TEXTS=30  MAX_IMAGES=3  PASTE=0  THEME=dark|light  UPDATE_CHECK=0""" % VERSION
+
+
+def conf_get(key, default=''):
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            for line in f:
+                k, _, v = line.strip().partition('=')
+                if k.strip() == key:
+                    return v.strip()
+    except OSError:
+        pass
+    return default
+
+
+def conf_set(key, value):
+    lines = []
+    try:
+        with open(CONF, encoding='utf-8') as f:
+            lines = [l.rstrip('\n') for l in f if l.split('=', 1)[0].strip() != key]
+    except OSError:
+        pass
+    lines.append('%s=%s' % (key, value))
+    try:
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        with open(CONF, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+    except OSError:
+        pass
+
+
+def conf_int(key, default, low, high):
+    try:
+        return max(low, min(high, int(conf_get(key, str(default)))))
+    except ValueError:
+        return default
+
+
+# ---------------------------------------------------------------- nói chuyện với bản chạy nền
+
+def runtime_path(ext):
+    """Tệp khoá / socket của bản chạy nền: mỗi người dùng, mỗi màn hình X một bản."""
+    d = os.environ.get('XDG_RUNTIME_DIR')
+    if not d or not os.path.isdir(d):
+        # không có thư mục riêng của phiên: dùng một thư mục trong /tmp mà chỉ mình vào được
+        d = '/tmp/%s-%d' % (NAME, os.getuid())
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise OSError('thư mục %s không an toàn' % d)
+    disp = re.sub(r'\.\d+$', '', os.environ.get('DISPLAY', ''))
+    return os.path.join(d, '%s-%d-%s.%s' % (NAME, os.getuid(), re.sub(r'[^A-Za-z0-9]', '_', disp), ext))
+
+
+def send(cmd, timeout=5.0):
+    """Gửi một lệnh cho bản chạy nền. Trả câu trả lời, hoặc None nếu không có bản nào đang chạy."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(runtime_path('sock'))
+        s.sendall(cmd.encode('utf-8') + b'\n')
+        buf = b''
+        while True:
+            part = s.recv(65536)
+            if not part:
+                break
+            buf += part
+        return buf.decode('utf-8', 'replace')
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def spawn_daemon(*extra):
+    me = os.path.realpath(sys.argv[0])
+    subprocess.Popen([me, 'start'] + list(extra), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# ---------------------------------------------------------------- phím tắt Win+V
+
+SHORTCUT = '/commands/custom/<Super>v'
+SHORTCUT_CMD = 'depot-clipboard show'
+
+
+def xfce_shortcut(force=False):
+    """XFCE: gán Win+V cho Bộ nhớ tạm. Phím đang gán cho lệnh khác thì giữ nguyên, trừ khi force.
+    Trả (kết quả, lệnh đang gán); kết quả: set | kept | other | none (không phải XFCE / không gán được)."""
+    if 'XFCE' not in os.environ.get('XDG_CURRENT_DESKTOP', '').upper():
+        return 'none', ''
+    base = ['xfconf-query', '-c', 'xfce4-keyboard-shortcuts', '-p', SHORTCUT]
+    try:
+        cur = subprocess.run(base, capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+        now = cur.stdout.strip() if cur.returncode == 0 else ''
+        if now == SHORTCUT_CMD:
+            return 'kept', now
+        if now and not force:
+            return 'other', now
+        done = subprocess.run(base + ['-n', '-t', 'string', '-s', SHORTCUT_CMD], capture_output=True, timeout=5,
+                              stdin=subprocess.DEVNULL)
+        return ('set' if done.returncode == 0 else 'none'), now
+    except (OSError, subprocess.SubprocessError):
+        return 'none', ''
+
+
+def bind_message(force):
+    state, now = xfce_shortcut(force)
+    if state == 'set':
+        return 0, 'Đã gán Win+V cho Bộ nhớ tạm.'
+    if state == 'kept':
+        return 0, 'Win+V đã gán cho Bộ nhớ tạm từ trước.'
+    if state == 'other':
+        return 1, 'Win+V đang gán cho lệnh khác: %s — giữ nguyên. Muốn đổi: depot-clipboard bind --force' % now
+    return 1, ('Chỉ tự gán được phím tắt trên XFCE. Desktop khác: vào phần phím tắt bàn phím, thêm lệnh\n'
+               '    depot-clipboard show\nvà gán cho Win+V. i3: thêm vào ~/.config/i3/config\n'
+               '    exec --no-startup-id depot-clipboard start\n'
+               '    bindsym $mod+Shift+v exec --no-startup-id depot-clipboard show')
+
+
+# ---------------------------------------------------------------- cập nhật OTA
+
+def ver_key(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v)[:4])
+
+
+def fetch(url, limit=5_000_000):
+    req = urllib.request.Request(url, headers={'User-Agent': 'depot-clipboard/' + VERSION})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('tệp tải về quá lớn')
+    return data
+
+
+def latest_version():
+    """Phiên bản trong kho: trường Version của pkg/DEBIAN/control trên nhánh main."""
+    m = re.search(r'^Version:\s*(\d+(?:\.\d+){1,3})\s*$', fetch(UPDATE_RAW + '/pkg/DEBIAN/control', 20000)
+                  .decode('utf-8', 'replace'), re.M)
+    if not m:
+        raise ValueError('không đọc được phiên bản trong kho')
+    return m.group(1)
+
+
+def check_update():
+    """Trả (trạng thái, bản mới nhất, thông báo); trạng thái: ok | update | error."""
+    try:
+        latest = latest_version()
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        return 'error', '', 'Không hỏi được kho mã nguồn: %s' % e
+    if ver_key(latest) > ver_key(VERSION):
+        return 'update', latest, 'Có bản mới %s (đang dùng %s).' % (latest, VERSION)
+    return 'ok', latest, 'Đang dùng bản mới nhất (%s).' % VERSION
+
+
+def do_update():
+    """Tải bản mới rồi cài. Trả (mã thoát, thông báo, đã cài xong chưa)."""
+    state, latest, msg = check_update()
+    if state != 'update':
+        return (0 if state == 'ok' else 1), msg, False
+    me = os.path.realpath(sys.argv[0])
+    try:
+        if os.access(me, os.W_OK) and not me.startswith('/usr/'):
+            # bản chép tay vào thư mục người dùng (không phải gói .deb): thay chính tệp chương trình
+            data = fetch(UPDATE_RAW + '/pkg/usr/bin/depot-clipboard')
+            text = data.decode('utf-8')
+            if not data.startswith(b'#!') or ("VERSION = '%s'" % latest) not in text:
+                raise ValueError('mã trong kho chưa khớp phiên bản %s' % latest)
+            compile(text, 'depot-clipboard', 'exec')             # hỏng cú pháp thì không thay
+            with open(me + '.new', 'wb') as f:
+                f.write(data)
+            os.chmod(me + '.new', 0o755)
+            os.replace(me + '.new', me)
+            return 0, 'Đã cập nhật lên bản %s.' % latest, True
+        name = 'depot-clipboard_%s_all.deb' % latest
+        deb = fetch('%s/%s' % (UPDATE_RAW, name))
+        want = fetch('%s/%s.sha256' % (UPDATE_RAW, name), 1000).decode('ascii', 'replace').split()[0].lower()
+        if hashlib.sha256(deb).hexdigest() != want:
+            raise ValueError('tệp %s tải về sai sha256 — không cài' % name)
+        cache = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), NAME)
+        os.makedirs(cache, exist_ok=True)
+        path = os.path.join(cache, name)
+        with open(path, 'wb') as f:
+            f.write(deb)
+    except (OSError, ValueError, IndexError, SyntaxError, urllib.error.URLError) as e:
+        return 1, 'Cập nhật không thành: %s' % e, False
+    manual = 'Đã tải %s (sha256 khớp). Cài bằng: sudo apt install %s' % (name, path)
+    if os.geteuid() == 0:
+        argv = ['apt-get', 'install', '-y', path]
+    elif os.environ.get('DISPLAY') and any(os.access(os.path.join(d, 'pkexec'), os.X_OK)
+                                           for d in os.environ.get('PATH', '').split(':')):
+        argv = ['pkexec', 'apt-get', 'install', '-y', path]      # hộp hỏi mật khẩu quản trị của hệ thống
+    else:
+        return 0, manual, False
+    try:
+        rc = subprocess.run(argv, stdin=subprocess.DEVNULL).returncode
+    except OSError:
+        rc = 1
+    if rc:
+        return 1, 'Chưa cài được (huỷ hoặc lỗi). ' + manual, False
+    return 0, 'Đã cập nhật lên bản %s.' % latest, True
+
+
+def auto_check():
+    """Bản chạy nền: mỗi ngày hỏi một lần; có bản mới thì báo một lần cho mỗi phiên bản. Không tự cài."""
+    if conf_get('UPDATE_CHECK', '1') == '0':
+        return
+    try:
+        last = float(conf_get('UPDATE_LAST', '0'))
+    except ValueError:
+        last = 0.0
+    if time.time() - last < UPDATE_EVERY:
+        return
+    conf_set('UPDATE_LAST', '%d' % time.time())
+    state, latest, _msg = check_update()
+    if state == 'update' and conf_get('UPDATE_SEEN') != latest:
+        conf_set('UPDATE_SEEN', latest)
+        try:
+            subprocess.run(['notify-send', '-i', 'software-update-available', '-a', 'Bộ nhớ tạm',
+                            'Bộ nhớ tạm: có bản mới %s' % latest,
+                            'Đang dùng %s. Cập nhật: Win+V › bánh răng › Cập nhật, hoặc depot-clipboard --update'
+                            % VERSION],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+# ---------------------------------------------------------------- dòng lệnh
+
+ALIASES = {'--version': 'version', '-V': 'version', '--help': 'help', '-h': 'help', '--check-update': 'check-update',
+           '--update': 'update', 'toggle': 'show'}
+COMMANDS = ('start', 'show', 'settings', 'hide', 'clear', 'status', 'list', 'quit', 'restart', 'bind', 'defaults',
+            'check-update', 'update', 'version', 'help')
+ARGS = sys.argv[1:]
+CMD = ALIASES.get(ARGS[0], ARGS[0]) if ARGS else 'show'
+FLAGS = ARGS[1:]
+if CMD not in COMMANDS or [a for a in FLAGS if a not in ('--show', '--settings', '--force')] \
+        or (FLAGS and CMD != 'start' and (CMD, FLAGS) != ('bind', ['--force'])):
+    print('depot-clipboard: không hiểu tham số %s\n\n%s' % (' '.join(ARGS), USAGE), file=sys.stderr)
+    sys.exit(2)
+if CMD == 'help':
+    print(USAGE)
+    sys.exit(0)
+if CMD == 'version':
+    print('depot-clipboard', VERSION)
+    sys.exit(0)
+if CMD == 'check-update':
+    STATE, LATEST, MSG = check_update()
+    print(MSG)
+    sys.exit({'ok': 0, 'update': 10}.get(STATE, 1))
+if CMD == 'update':
+    CODE, MSG, DONE = do_update()
+    print(MSG)
+    if DONE and os.environ.get('DISPLAY') and send('restart') is not None:
+        print('Bản chạy nền đã chạy lại bằng mã mới (lịch sử chưa ghim bắt đầu lại từ đầu).')
+    sys.exit(CODE)
+if CMD == 'bind':
+    CODE, MSG = bind_message('--force' in FLAGS)
+    print(MSG)
+    sys.exit(CODE)
+if CMD == 'defaults':
+    # bản cũ (script gọi Clipman) đặt mặc định cho Clipman ở đây; depot-layout còn gọi lệnh này sau khi đổi bố cục
+    sys.exit(0)
+if not os.environ.get('DISPLAY'):
+    print('depot-clipboard: không có màn hình X (biến DISPLAY) — chạy trong phiên đồ hoạ X11.', file=sys.stderr)
+    sys.exit(1)
+if CMD in ('show', 'settings'):
+    if send(CMD) is None:
+        spawn_daemon('--' + CMD)                 # chưa chạy nền: chạy rồi mở bảng luôn
+    sys.exit(0)
+if CMD == 'restart':
+    if send('restart') is None:
+        spawn_daemon()
+    sys.exit(0)
+if CMD in ('hide', 'clear', 'status', 'list', 'quit'):
+    REPLY = send(CMD)
+    if REPLY is None:
+        print('depot-clipboard %s — chưa chạy nền. Chạy: depot-clipboard start &' % VERSION)
+        sys.exit(0 if CMD == 'quit' else 1)
+    if REPLY.strip():
+        print(REPLY.rstrip('\n'))
+    sys.exit(0)
+
+# từ đây là "start": bản chạy nền
+if send('ping', 2.0) is not None:
+    print('depot-clipboard: đã có một bản đang chạy trên màn hình này.')
+    sys.exit(0)
+if os.environ.get('XDG_SESSION_TYPE') == 'wayland' and '--force' not in FLAGS:
+    print('depot-clipboard: phiên Wayland không cho chương trình X11 theo dõi bộ nhớ tạm của app khác — không chạy. '
+          'Dùng phiên X11 (Xorg), hoặc thử: depot-clipboard start --force')
+    sys.exit(0)
+
+os.environ.setdefault('GDK_BACKEND', 'x11')
+
+import ctypes  # noqa: E402
+import gi  # noqa: E402
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkX11', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+gi.require_foreign('cairo')
+import cairo  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GdkX11, GLib, Gtk, Pango  # noqa: E402
+
+# Màu theo bảng nổi của Depot OS (depot-tray, depot-settings): tối là mặc định, sáng khi máy dùng giao diện sáng.
+PALETTE = {
+    'dark': dict(bg='rgba(43, 52, 66, 0.98)', flat='#2b3442', line='rgba(255, 255, 255, 0.11)', fg='#ffffff',
+                 dim='rgba(255, 255, 255, 0.72)', card='rgba(255, 255, 255, 0.055)',
+                 cardline='rgba(255, 255, 255, 0.06)', hover='rgba(255, 255, 255, 0.10)',
+                 sel='rgba(76, 194, 255, 0.16)', field='rgba(0, 0, 0, 0.22)', accent='#4cc2ff', onaccent='#04121c'),
+    'light': dict(bg='rgba(249, 249, 249, 0.98)', flat='#f9f9f9', line='rgba(0, 0, 0, 0.14)', fg='#1b1b1b',
+                  dim='rgba(0, 0, 0, 0.62)', card='#ffffff', cardline='rgba(0, 0, 0, 0.08)',
+                  hover='rgba(0, 0, 0, 0.05)', sel='rgba(0, 95, 184, 0.10)', field='#ffffff', accent='#005fb8',
+                  onaccent='#ffffff'),
+}
+CSS = '''
+window.clip-win { background-color: transparent; }
+.clip-root {
+    background-color: %(bg)s; border: 1px solid %(line)s; border-radius: 8px; padding: 10px; color: %(fg)s;
+    font-family: Inter, "Segoe UI Variable", "Segoe UI", "Noto Sans", sans-serif; font-size: 10pt;
+}
+.clip-root.flat { border-radius: 0; background-color: %(flat)s; }
+.clip-root label { color: %(fg)s; }
+.clip-root label.clip-title { font-weight: 600; font-size: 10.5pt; }
+.clip-root label.clip-dim { color: %(dim)s; font-size: 8.5pt; }
+.clip-root label.clip-note { color: %(dim)s; font-size: 9pt; }
+.clip-root entry {
+    background-image: none; background-color: %(field)s; color: %(fg)s; caret-color: %(fg)s;
+    border: 1px solid %(line)s; border-radius: 4px; box-shadow: none; min-height: 30px; padding: 0 8px;
+}
+.clip-root entry:focus { border-color: %(accent)s; }
+.clip-root entry image { color: %(dim)s; }
+.clip-root scrolledwindow, .clip-root viewport, .clip-root list, .clip-root stack { background-color: transparent; }
+.clip-root scrolledwindow undershoot, .clip-root scrolledwindow overshoot { background-image: none; }
+.clip-root list row {
+    background-color: %(card)s; border: 1px solid %(cardline)s; border-radius: 4px; margin: 0 0 4px 0;
+    padding: 7px 4px 7px 10px; color: %(fg)s; outline-width: 0; transition: background-color 120ms ease;
+}
+.clip-root list row:hover { background-color: %(hover)s; }
+.clip-root list row:selected { background-color: %(sel)s; border-color: %(accent)s; }
+.clip-root button {
+    background-image: none; background-color: transparent; border: 1px solid transparent; box-shadow: none;
+    text-shadow: none; -gtk-icon-shadow: none; color: %(fg)s; border-radius: 4px; padding: 3px 5px;
+    min-height: 20px; min-width: 20px; outline-width: 0; transition: background-color 120ms ease;
+}
+.clip-root button:hover { background-color: %(hover)s; }
+.clip-root button:disabled { opacity: 0.45; }
+.clip-root button.clip-quiet { color: %(dim)s; }
+.clip-root button.clip-quiet:hover { color: %(fg)s; }
+.clip-root button.clip-on, .clip-root button.clip-on:hover { color: %(accent)s; }
+.clip-root button.clip-text { padding: 3px 10px; border-color: %(line)s; }
+.clip-root button.clip-accent, .clip-root button.clip-accent:hover {
+    background-color: %(accent)s; color: %(onaccent)s; padding: 3px 12px; font-weight: 600;
+}
+.clip-root button.clip-accent label { color: %(onaccent)s; }
+.clip-root .clip-card {
+    background-color: %(card)s; border: 1px solid %(cardline)s; border-radius: 4px; padding: 8px 10px;
+}
+.clip-root scrollbar { background-color: transparent; border: none; }
+.clip-root scrollbar slider { background-color: %(dim)s; border-radius: 4px; min-width: 4px; min-height: 24px; }
+'''
+
+# cửa sổ Terminal dán bằng Ctrl+Shift+V; họ xterm chỉ dán được vùng PRIMARY bằng Shift+Insert
+TERMINALS = {'xfce4-terminal', 'gnome-terminal', 'gnome-terminal-server', 'mate-terminal', 'lxterminal', 'qterminal',
+             'konsole', 'tilix', 'terminator', 'kitty', 'alacritty', 'wezterm', 'org.wezfurlong.wezterm', 'sakura',
+             'roxterm', 'terminology', 'guake', 'tilda', 'ptyxis', 'kgx', 'io.elementary.terminal', 'deepin-terminal',
+             'x-terminal-emulator'}
+XTERMS = {'xterm', 'uxterm', 'urxvt', 'rxvt', 'st', 'st-256color'}
+
+
+class XKeys:
+    """Một kết nối X riêng qua ctypes: hỏi cửa sổ nào đang được chọn, nó thuộc chương trình gì, và gõ phím dán
+    bằng XTest. Thiếu libX11 / libXtst thì thôi: chọn một mục vẫn đưa vào bộ nhớ tạm, chỉ không tự dán.
+    Lỗi X trên kết nối này (cửa sổ vừa đóng…) GDK bỏ qua vì không phải màn hình GDK mở."""
+
+    def __init__(self):
+        self.d = None
+        self.xt = None
+        try:
+            x = ctypes.CDLL('libX11.so.6')
+            x.XOpenDisplay.restype = ctypes.c_void_p
+            x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x.XDefaultRootWindow.restype = ctypes.c_ulong
+            x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            x.XInternAtom.restype = ctypes.c_ulong
+            x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x.XGetWindowProperty.restype = ctypes.c_int
+            x.XGetWindowProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long, ctypes.c_long, ctypes.c_int,
+                ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+            x.XFree.argtypes = [ctypes.c_void_p]
+            x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
+            x.XFlush.argtypes = [ctypes.c_void_p]
+            x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            x.XStringToKeysym.restype = ctypes.c_ulong
+            x.XStringToKeysym.argtypes = [ctypes.c_char_p]
+            x.XKeysymToKeycode.restype = ctypes.c_ubyte
+            x.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            d = x.XOpenDisplay(None)
+        except (OSError, AttributeError):
+            return
+        if not d:
+            return
+        self.x, self.d = x, d
+        self.root = x.XDefaultRootWindow(d)
+        self.a_active = x.XInternAtom(d, b'_NET_ACTIVE_WINDOW', False)
+        self.a_class = x.XInternAtom(d, b'WM_CLASS', False)
+        try:
+            xt = ctypes.CDLL('libXtst.so.6')
+            xt.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+            xt.XTestQueryExtension.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_int)] * 4
+            n = [ctypes.c_int() for _ in range(4)]
+            if xt.XTestQueryExtension(d, *[ctypes.byref(i) for i in n]):
+                self.xt = xt
+        except (OSError, AttributeError):
+            pass
+
+    def prop(self, win, atom):
+        """Giá trị một thuộc tính của cửa sổ: danh sách số (format 32), bytes (format 8), hoặc None."""
+        kind, fmt = ctypes.c_ulong(), ctypes.c_int()
+        count, rest = ctypes.c_ulong(), ctypes.c_ulong()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        rc = self.x.XGetWindowProperty(self.d, win, atom, 0, 1024, False, 0, ctypes.byref(kind), ctypes.byref(fmt),
+                                       ctypes.byref(count), ctypes.byref(rest), ctypes.byref(data))
+        if rc != 0 or not data:
+            return None
+        try:
+            if fmt.value == 32:
+                arr = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
+                return [arr[i] for i in range(count.value)]
+            if fmt.value == 8:
+                return ctypes.string_at(data, count.value)
+            return None
+        finally:
+            self.x.XFree(data)
+
+    def active(self):
+        """Cửa sổ đang được chọn (theo trình quản lý cửa sổ), 0 nếu không biết."""
+        if not self.d:
+            return 0
+        v = self.prop(self.root, self.a_active)
+        return v[0] if isinstance(v, list) and v else 0
+
+    def wm_class(self, win):
+        if not self.d or not win:
+            return ''
+        v = self.prop(win, self.a_class)
+        self.x.XSync(self.d, False)
+        if not isinstance(v, bytes):
+            return ''
+        parts = [p for p in v.split(b'\0') if p]
+        return parts[-1].decode('utf-8', 'replace').lower() if parts else ''
+
+    def activate(self, win):
+        """Xin trình quản lý cửa sổ chọn lại cửa sổ này (_NET_ACTIVE_WINDOW, nguồn = công cụ của người dùng)."""
+        if not self.d or not win:
+            return
+
+        class ClientMessage(ctypes.Structure):
+            _fields_ = [('type', ctypes.c_int), ('serial', ctypes.c_ulong), ('send_event', ctypes.c_int),
+                        ('display', ctypes.c_void_p), ('window', ctypes.c_ulong), ('message_type', ctypes.c_ulong),
+                        ('format', ctypes.c_int), ('data', ctypes.c_long * 5)]
+
+        class Event(ctypes.Union):
+            _fields_ = [('msg', ClientMessage), ('pad', ctypes.c_long * 24)]
+
+        ev = Event()
+        ev.msg.type = 33                         # ClientMessage
+        ev.msg.window = win
+        ev.msg.message_type = self.a_active
+        ev.msg.format = 32
+        ev.msg.data[0] = 2
+        self.x.XSendEvent(self.d, self.root, False, (1 << 20) | (1 << 19), ctypes.byref(ev))
+        self.x.XFlush(self.d)
+
+    def tap(self, *names):
+        """Bấm một tổ hợp phím: giữ lần lượt các phím rồi nhả theo thứ tự ngược lại."""
+        if not self.xt:
+            return False
+        codes = [self.x.XKeysymToKeycode(self.d, self.x.XStringToKeysym(n.encode())) for n in names]
+        if not all(codes):
+            return False
+        for c in codes:
+            self.xt.XTestFakeKeyEvent(self.d, c, 1, 0)
+        for c in reversed(codes):
+            self.xt.XTestFakeKeyEvent(self.d, c, 0, 0)
+        self.x.XFlush(self.d)
+        return True
+
+
+class Item:
+    __slots__ = ('kind', 'text', 'pixbuf', 'key', 'time', 'pinned', 'fold', 'thumb')
+
+    def __init__(self, kind, key, text='', pixbuf=None, when=None, pinned=False):
+        self.kind, self.key, self.text, self.pixbuf = kind, key, text, pixbuf
+        self.time = when or time.time()
+        self.pinned = pinned
+        self.fold = None                         # chữ đã đưa về dạng so sánh, tính khi tìm lần đầu
+        self.thumb = None                        # ảnh thu nhỏ, tính khi hiện lần đầu
+
+    def matches(self, query):
+        """Có chứa chữ đang tìm không. Gõ không dấu ("ngan") thì khớp cả chữ có dấu ("ngắn", "ngân")."""
+        if not query:
+            return True
+        if self.kind == 'image':
+            return query in 'ảnh hình image anh hinh'
+        if self.fold is None:
+            fold = self.text.casefold()
+            self.fold = (fold, no_marks(fold))
+        return query in self.fold[0] or (query.isascii() and query in self.fold[1])
+
+    def preview(self, lines=3, width=220):
+        if self.kind == 'image':
+            return 'Ảnh %d × %d' % (self.pixbuf.get_width(), self.pixbuf.get_height())
+        out = []
+        for line in self.text.strip().splitlines():
+            line = re.sub(r'\s+', ' ', line).strip()
+            if line:
+                out.append(line[:width])
+            if len(out) == lines:
+                break
+        return '\n'.join(out)
+
+    def meta(self):
+        if self.kind == 'image':
+            info = 'Ảnh %d × %d' % (self.pixbuf.get_width(), self.pixbuf.get_height())
+        else:
+            n = self.text.count('\n') + 1
+            info = '%d ký tự' % len(self.text) if n == 1 else '%d dòng · %d ký tự' % (n, len(self.text))
+        return '%s · %s' % (info, ago(self.time))
+
+
+def no_marks(text):
+    """Bỏ dấu tiếng Việt: "Đường phố" -> "Duong pho"."""
+    text = unicodedata.normalize('NFD', text).replace('đ', 'd').replace('Đ', 'D')
+    return ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+
+
+def ago(when):
+    s = max(0, time.time() - when)
+    if s < 60:
+        return 'vừa xong'
+    if s < 3600:
+        return '%d phút trước' % (s // 60)
+    if s < 86400:
+        return '%d giờ trước' % (s // 3600)
+    return '%d ngày trước' % (s // 86400)
+
+
+def text_key(text):
+    return 't' + hashlib.sha1(text.encode('utf-8', 'surrogatepass')).hexdigest()
+
+
+def image_key(pb):
+    head = '%dx%d:%d:%d:' % (pb.get_width(), pb.get_height(), pb.get_n_channels(), pb.get_rowstride())
+    return 'i' + hashlib.sha1(head.encode() + pb.get_pixels()).hexdigest()
+
+
+def icon_button(names, tip, cls='clip-quiet'):
+    """Nút chỉ có icon; lấy tên icon đầu tiên mà bộ icon của máy có."""
+    theme = Gtk.IconTheme.get_default()
+    name = next((n for n in names if theme.has_icon(n)), names[-1])
+    b = Gtk.Button()
+    b.add(Gtk.Image.new_from_icon_name(name, Gtk.IconSize.MENU))
+    b.set_tooltip_text(tip)
+    b.set_can_focus(False)
+    b.set_relief(Gtk.ReliefStyle.NONE)
+    b.get_style_context().add_class(cls)
+    return b
+
+
+def text_button(label, cls='clip-text'):
+    b = Gtk.Button(label=label)
+    b.set_can_focus(False)
+    b.set_relief(Gtk.ReliefStyle.NONE)
+    b.get_style_context().add_class(cls)
+    return b
+
+
+def label(text, cls=None, wrap=False):
+    w = Gtk.Label(label=text)
+    w.set_xalign(0)
+    if cls:
+        w.get_style_context().add_class(cls)
+    if wrap:
+        w.set_line_wrap(True)
+        w.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        w.set_width_chars(1)                     # bề ngang do bảng quyết định, chữ dài thì xuống dòng
+        w.set_max_width_chars(1)
+        w.set_hexpand(True)
+    return w
+
+
+class Panel(Gtk.Window):
+    """Bảng lịch sử: hiện ngay chỗ con trỏ, mất chọn là tự đóng."""
+
+    def __init__(self, app):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.app = app
+        self.sticky = False                      # đang chờ hộp hỏi mật khẩu lúc cập nhật: mất chọn cũng không đóng
+        self.shown_at = 0.0
+        self.new_version = ''
+        self.updated = False
+        self.loading = False
+        self.preedit = ''                        # chữ bộ gõ đang giữ trong ô tìm
+        self.theme = None
+        self.provider = Gtk.CssProvider()
+        self.set_title('Bộ nhớ tạm')
+        self.set_role('depot-clipboard')
+        self.set_icon_name('depot-clipboard')
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_keep_above(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        self.set_app_paintable(True)
+        self.get_style_context().add_class('clip-win')
+        scr = self.get_screen()
+        vis = scr.get_rgba_visual()
+        if vis is not None:
+            self.set_visual(vis)
+        Gtk.StyleContext.add_provider_for_screen(scr, self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+
+        self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.root.get_style_context().add_class('clip-root')
+        self.root.set_size_request(WIDTH, -1)
+        self.add(self.root)
+        self.stack = Gtk.Stack()
+        self.stack.set_homogeneous(False)
+        self.stack.add_named(self.build_list(), 'list')
+        self.stack.add_named(self.build_settings(), 'settings')
+        self.root.pack_start(self.stack, True, True, 0)
+
+        self.connect('draw', self.on_draw)
+        self.connect('key-press-event', self.on_key)
+        self.connect('focus-out-event', self.on_focus_out)
+        self.connect('delete-event', lambda *_a: self.dismiss() or True)
+
+    # ---- dựng giao diện
+
+    def build_list(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        head = Gtk.Box(spacing=4)
+        head.pack_start(label('Bộ nhớ tạm', 'clip-title'), True, True, 2)
+        self.clear_btn = text_button('Xoá tất cả')
+        self.clear_btn.set_tooltip_text('Xoá lịch sử, giữ các mục đã ghim')
+        self.clear_btn.connect('clicked', lambda _b: self.app.clear() or self.refresh())
+        head.pack_start(self.clear_btn, False, False, 0)
+        gear = icon_button(('emblem-system-symbolic', 'preferences-system-symbolic', 'applications-system-symbolic'),
+                           'Cài đặt và cập nhật')
+        gear.connect('clicked', lambda _b: self.open_page('settings'))
+        head.pack_start(gear, False, False, 0)
+        page.pack_start(head, False, False, 0)
+
+        self.entry = Gtk.SearchEntry()
+        self.entry.set_placeholder_text('Tìm trong lịch sử…')
+        self.entry.connect('changed', self.on_search)
+        self.entry.connect('preedit-changed', self.on_preedit)
+        page.pack_start(self.entry, False, False, 0)
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.set_activate_on_single_click(True)
+        self.listbox.connect('row-activated', lambda _l, row: self.choose(row.item))
+        self.empty = label('', 'clip-note', wrap=True)
+        self.empty.set_margin_top(14)
+        self.empty.set_margin_bottom(14)
+        self.empty.set_margin_start(4)
+        self.empty.show()
+        self.listbox.set_placeholder(self.empty)
+        self.scroll = Gtk.ScrolledWindow()
+        self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroll.add(self.listbox)
+        page.pack_start(self.scroll, True, True, 0)
+
+        page.pack_start(label('Enter dán · Delete xoá · Ctrl+P ghim · Esc đóng', 'clip-dim'), False, False, 0)
+        return page
+
+    def build_settings(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        head = Gtk.Box(spacing=4)
+        back = icon_button(('go-previous-symbolic', 'go-previous'), 'Quay lại lịch sử')
+        back.connect('clicked', lambda _b: self.open_page('list'))
+        head.pack_start(back, False, False, 0)
+        head.pack_start(label('Cài đặt Bộ nhớ tạm', 'clip-title'), True, True, 2)
+        page.pack_start(head, False, False, 0)
+
+        def card(title, note, control):
+            box = Gtk.Box(spacing=10)
+            box.get_style_context().add_class('clip-card')
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            text.pack_start(label(title, wrap=True), False, False, 0)
+            if note:
+                text.pack_start(label(note, 'clip-dim', wrap=True), False, False, 0)
+            box.pack_start(text, True, True, 0)
+            control.set_valign(Gtk.Align.CENTER)
+            box.pack_start(control, False, False, 0)
+            page.pack_start(box, False, False, 0)
+            return box
+
+        def switch(key):
+            sw = Gtk.Switch()
+            sw.connect('notify::active', lambda w, _p: self.loading or conf_set(key, '1' if w.get_active() else '0'))
+            return sw
+
+        def stepper(key, default, low, high, step):
+            box = Gtk.Box(spacing=2)
+            value = label('')
+            value.set_xalign(0.5)
+            value.set_width_chars(3)
+
+            def bump(delta):
+                n = max(low, min(high, conf_int(key, default, low, high) + delta))
+                conf_set(key, str(n))
+                value.set_text(str(n))
+                self.app.trim()
+            for sign, name, tip in ((-1, ('list-remove-symbolic', 'list-remove'), 'Bớt'),
+                                    (1, ('list-add-symbolic', 'list-add'), 'Thêm')):
+                b = icon_button(name, tip, 'clip-text')
+                b.connect('clicked', lambda _b, s=sign: bump(s * step))
+                box.pack_start(b, False, False, 0) if sign < 0 else box.pack_end(b, False, False, 0)
+            box.pack_start(value, False, False, 0)
+            box.sync = lambda: value.set_text(str(conf_int(key, default, low, high)))
+            return box
+
+        self.sw_paste = switch('PASTE')
+        card('Chọn mục là dán luôn', 'Tắt thì mục chỉ được đưa vào bộ nhớ tạm, tự bấm Ctrl+V để dán', self.sw_paste)
+        self.st_texts = stepper('MAX_TEXTS', 30, 5, 200, 5)
+        card('Số đoạn chữ giữ lại', 'Không tính các mục đã ghim', self.st_texts)
+        self.st_images = stepper('MAX_IMAGES', 3, 0, 20, 1)
+        card('Số ảnh giữ lại', '0 = không ghi ảnh vào lịch sử', self.st_images)
+        self.sw_update = switch('UPDATE_CHECK')
+        card('Tự hỏi bản mới mỗi ngày', 'Có bản mới thì chỉ báo, không tự cài', self.sw_update)
+
+        self.update_btn = text_button('Kiểm tra cập nhật')
+        self.update_btn.connect('clicked', self.on_update)
+        self.update_msg = label('', 'clip-dim', wrap=True)
+        box = card('Cập nhật', 'Đang dùng bản %s' % VERSION, self.update_btn)
+        box.get_children()[0].pack_start(self.update_msg, False, False, 0)
+        self.update_msg.set_no_show_all(True)
+
+        page.pack_start(label('Lịch sử chỉ nằm trong bộ nhớ, tắt máy là hết; chỉ mục đã ghim mới được giữ lại.',
+                              'clip-dim', wrap=True), False, False, 0)
+        return page
+
+    def restyle(self):
+        """Nạp màu theo giao diện của máy (THEME=dark|light ép một kiểu) và theo việc có compositor hay không."""
+        theme = conf_get('THEME', 'system').lower()
+        if theme not in PALETTE:
+            st = Gtk.Settings.get_default()
+            name = (st.get_property('gtk-theme-name') or '').lower()
+            theme = 'dark' if st.get_property('gtk-application-prefer-dark-theme') or 'dark' in name \
+                or not name else 'light'
+        if theme != self.theme:
+            self.theme = theme
+            self.provider.load_from_data((CSS % PALETTE[theme]).encode('utf-8'))
+        ctx = self.root.get_style_context()
+        scr = self.get_screen()
+        # không có compositor thì vùng trong suốt ở bốn góc bo thành màu đen: vẽ ô vuông
+        if scr.get_rgba_visual() is not None and scr.is_composited():
+            ctx.remove_class('flat')
+        else:
+            ctx.add_class('flat')
+
+    @staticmethod
+    def on_draw(_w, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        return False
+
+    # ---- danh sách
+
+    def typed(self):
+        """Chữ trong ô tìm, tính cả phần bộ gõ (Unikey…) đang giữ chưa nhả: gõ tới đâu lọc tới đó."""
+        text = self.entry.get_text()
+        pos = self.entry.get_position()
+        return (text[:pos] + self.preedit + text[pos:]).strip()
+
+    def query(self):
+        return self.typed().casefold()
+
+    def rows(self):
+        return self.listbox.get_children()
+
+    def make_row(self, item):
+        row = Gtk.ListBoxRow()
+        row.item = item
+        row.set_can_focus(False)
+        box = Gtk.Box(spacing=4)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        if item.kind == 'image':
+            pb = item.pixbuf
+            if item.thumb is None:
+                scale = min(1.0, (WIDTH - 110) / pb.get_width(), 110 / pb.get_height())
+                item.thumb = pb if scale == 1.0 else pb.scale_simple(max(1, int(pb.get_width() * scale)),
+                                                                     max(1, int(pb.get_height() * scale)),
+                                                                     GdkPixbuf.InterpType.BILINEAR)
+            img = Gtk.Image.new_from_pixbuf(item.thumb)
+            img.set_halign(Gtk.Align.START)
+            left.pack_start(img, False, False, 0)
+        else:
+            text = label(item.preview(), wrap=True)
+            text.set_lines(3)
+            text.set_ellipsize(Pango.EllipsizeMode.END)
+            left.pack_start(text, False, False, 0)
+        left.pack_start(label(item.meta(), 'clip-dim'), False, False, 0)
+        box.pack_start(left, True, True, 0)
+        tools = Gtk.Box(spacing=0)
+        tools.set_valign(Gtk.Align.START)
+        pin = icon_button(('view-pin-symbolic', 'starred-symbolic', 'emblem-favorite-symbolic'),
+                          'Bỏ ghim' if item.pinned else 'Ghim: giữ lại kể cả khi xoá lịch sử hay tắt máy',
+                          'clip-on' if item.pinned else 'clip-quiet')
+        pin.connect('clicked', lambda _b: self.app.toggle_pin(item) or self.refresh())
+        tools.pack_start(pin, False, False, 0)
+        rm = icon_button(('edit-delete-symbolic', 'user-trash-symbolic', 'window-close-symbolic'), 'Xoá mục này')
+        rm.connect('clicked', lambda _b: self.app.remove(item) or self.refresh())
+        tools.pack_start(rm, False, False, 0)
+        box.pack_start(tools, False, False, 0)
+        row.add(box)
+        return row
+
+    def fit_list(self):
+        """Danh sách cao vừa đủ các mục, quá LIST_HEIGHT thì cuộn. Phải tự tính theo bề ngang thật: ScrolledWindow
+        hỏi chiều cao của chữ xuống dòng theo bề ngang "tự nhiên" nên ra thừa."""
+        rows = self.listbox.get_children()
+        if rows:
+            nat = sum(r.get_preferred_height_for_width(WIDTH - 22)[1] for r in rows)
+        else:
+            nat = self.empty.get_preferred_height_for_width(WIDTH - 22)[1] + 28
+        self.scroll.set_size_request(-1, max(40, min(nat, LIST_HEIGHT)))
+
+    def refresh(self, fresh=False):
+        """Dựng lại danh sách: các mục khớp ô tìm, mới nhất ở trên; giữ nguyên mục đang chọn nếu nó còn (vừa mở
+        bảng hoặc vừa gõ thêm thì chọn mục đầu)."""
+        cur = self.listbox.get_selected_row()
+        keep = cur.item.key if cur is not None and not fresh else None
+        query = self.query()
+        for r in self.listbox.get_children():
+            self.listbox.remove(r)
+        for item in self.app.items:
+            if item.matches(query):
+                self.listbox.add(self.make_row(item))
+        self.listbox.show_all()
+        self.clear_btn.set_sensitive(any(not i.pinned for i in self.app.items))
+        self.select(keep)
+        if not query:
+            # đang tìm thì bảng giữ nguyên kích thước: cửa sổ co giãn theo từng phím gõ trông giật
+            self.fit_list()
+            if self.get_visible():
+                GLib.idle_add(self.place)
+
+    def select(self, key=None):
+        rows = self.rows()
+        row = next((r for r in rows if r.item.key == key), rows[0] if rows else None)
+        if row is not None:
+            self.listbox.select_row(row)
+        if self.query():
+            self.empty.set_text('Không có mục nào khớp "%s".' % self.typed())
+        else:
+            self.empty.set_text('Chưa có gì trong lịch sử. Sao chép (Ctrl+C) một đoạn chữ hoặc một ảnh, '
+                                'nó sẽ hiện ở đây.')
+
+    def on_search(self, _e):
+        self.refresh(fresh=True)
+        self.scroll.get_vadjustment().set_value(0)
+
+    def on_preedit(self, _e, text):
+        if text != self.preedit:
+            self.preedit = text
+            self.on_search(None)
+
+    def move_selection(self, delta):
+        rows = self.rows()
+        if not rows:
+            return
+        cur = self.listbox.get_selected_row()
+        i = rows.index(cur) if cur in rows else -1
+        row = rows[max(0, min(len(rows) - 1, i + delta))] if i >= 0 else rows[0]
+        self.listbox.select_row(row)
+        a = row.get_allocation()
+        self.scroll.get_vadjustment().clamp_page(a.y, a.y + a.height + 4)
+
+    def choose(self, item):
+        self.app.use(item)
+        self.dismiss()
+        if conf_get('PASTE', '1') != '0':
+            self.app.paste_later(item)
+
+    # ---- cài đặt và cập nhật
+
+    def open_page(self, name):
+        if name == 'settings':
+            self.loading = True
+            self.sw_paste.set_active(conf_get('PASTE', '1') != '0')
+            self.sw_update.set_active(conf_get('UPDATE_CHECK', '1') != '0')
+            self.st_texts.sync()
+            self.st_images.sync()
+            self.loading = False
+        self.stack.set_visible_child_name(name)
+        if name == 'list':
+            self.entry.grab_focus()
+        if self.get_visible():
+            GLib.idle_add(self.place)
+
+    def say(self, text):
+        self.update_msg.set_text(text)
+        self.update_msg.set_visible(bool(text))
+        if self.get_visible():
+            GLib.idle_add(self.place)
+
+    def on_update(self, _b):
+        if self.updated:
+            self.app.restart()
+            return
+        installing = bool(self.new_version)
+        self.update_btn.set_sensitive(False)
+        self.sticky = installing                 # hộp hỏi mật khẩu sẽ lấy mất chọn: đừng đóng bảng
+        self.say('Đang tải và cài bản %s…' % self.new_version if installing else 'Đang hỏi kho mã nguồn…')
+
+        def work():
+            if installing:
+                code, msg, done = do_update()
+                GLib.idle_add(finish, 'update' if code else 'ok', '', msg, done)
+            else:
+                state, latest, msg = check_update()
+                GLib.idle_add(finish, state, latest, msg, False)
+
+        def finish(state, latest, msg, done):
+            self.sticky = False
+            self.update_btn.set_sensitive(True)
+            ctx = self.update_btn.get_style_context()
+            if done:
+                self.updated = True
+                self.update_btn.set_label('Chạy lại ngay')
+                msg += ' Lịch sử chưa ghim sẽ mất khi chạy lại.'
+            elif state == 'update' and latest:
+                self.new_version = latest
+                self.update_btn.set_label('Cập nhật')
+                ctx.remove_class('clip-text')
+                ctx.add_class('clip-accent')
+            self.say(msg)
+            if not self.is_active():
+                self.present_with_time(GdkX11.x11_get_server_time(self.get_window()))
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- hiện / đóng
+
+    def place(self):
+        """Đặt bảng ở chỗ con trỏ lúc mở, lùi vào trong nếu chạm mép vùng làm việc."""
+        _min, nat = self.get_preferred_size()
+        x, y = self.anchor
+        disp = self.get_display()
+        area = disp.get_monitor_at_point(x, y).get_workarea()
+        x = max(area.x + 4, min(x, area.x + area.width - nat.width - 4))
+        y = max(area.y + 4, min(y, area.y + area.height - nat.height - 4))
+        self.move(x, y)
+        return False
+
+    def popup(self, page='list'):
+        _scr, x, y = self.get_display().get_default_seat().get_pointer().get_position()
+        self.anchor = (x, y)
+        self.restyle()
+        self.preedit = ''
+        self.entry.set_text('')
+        self.root.show_all()
+        self.refresh(fresh=True)
+        self.open_page(page)
+        self.scroll.get_vadjustment().set_value(0)
+        self.place()
+        self.show()
+        self.shown_at = time.monotonic()
+        self.present_with_time(GdkX11.x11_get_server_time(self.get_window()))
+        if page == 'list':
+            self.entry.grab_focus()
+
+    def dismiss(self):
+        self.sticky = False
+        self.hide()
+
+    def on_focus_out(self, _w, _e):
+        # đợi một nhịp rồi mới xét: lúc vừa mở bằng phím tắt, phím còn đang giữ nên có thể mất chọn thoáng qua
+        def check():
+            if self.get_visible() and not self.sticky and not self.is_active():
+                self.dismiss()
+            return False
+        GLib.timeout_add(180 if time.monotonic() - self.shown_at > 0.4 else 450, check)
+        return False
+
+    def on_key(self, _w, ev):
+        key = ev.keyval
+        ctrl = bool(ev.state & Gdk.ModifierType.CONTROL_MASK)
+        on_list = self.stack.get_visible_child_name() == 'list'
+        if key == Gdk.KEY_Escape:
+            if not on_list:
+                self.open_page('list')
+            elif self.typed():
+                self.entry.reset_im_context()
+                self.preedit = ''
+                self.entry.set_text('')
+                self.on_search(None)
+            else:
+                self.dismiss()
+            return True
+        if not on_list:
+            return False
+        row = self.listbox.get_selected_row()
+        if key in (Gdk.KEY_Down, Gdk.KEY_KP_Down) or (key == Gdk.KEY_Tab and not ctrl):
+            self.move_selection(1)
+        elif key in (Gdk.KEY_Up, Gdk.KEY_KP_Up, Gdk.KEY_ISO_Left_Tab):
+            self.move_selection(-1)
+        elif key in (Gdk.KEY_Page_Down, Gdk.KEY_KP_Page_Down):
+            self.move_selection(5)
+        elif key in (Gdk.KEY_Page_Up, Gdk.KEY_KP_Page_Up):
+            self.move_selection(-5)
+        elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+            if row is not None:
+                self.choose(row.item)
+        elif key in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete) and not self.typed():
+            if row is not None:
+                self.move_selection(1)
+                self.app.remove(row.item)
+                self.refresh()
+        elif ctrl and key in (Gdk.KEY_p, Gdk.KEY_P):
+            if row is not None:
+                self.app.toggle_pin(row.item)
+                self.refresh()
+        else:
+            if not self.entry.has_focus():
+                self.entry.grab_focus_without_selecting()
+                return self.entry.handle_event(ev)
+            return False
+        return True
+
+
+class App:
+    def __init__(self):
+        self.items = []                          # mới nhất đứng trước
+        self.x = XKeys()
+        self.clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.primary = Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY)
+        self.panel = None
+        self.prev = 0                            # cửa sổ đang làm việc lúc mở bảng: nơi sẽ dán vào
+        self.current = None                      # mục đang nằm trong bộ nhớ tạm (thấy trong phiên này)
+        self.mute_until = 0.0                    # vừa tự đặt bộ nhớ tạm: bỏ qua tín hiệu đổi chủ của chính mình
+        self.pending = 0
+        self.sock = None
+        self.lock = None
+        self.load_pins()
+        self.clip.connect('owner-change', self.on_owner_change)
+        self.read_clipboard()                    # thứ đang nằm trong bộ nhớ tạm lúc khởi động cũng vào lịch sử
+
+    # ---- lịch sử
+
+    def find(self, key):
+        return next((i for i in self.items if i.key == key), None)
+
+    def add(self, item):
+        old = self.find(item.key)
+        self.current = old or item
+        if old is not None:
+            if self.items[0] is old:
+                return
+            self.items.remove(old)               # sao chép lại thứ đã có: đưa lên đầu, giữ trạng thái ghim
+            old.time = time.time()
+            item = old
+        self.items.insert(0, item)
+        self.trim()
+        if self.panel is not None and self.panel.get_visible():
+            self.panel.refresh()
+
+    def trim(self):
+        """Bỏ bớt mục cũ nhất chưa ghim cho vừa MAX_TEXTS / MAX_IMAGES."""
+        limits = {'text': conf_int('MAX_TEXTS', 30, 5, 200), 'image': conf_int('MAX_IMAGES', 3, 0, 20)}
+        seen = {'text': 0, 'image': 0}
+        keep = []
+        for it in self.items:
+            if not it.pinned:
+                seen[it.kind] += 1
+                if seen[it.kind] > limits[it.kind]:
+                    continue
+            keep.append(it)
+        if len(keep) != len(self.items):
+            self.items = keep
+            if self.panel is not None and self.panel.get_visible():
+                self.panel.refresh()
+
+    def remove(self, item):
+        if item in self.items:
+            self.items.remove(item)
+            if item.pinned:
+                self.save_pins()
+
+    def clear(self):
+        n = sum(1 for i in self.items if not i.pinned)
+        self.items = [i for i in self.items if i.pinned]
+        return n
+
+    def toggle_pin(self, item):
+        item.pinned = not item.pinned
+        self.save_pins()
+        self.trim()
+
+    def use(self, item):
+        """Đưa một mục lên đầu lịch sử và vào bộ nhớ tạm."""
+        if item in self.items:
+            self.items.remove(item)
+        item.time = time.time()
+        self.items.insert(0, item)
+        self.current = item
+        self.set_clipboard(item)
+
+    def set_clipboard(self, item):
+        self.mute_until = time.monotonic() + 0.4
+        if item.kind == 'image':
+            self.clip.set_image(item.pixbuf)
+        else:
+            self.clip.set_text(item.text, -1)
+
+    # ---- mục đã ghim: thứ duy nhất nằm trên đĩa
+
+    def load_pins(self):
+        try:
+            with open(PINS, encoding='utf-8') as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return
+        for e in saved if isinstance(saved, list) else []:
+            try:
+                when = float(e.get('time', 0)) or time.time()
+                if e.get('kind') == 'text' and isinstance(e.get('text'), str) and e['text']:
+                    self.items.append(Item('text', text_key(e['text']), text=e['text'], when=when, pinned=True))
+                elif e.get('kind') == 'image' and re.match(r'^[0-9a-f]{40}\.png$', str(e.get('file'))):
+                    pb = GdkPixbuf.Pixbuf.new_from_file(os.path.join(DATA, e['file']))
+                    self.items.append(Item('image', 'i' + e['file'][:40], pixbuf=pb, when=when, pinned=True))
+            except (GLib.Error, AttributeError, TypeError, ValueError):
+                continue
+        self.items.sort(key=lambda i: -i.time)
+
+    def save_pins(self):
+        out, keep = [], set()
+        try:
+            os.makedirs(DATA, mode=0o700, exist_ok=True)
+            for it in self.items:
+                if not it.pinned:
+                    continue
+                if it.kind == 'text':
+                    out.append({'kind': 'text', 'text': it.text, 'time': it.time})
+                    continue
+                name = it.key[1:] + '.png'
+                path = os.path.join(DATA, name)
+                if not os.path.exists(path):
+                    it.pixbuf.savev(path, 'png', [], [])
+                    os.chmod(path, 0o600)
+                keep.add(name)
+                out.append({'kind': 'image', 'file': name, 'time': it.time})
+            fd = os.open(PINS + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(out, f, ensure_ascii=False)
+            os.replace(PINS + '.tmp', PINS)
+            for name in os.listdir(DATA):
+                if name.endswith('.png') and name not in keep:
+                    os.unlink(os.path.join(DATA, name))
+        except (OSError, GLib.Error) as e:
+            print('depot-clipboard: không ghi được mục đã ghim: %s' % e, file=sys.stderr)
+
+    # ---- theo dõi bộ nhớ tạm
+
+    def on_owner_change(self, _clip, _event):
+        if time.monotonic() < self.mute_until:
+            return
+        if self.pending:
+            GLib.source_remove(self.pending)
+        self.pending = GLib.timeout_add(60, self.read_clipboard)     # app hay đặt bộ nhớ tạm vài lần liền nhau
+
+    def read_clipboard(self):
+        self.pending = 0
+        self.clip.request_targets(self.on_targets)
+        return False
+
+    def on_targets(self, clip, atoms, *_rest):
+        atoms = list(atoms or [])
+        if not atoms:
+            # bộ nhớ tạm trống (app nguồn vừa đóng): lát nữa vẫn trống thì đặt lại thứ vừa nằm trong đó
+            GLib.timeout_add(400, lambda: self.clip.request_targets(self.on_targets_empty) and False)
+            return
+        if any(a.name() == 'x-kde-passwordManagerHint' for a in atoms):
+            clip.request_contents(Gdk.Atom.intern('x-kde-passwordManagerHint', False), self.on_hint, atoms)
+            return
+        self.read_content(atoms)
+
+    def on_hint(self, _clip, sel, atoms):
+        data = sel.get_data() if sel is not None else b''
+        if bytes(data or b'').strip() == b'secret':
+            return                               # trình quản lý mật khẩu đánh dấu bí mật: không ghi
+        self.read_content(atoms)
+
+    def read_content(self, atoms):
+        if Gtk.targets_include_text(atoms):
+            self.clip.request_text(self.on_text)
+        elif conf_int('MAX_IMAGES', 3, 0, 20) > 0 and Gtk.targets_include_image(atoms, False):
+            self.clip.request_image(self.on_image)
+
+    def on_targets_empty(self, _clip, atoms, *_rest):
+        if not list(atoms or []) and self.current in self.items:
+            self.set_clipboard(self.current)
+
+    def on_text(self, _clip, text, *_rest):
+        if not text or not text.strip() or len(text) > MAX_TEXT_BYTES:
+            return
+        self.add(Item('text', text_key(text), text=text))
+
+    def on_image(self, _clip, pb, *_rest):
+        if pb is None or max(pb.get_width(), pb.get_height()) > MAX_IMAGE_SIDE:
+            return
+        self.add(Item('image', image_key(pb), pixbuf=pb))
+
+    # ---- bảng và dán
+
+    def show(self, page='list'):
+        if self.panel is None:
+            self.panel = Panel(self)
+        p = self.panel
+        if p.get_visible() and p.is_active() and p.stack.get_visible_child_name() == page:
+            p.dismiss()                          # bấm Win+V lần nữa: đóng
+            return
+        if not p.get_visible():
+            self.prev = self.x.active()
+        p.popup(page)
+
+    def paste_later(self, item):
+        """Đợi cửa sổ cũ được chọn lại rồi gõ phím dán vào đó."""
+        prev = self.prev
+        if not prev or not self.x.xt:
+            return
+        t0 = time.monotonic()
+        asked = []
+
+        def paste():
+            cls = self.x.wm_class(prev)
+            if cls in XTERMS:
+                if item.kind == 'text':
+                    self.primary.set_text(item.text, -1)
+                    self.x.tap('Shift_L', 'Insert')
+            elif cls in TERMINALS:
+                self.x.tap('Control_L', 'Shift_L', 'v')
+            else:
+                self.x.tap('Control_L', 'v')
+            return False
+
+        def step():
+            spent = time.monotonic() - t0
+            if self.x.active() == prev:
+                GLib.timeout_add(70, paste)
+                return False
+            if spent > 0.15 and not asked:
+                asked.append(1)
+                self.x.activate(prev)
+            return spent < 1.0
+        GLib.timeout_add(25, step)
+
+    # ---- bản chạy nền: khoá, socket, lệnh
+
+    def listen(self):
+        """Mỗi màn hình X một bản chạy nền. Trả False nếu đã có bản khác."""
+        try:
+            fd = os.open(runtime_path('lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        self.lock = fd
+        path = runtime_path('sock')
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o177)
+        try:
+            self.sock.bind(path)
+        finally:
+            os.umask(old)
+        self.sock.listen(8)
+        GLib.io_add_watch(self.sock.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self.on_client)
+        return True
+
+    def on_client(self, _fd, _cond):
+        try:
+            conn, _addr = self.sock.accept()
+        except OSError:
+            return True
+        try:
+            conn.settimeout(0.5)
+            cmd = conn.recv(256).decode('utf-8', 'replace').strip()
+            conn.sendall(self.command(cmd).encode('utf-8'))
+        except OSError:
+            pass
+        finally:
+            conn.close()
+        return True
+
+    def command(self, cmd):
+        if cmd == 'ping':
+            return 'ok\n'
+        if cmd in ('show', 'settings'):
+            self.show('list' if cmd == 'show' else 'settings')
+            return ''
+        if cmd == 'hide':
+            if self.panel is not None:
+                self.panel.dismiss()
+            return ''
+        if cmd == 'clear':
+            n = self.clear()
+            if self.panel is not None and self.panel.get_visible():
+                self.panel.refresh()
+            pins = len(self.items)
+            return 'Đã xoá %d mục%s.\n' % (n, ', giữ %d mục đã ghim' % pins if pins else '')
+        if cmd == 'status':
+            texts = sum(1 for i in self.items if i.kind == 'text')
+            return ('depot-clipboard %s — đang chạy nền (pid %d)\n'
+                    'lịch sử: %d đoạn chữ, %d ảnh, trong đó %d mục đã ghim\n'
+                    'chọn là dán: %s\n' % (VERSION, os.getpid(), texts, len(self.items) - texts,
+                                           sum(1 for i in self.items if i.pinned),
+                                           'tắt' if conf_get('PASTE', '1') == '0' else
+                                           ('bật' if self.x.xt else 'không dán được (thiếu libXtst)')))
+        if cmd == 'list':
+            return ''.join('%d\t%s\t%s\n' % (n, 'ghim' if i.pinned else '-', i.preview(1, 100))
+                           for n, i in enumerate(self.items, 1))
+        if cmd == 'quit':
+            GLib.idle_add(Gtk.main_quit)
+            return ''
+        if cmd == 'restart':
+            GLib.idle_add(self.restart)
+            return ''
+        return 'không hiểu lệnh\n'
+
+    def close(self):
+        if self.sock is not None:
+            self.sock.close()
+            try:
+                os.unlink(runtime_path('sock'))
+            except OSError:
+                pass
+            self.sock = None
+
+    def restart(self):
+        """Chạy lại chính mình (sau khi cập nhật): tệp khoá và socket tự nhả khi tiến trình được thay."""
+        self.close()
+        me = os.path.realpath(sys.argv[0])
+        try:
+            os.execv(me, [me, 'start'])
+        except OSError as e:
+            print('depot-clipboard: không chạy lại được: %s' % e, file=sys.stderr)
+            Gtk.main_quit()
+        return False
+
+
+def stop_clipman():
+    """Tắt xfce4-clipman của chính người dùng này trên cùng màn hình X: hai trình giữ lịch sử thì giành nhau."""
+    mine = re.sub(r'\.\d+$', '', os.environ.get('DISPLAY', ''))
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit():
+            continue
+        try:
+            with open('/proc/%s/comm' % pid) as f:
+                if f.read().strip() != 'xfce4-clipman':
+                    continue
+            if os.stat('/proc/%s' % pid).st_uid != os.getuid():
+                continue
+            with open('/proc/%s/environ' % pid, 'rb') as f:
+                env = dict(p.split(b'=', 1) for p in f.read().split(b'\0') if b'=' in p)
+            if re.sub(r'\.\d+$', '', env.get(b'DISPLAY', b'').decode('ascii', 'replace')) != mine:
+                continue
+            os.kill(int(pid), signal.SIGTERM)
+            print('depot-clipboard: đã tắt xfce4-clipman (pid %s) — Bộ nhớ tạm thay việc của nó.' % pid)
+        except (OSError, ValueError):
+            continue
+
+
+def main():
+    if Gdk.Display.get_default() is None:
+        print('depot-clipboard: không mở được màn hình X (biến DISPLAY) — chạy trong phiên đồ hoạ X11.',
+              file=sys.stderr)
+        return 1
+    app = App()
+    if not app.listen():
+        print('depot-clipboard: đã có một bản đang chạy trên màn hình này.')
+        return 0
+    # đợi một nhịp cho thứ đang nằm trong bộ nhớ tạm kịp vào lịch sử: Clipman tắt mà đang giữ nó thì mình đặt lại
+    GLib.timeout_add(700, lambda: stop_clipman() and False)
+    if conf_get('SHORTCUT') != 'asked':
+        conf_set('SHORTCUT', 'asked')            # chỉ thử một lần: người dùng bỏ phím tắt đi thì không gán lại
+        threading.Thread(target=xfce_shortcut, daemon=True).start()
+    for flag, page in (('--show', 'list'), ('--settings', 'settings')):
+        if flag in FLAGS:
+            GLib.idle_add(lambda page=page: app.show(page) and False)
+
+    def update_tick():
+        threading.Thread(target=auto_check, daemon=True).start()
+        return True
+    GLib.timeout_add_seconds(120, lambda: update_tick() and False)
+    GLib.timeout_add_seconds(3600, update_tick)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: Gtk.main_quit() or False)
+    Gtk.main()
+    app.close()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
