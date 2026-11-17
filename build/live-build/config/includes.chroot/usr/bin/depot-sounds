@@ -36,6 +36,11 @@ throttled() {
 }
 play_once() { throttled "$1" || play "$1"; }
 
+# mức âm lượng + trạng thái tắt tiếng của loa đang dùng, gộp một dòng (vd "85%Mute: no"); rỗng nếu chưa có loa
+vol_now() {
+    echo "$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { print $5; exit }')$(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null)"
+}
+
 session() {
     # một phiên chỉ một bộ nghe (XFCE autostart + i3 exec cùng gọi được)
     lock=${XDG_RUNTIME_DIR:-/tmp}/depot-sounds.lock
@@ -69,15 +74,29 @@ session() {
     done &
     cat /sys/class/power_supply/A*/online 2>/dev/null | head -1 > "$(last_file ac)"
     # đổi âm lượng / tắt tiếng (phím, plugin panel, pavucontrol): plugin âm lượng XFCE của Debian không tự kêu.
-    # Sink cũng báo 'change' khi bắt đầu phát nhạc → chỉ kêu khi mức âm lượng hoặc trạng thái tắt tiếng thật sự đổi
+    # Sink cũng báo 'change' khi bắt đầu phát nhạc → chỉ kêu khi mức âm lượng hoặc trạng thái tắt tiếng thật sự đổi.
+    # Kéo thanh trượt sinh hàng chục sự kiện liền nhau → chờ mức đứng yên 0,25 giây rồi kêu MỘT tiếng ở mức mới.
+    # (Trước đây kêu ngay cho từng nấc và chờ phát xong mới đọc sự kiện kế: các tiếng xếp hàng thành một tràng vọng.)
+    # Mỗi sự kiện chỉ ghi số thứ tự rồi thả một tiến trình con ngủ 0,25 giây; con nào thức dậy mà số đã đổi
+    # (có sự kiện mới hơn) thì thôi, nên chỉ con cuối cùng mới đọc mức âm lượng và kêu.
     if command -v pactl >/dev/null 2>&1; then
+        genf=$(last_file volgen); volf=$(last_file vol)
+        vol_now > "$volf"
+        gen=0
         pactl subscribe 2>/dev/null |
         while read -r line; do
             case "$line" in
                 *"'change' on sink #"*)
-                    now=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { print $5; exit }')$(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null)
-                    [ -n "$vol" ] && [ "$now" != "$vol" ] && play audio-volume-change
-                    vol=$now ;;
+                    gen=$((gen + 1)); echo "$gen" > "$genf"
+                    (
+                        sleep 0.25
+                        read -r g < "$genf" 2>/dev/null
+                        [ "$g" = "$gen" ] || exit 0
+                        now=$(vol_now); old=
+                        read -r old < "$volf" 2>/dev/null
+                        echo "$now" > "$volf"
+                        [ -n "$old" ] && [ -n "$now" ] && [ "$now" != "$old" ] && play audio-volume-change
+                    ) & ;;
             esac
         done &
     fi
