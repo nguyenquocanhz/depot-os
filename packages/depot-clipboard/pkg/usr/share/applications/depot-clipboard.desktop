@@ -1,0 +1,28 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Clipboard
+Name[vi]=Bộ nhớ tạm
+GenericName=Clipboard Manager
+GenericName[vi]=Lịch sử sao chép
+Comment=History of what you copied; pick an entry to paste it (Win+V)
+Comment[vi]=Lịch sử những gì đã sao chép; chọn một mục để dán (Win+V)
+Exec=depot-clipboard show
+TryExec=depot-clipboard
+Icon=depot-clipboard
+Terminal=false
+StartupNotify=false
+Categories=Utility;GTK;
+Keywords=clipboard;copy;paste;history;clipman;
+Keywords[vi]=clipboard;sao chép;dán;lịch sử;bộ nhớ tạm;
+Actions=Settings;Clear;
+
+[Desktop Action Settings]
+Name=Settings and updates
+Name[vi]=Cài đặt và cập nhật
+Exec=depot-clipboard settings
+
+[Desktop Action Clear]
+Name=Clear history
+Name[vi]=Xoá lịch sử
+Exec=depot-clipboard clear

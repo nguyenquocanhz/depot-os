@@ -1,0 +1,27 @@
+Package: depot-clipboard
+Version: 1.0.0
+Section: x11
+Priority: optional
+Architecture: all
+Depends: python3, python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-gdkpixbuf-2.0, gir1.2-pango-1.0, libx11-6, libxtst6
+Recommends: fonts-inter, libnotify-bin, pkexec | policykit-1
+Maintainer: nguyenquocanhz <nguyenquocanhz@users.noreply.github.com>
+Homepage: https://github.com/nguyenquocanhz/depot-os
+Description: clipboard history with a Win+V panel, from Depot OS
+ Keeps a history of the text and images you copy. Win+V opens a small panel
+ at the pointer: type to search, pick an entry and it is pasted straight
+ into the window you were working in (terminals get Ctrl+Shift+V). Entries
+ can be pinned so they survive "clear all" and a reboot.
+ .
+ The history lives in memory only, so a password you copied is not left on
+ disk after logout; only pinned entries are saved. Content flagged as secret
+ by a password manager is never recorded. Works on any X11 desktop: XFCE,
+ MATE, Cinnamon, LXQt, i3, Openbox.
+ "depot-clipboard --check-update" asks the GitHub repository for a newer
+ version and "--update" downloads and installs it; the panel has the same
+ two buttons on its settings page.
+ .
+ Bộ nhớ tạm (Clipboard Manager) của Depot OS đóng thành gói riêng: lịch sử
+ chữ và ảnh đã sao chép, Win+V mở bảng ngay chỗ con trỏ, gõ để tìm, chọn mục
+ nào là dán luôn, ghim mục hay dùng, tự kiểm tra và cài bản mới. Trên Depot OS
+ gói này thay bản cũ dùng Clipman; gỡ gói thì bản cũ về lại chỗ cũ.

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Depot OS mang sẵn /usr/bin/depot-clipboard (script sh gọi Clipman của XFCE) mà không thuộc gói nào. Giữ bản đó lại
+# dưới tên depot-clipboard.clipman bằng dpkg-divert: gỡ gói này thì bản cũ về chỗ cũ, Win+V vẫn chạy.
+set -e
+F=/usr/bin/depot-clipboard
+case "$1" in
+    install|upgrade)
+        if [ -e "$F" ] && [ -z "$(dpkg-divert --listpackage "$F")" ] && ! dpkg-query -S "$F" >/dev/null 2>&1; then
+            dpkg-divert --package depot-clipboard --add --rename --divert "$F.clipman" "$F"
+        fi
+        ;;
+esac
+exit 0
